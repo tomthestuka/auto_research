@@ -1,6 +1,6 @@
 """Live: the provenance trail a reported number opens, and the one paged read, against real models.
 
-Opt-in (``AUTO_RESEARCH_LIVE_PROV_HTML_TESTS=1``), real model calls, production wiring throughout:
+Opt-in (``--live``), real model calls, production wiring throughout:
 ``attach_worker_runtime`` (the worker's sandbox, registry, receipt store), the real toolkit
 (``data_catalog`` over the configured obs-db), ``attach_reviewer_runtime`` + ``ReviewerRender``
 with ``html``, ``StatusMonitorAgent`` over a real ledger. Every cell writes its ledger and a record
@@ -26,10 +26,7 @@ from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_PROV_HTML_TESTS") != "1",
-    reason="live provenance/html cells are opt-in: AUTO_RESEARCH_LIVE_PROV_HTML_TESTS=1",
-)
+pytestmark = pytest.mark.live
 
 LOG = "provenance_html"
 

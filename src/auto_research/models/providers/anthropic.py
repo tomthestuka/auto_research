@@ -110,20 +110,28 @@ _LIMITS = MediaLimits(
     # "Claude supports JPEG, PNG, GIF, and WebP images".
     image_mimes=frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"}),
     doc_mimes=frozenset({"application/pdf", "text/plain"}),
-    # "100 per request on the API, for models with a 200k-token context window."
+    # Quotes re-read 2026-11-04. "100 for each request on the API, for models with a 200k-token
+    # context window / 600 for each request on the API, for all other models" (`_limits_for`).
     max_images=100,
     # "If a single API request contains more than 20 images, a stricter per-image dimension limit
-    # applies… resize each image so that neither dimension exceeds 2000 px" — the rule that killed
-    # run 8c75990e, where a 2677x1554 figure rode a request carrying >20 image blocks.
+    # applies … Images exceeding the stricter limit are rejected with an `invalid_request_error`
+    # whose message … states the current limit in pixels. To stay under the limit on all
+    # platforms, either resize each image so that neither dimension exceeds 3,000 px". Held at
+    # 2000, stricter than the page: run 8c75990e was refused for a 2677x1554 figure in a request of
+    # more than 20 image blocks, under 3,000, and the page says the limit in force is the one the
+    # error states.
     strict_block_threshold=20,
     strict_max_edge=2000,
-    # "The maximum dimensions per image are 8000x8000 px."
+    # "The maximum dimensions for each image are 8000x8000 px."
     max_edge=8000,
-    # "10 MB (base64-encoded) when using the Claude API directly."
-    max_image_bytes=10 * 1024 * 1024,
-    # "Maximum request size 32 MB" — the ceiling for the whole payload, PDFs included.
-    max_request_bytes=32 * 1024 * 1024,
-    # "Maximum pages per request 600 (100 when the request's context window is under 1M tokens)".
+    # "10 MB (base64-encoded) on the Claude API and Claude Models on Google Cloud (Google managed)":
+    # compared on the encoded size, as stated, and in decimal megabytes, the stricter reading.
+    max_image_encoded_bytes=10_000_000,
+    # "Maximum request size | 128 MB on the first-party Claude API" (pdf-support; vision: "The
+    # limit is 128 MB on the first-party Claude API") — the ceiling for the whole payload, in
+    # decimal megabytes (the stricter reading; this adapter calls the first-party API).
+    max_request_bytes=128_000_000,
+    # "Maximum pages per request | 600 (100 when the request's context window is under 1M tokens)".
     max_pdf_pages=100,
 )
 
@@ -131,10 +139,10 @@ _LIMITS = MediaLimits(
 def _limits_for(config: RoleModelConfig) -> MediaLimits:
     """The ceilings that depend on the member's window, from its declared ``context_tokens``.
 
-    Images: *"100 per request on the API, for models with a 200k-token context window. 600 per
-    request on the API, for all other models"* (platform.claude.com/docs/en/build-with-claude/
-    vision, "Request limits"). PDF pages: *"600 (100 when the request's context window is under 1M
-    tokens)"* (.../pdf-support). An undeclared window keeps the smaller ceilings.
+    Images: *"100 for each request on the API, for models with a 200k-token context window / 600
+    for each request on the API, for all other models"* (platform.claude.com/docs/en/
+    build-with-claude/vision, "Request limits"). PDF pages: *"600 (100 when the request's context
+    window is under 1M tokens)"* (.../pdf-support). An undeclared window keeps the smaller ceilings.
     """
     from auto_research.observability.costs import context_window_for
 

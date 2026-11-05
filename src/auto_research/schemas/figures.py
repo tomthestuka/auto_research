@@ -24,6 +24,10 @@ class FigureRef(MessageModel):
     created_at: datetime
     sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     thumbnail_b64: str | None = None
+    receipt: str | None = None
+    """The handle of the figure's receipt, when the ref was made from one (``Receipt.to_figure_ref``).
+    Never sent as such: the model-input sanitiser names it in the note that replaces the image for
+    a member that takes none, so a peer can open it with ``view_receipt`` (A3)."""
 
 
 class FigureCitation(MessageModel):

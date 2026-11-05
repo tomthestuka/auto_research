@@ -29,12 +29,17 @@ from auto_research.models.providers._media import MediaLimits
 from auto_research.models.providers._responses import ResponsesProvider, ResponsesVendor
 
 
-# Z.AI documents no media limits for this endpoint, so almost nothing is enforced: an undocumented
-# limit stays unenforced until a doc or a live 400 says otherwise, which is the same rule the other
-# adapters follow. The mime set is the one its vision guides name; every volume field is left at
-# "undocumented" rather than borrowed from another vendor.
+# Z.AI documents image limits on Chat Completions only (docs.z.ai/api-reference/llm/chat-completion,
+# the `image_url` part of the GLM-5.3-Flash series, read 2026-11-04): "Image URL or Base64 encoding.
+# Image size limit is under 5M per image, with pixels not exceeding 6000*6000. ... Supports jpg, png,
+# jpeg formats." This dialect documents none, so those are what is enforced here. "5M" is read in
+# its strictest form, 5,000,000 bytes of the base64 string the image travels as (the text names "URL
+# or Base64"); an image over it is downscaled until it fits. The same text says "GLM-5V are limited
+# to 150 sheets", a model name this lineup does not carry, so no image count is enforced.
 _LIMITS = MediaLimits(
-    image_mimes=frozenset({"image/jpeg", "image/png", "image/webp"}),
+    image_mimes=frozenset({"image/jpeg", "image/png"}),
+    max_edge=6000,
+    max_image_encoded_bytes=5_000_000,
 )
 
 ZAI_VENDOR = ResponsesVendor(
@@ -44,21 +49,32 @@ ZAI_VENDOR = ResponsesVendor(
     # at a different path, `/api/paas/v4`, which this dialect does not use).
     base_url="https://api.z.ai/api/v1",
     key_env="ZAI_API_KEY",
+    # Which GLM takes images is its entry in config/model_capabilities.yaml (Z1d, citations in
+    # config/DOCS.md); docs.z.ai has no Responses API reference, so image input over this dialect is
+    # inferred from Chat Completions and not yet live-probed.
+    # A file part (`file` with `file_id` / `file_url` / `file_data`, pdf among them) is documented on
+    # Chat Completions for the GLM-5.3-Flash series only, and no document part on this dialect, so a
+    # document reaches every Z.AI model as the local parse.
+    accepts_inline_documents=False,
     # Undocumented, so not sent.
     supports_prompt_cache_key=False,
     # Measured: accepted and ignored. See the module docstring.
     supports_strict_schema=False,
     # A structured answer is reachable, just not through `text.format`: the schema rides as a
-    # forced tool call instead. Its Responses endpoint honours a forced tool call: live-verified 2026-08-24 with the
-    # real `ToolReviewVerdict`, which validated on both dialects it publishes. That is the path its
-    # Claude Code and Codex integrations already depend on.
+    # synthetic emit tool offered under `tool_choice="auto"` with a terminal instruction to call it
+    # (`forces_tool_choice=False`, below; since 2026-08-27). The tool route itself was live-checked
+    # on 2026-08-24 with the real `ToolReviewVerdict`, then under a named choice: a valid instance
+    # came back on both dialects it publishes. The `auto` route is what
+    # `tests/test_live_schema_matrix.py` exercises.
     schema_via_tool=True,
-    # **Z.AI ignores a NAMED `tool_choice`.** Its own function-calling guide documents
-    # `tool_choice` as accepting `auto`, `required`, or a named tool
-    # (docs.z.ai/guides/capabilities/function-calling), so this is the same accept-and-ignore
-    # pattern already recorded above for `text.format` — now confirmed at a second parameter.
-    # Measured 2026-08-27, 5 draws of 5 against api.z.ai: pinned to `emit_structured_response` it
-    # called `read_file` every time and never the pinned tool.
+    # **Z.AI documents only `auto` for `tool_choice`** (re-read 2026-11-04): its function-calling
+    # guide says "Controls function calling strategy, default is `auto` (only supports `auto`)"
+    # (docs.z.ai/guides/capabilities/function-calling), and its Chat Completions reference gives the
+    # enum `[auto]`, "The default value is auto, and only auto is supported."
+    # (docs.z.ai/api-reference/llm/chat-completion). A named choice is outside the documented
+    # contract, and it is not honoured either: measured 2026-08-27, 5 draws of 5 against api.z.ai,
+    # pinned to `emit_structured_response` it called `read_file` every time and never the pinned
+    # tool.
     #
     # The community reports the same class with a mechanism: GLM is natively an XML tool-caller,
     # and compelling a named JSON tool breaks the parse (vllm-project/vllm#48095, a GLM-5.2 forced
@@ -66,7 +82,7 @@ ZAI_VENDOR = ResponsesVendor(
     # are self-hosted runtimes rather than this endpoint, but the model behaviour is the vendor's
     # own and the live probe above confirms it reaches the hosted API too.
     #
-    # **`required` is not a safer middle ground:** sgl-project/sglang#13514 reports
+    # **`required` is not a safer middle ground** (and is undocumented here): sgl-project/sglang#13514 reports
     # `tool_choice: "required"` causing unbounded generation on GLM-4.x. So the emit call cannot be
     # compelled here at all, and this vendor takes the same `auto` + terminal-instruction route as
     # Qwen.

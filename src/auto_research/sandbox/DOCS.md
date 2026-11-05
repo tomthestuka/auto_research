@@ -148,8 +148,8 @@ Invariants:
   and is recorded in `import_errors` (`{package: reason}`, logged); `check_toolkit_manifests(root=None)`
   is the launch-time preflight that refuses a toolkit with any (2026-10-27; it was skipped
   silently before).
-- Every `args_schema` property declares a `kind` (`data`, `parameter`, `path`, `setting`) and an
-  optional parameter a `default` (2026-11-03; the input validator, `provenance.inputs`). `load()`
+- Every `args_schema` property declares a `kind` (`data`, `parameter`, `path`, `setting`,
+  `output` with its `shape`, 2026-11-04) and an optional parameter a `default` (2026-11-03; the input validator, `provenance.inputs`). `load()`
   records every tool the validator cannot check in `manifest_errors` (never raises, a malformed
   schema included); `check_toolkit_manifests` refuses them at launch with the run's
   `disabled_tools` applied, and the consensus loop logs them after a reload.
@@ -157,6 +157,9 @@ Invariants:
   `default` taken out and said in the description (`_KIND_NOTES`); `data`, `parameter` and `path`
   left untyped (a reference, a value with its reason under `value`, or text); `references=False`
   for a path taking typed values only (the lead's in-process `data_catalog`, `_TYPED_NOTES`).
+  An `output` argument loses `kind`, `shape` and `default`, leaves `required` (the runtime fills
+  it) and keeps its type; its description says, by shape, that the runtime places it in the
+  call's own folder (`_OUTPUT_NOTES`).
 
 ### `envs.py` — software environments as objects (env plan B1, handoff [F18])
 
@@ -216,9 +219,9 @@ boot file.
 ```python
 read_definition(folder) -> EnvDefinition          # env.yaml read safely (no link/FIFO, size cap, no anchors/aliases); wrong types read as empty
 validate(folder, *, base_envs, externals) -> list[str]   # stages a private copy, checks the copy; reasons as fixes (lines quoted ≤48 chars, YAML errors by line)
-build(defn, *, conda_dir, conda_exe, base_envs, externals, jailed, runner=subprocess.run, timeout_s=3600) -> Environment
+build(defn, *, conda_dir, conda_exe, base_envs, externals, jailed, runner=subprocess.run, timeout_s=3600, on_build=None, package_archive=None, on_restore=None) -> Environment   # on_restore(kept_name): a kept build put back (D3c)
 build_record(conda_dir, prefix) -> dict | None     # {"definition_sha256", "jailed", "name", "activate", "boot", "externals"} after a verified build; a derived one has "base" instead of "jailed"
-built_environments(conda_dir, externals, base_envs=None) -> list[Environment]   # every finished build, latest per name, activation only from activation/; a derived record resolves its base in base_envs (skipped if gone)
+built_environments(conda_dir, externals, base_envs=None, definitions=None) -> list[Environment]   # every finished build, latest per name, activation only from activation/; a derived record resolves its base in base_envs (skipped if gone); `superseded` when its digest is not that of definitions/<id> (or that is gone)
 build_policy(*, conda_exe, staged, target, work) -> JailPolicy   # one build's jail
 forget(conda_dir, name) -> bool                    # drop ar-<name>'s record (definition deleted); the prefix stays
 installed_dists(prefix) -> list[str]               # <lib>/<name>.dist-info of every installed distribution, sorted
@@ -243,11 +246,35 @@ verify(defn, prefix)                               # stages the definition, then
    replace, `O_NOFOLLOW`) names this sha256 — and, for a jailed caller, says `jailed` in a
    `conda_dir` no unjailed build has ever run in (`built/unjailed.json`, sticky) — is verified and
    reused (a reused prefix failing `verify` raises every time: a loud tamper signal). Before a
-   rebuild the old record is deleted first, so an interrupted rebuild is never reused. The sticky
+   rebuild the old record is deleted first, so an interrupted rebuild is never reused. The
+   finished build a rebuild moves aside (`<prefix>.prev-<digest8>-*`, only the latest kept) keeps
+   its record and distribution list under `built/kept/` (never listed); a later build of that very
+   lock verifies it — and that it holds exactly the distributions recorded at its build (a hand
+   change is drift) — and puts it back instead of building (`_swap_back`, D3b: a branch switched
+   back), logged as one `env.restored` line, "restored kept build `<kept>` as `ar-<id>`"
+   (`on_restore`, `merge_flow.restored_summary`; D3c). A rebuild that fails puts the build it
+   replaced and its record back as they were (D1c). Whether a build is **superseded** is derived,
+   never stamped (D3c ruling): `env.env_catalogue` passes the toolkit's `envs/`, and a record
+   whose digest is not its definition's there is listed with `Environment.superseded` (shown by
+   `list_env`); every toolkit call routed into it is flagged `env_untested`, and the commit note
+   and the launch event say "The previous build stays in use; its results are flagged untested
+   env" (`merge_flow.PREVIOUS_IN_USE`). Each launch tries that build once more (a fix or a passing
+   network fault may have cleared it). The sticky
    taint has no automatic reset: delete `built/unjailed.json` by hand once the `conda_dir` is
    trusted again (until then every jailed build re-downloads); anything else at that path is removed (read-only leftovers made
    writable first) and an empty target created;
-4. `conda config --show pkgs_dirs` must be exactly this build's own cache;
+4. `conda config --show pkgs_dirs` must be exactly this build's own cache, then — when the caller
+   passes `package_archive` (every runtime caller: the launch and commit builds, the gate, the
+   coder's candidate builds) — the shared package archive `<agent conda dir>/pkgs-archive/`
+   (D3b, [F30]). conda reads the archive as a read-only cache (bound read-only in the jail) when a
+   file's URL is in its `urls.txt` and its bytes match the lock's md5/sha256, else downloads into
+   the build's own cache (probed on conda 24.9.2, 2026-11-04: a tampered archive file is
+   refetched). After a successful build the runtime, outside the jail and under the archive's own
+   lock, adds each package file the lock names whose bytes match its lock line
+   (`_archive_packages`), so the next build of the same packages downloads nothing; the archive
+   holds package files and `urls.txt` only, never extracted folders. Only a jailed build reads it
+   (unjailed, conda would find it writable and extract into it), and an archive holding any
+   folder is not used;
 5. every command's output goes to `staging/build-*/output.log` (no build binds it), never into
    memory; errors quote its last 400 bytes;
 6. `conda create --yes --quiet --prefix … --file <staged lock>` (explicit: no solver), then
@@ -292,7 +319,7 @@ under the host temp root; no jailed agent binds it (reviewed) — `build` re-sta
 `conda_dir/staging`. The install lock relies on `flock` over NFS (lockd). Agents never run conda. App side:
 `auto_research.env.agent_conda_dir()`, `conda_executable()` (config `conda_exe`, `$CONDA_EXE`,
 PATH). Live-verified 2026-10-06: a conda-exported lock rebuilt exactly, jailed, `~/.conda`
-untouched (`tests/test_env_build.py`, opt-in `AR_LIVE_ENV_BUILD=1`).
+untouched (`tests/test_env_build.py`, opt-in `--live`).
 
 **Solving and pinning (B3c-3).** `solve(specs, *, conda_exe, work, jailed, runner, timeout_s)` →
 `env.lock` text: a conda-forge-only `create --dry-run --json` into a throwaway prefix with an
@@ -327,7 +354,9 @@ unless a package anywhere in the toolkit still names it.
 runs at every launch after preflight (`graph.runtime._reconcile_environments`, on a
 `StoppableRunner`): each definition on the toolkit branch is compared with its build. A missing or
 stale record is built (a commit build that was stopped). A definition that does not validate is
-`failed` and its build left alone. A built prefix that fails `verify`, or whose installed
+`failed` and its build left alone (`previous_in_use` when that build stays in the catalogue,
+`merge_flow.earlier_build_in_use`). A kept build of the current definition put back reads
+`restored` (its name in `restored`; `env.restored`, D3c). A built prefix that fails `verify`, or whose installed
 distributions differ from the baseline recorded at its build (`installed_dists`, sidecar
 `built/<prefix>.dists`; a `pip install` by hand), has drifted: its state's lock (activation
 included) is written to the lock store, the prefix kept as `ar-<id>.drift-<fp8>`, and a fresh build
@@ -337,8 +366,17 @@ and refreshes its record (an activation-only commit whose build was stopped), or
 jail setting no longer admits. A built environment whose declared externals' stamps changed is
 reported and the new stamps recorded (`external_stamps`; an external cannot be rebuilt). With the
 jail on and the unjailed taint present, one `tainted` result says nothing is reused until a human
-removes the marker. Ledger: `env.build`, `env.drift`, `env.external_changed`, `env.build.error`,
-`env.tainted`, `env.reconcile.error`; nothing stops the launch. Derived environments are only
+removes the marker. Ledger: `env.build`, `env.restored`, `env.drift`, `env.external_changed`, `env.build.error`,
+`env.tainted`, `env.reconcile.error`; nothing stops the launch. While it runs the ledger hears
+what it builds (D1/D1b; run polevo-20261104 was silent for 34 min): `merge_flow.run_builds` runs
+the builds in a thread, records `env.build.start` (level 2, with its cause) for each **fresh**
+build — `env_build.build(..., on_build=)` reports why it did not reuse the prefix (`missing`,
+`stale`, `unjailed`, `tainted`, `interrupted`; the reconcile adds `drift`), a reused prefix is not
+announced — and every `BUILD_HEARTBEAT_S` (5 min) `env.build.progress` naming the latest build
+started and the minutes elapsed; a fresh build's result reads `built` with that cause (its entry
+from `build_committed_environments` carries `fresh`, set as the build starts). The build
+after a direct-branch commit (`AuthoringSession._build_environments`) records the same events,
+with the commit's SHA; its note to the lead names a restored environment as restored. Derived environments are only
 recorded (their prefix is the human's), their declared externals stamped like a built one's. A stop
 leaves the remaining environments untouched. Residuals: reconcile checks without the install lock,
 so a run sharing the runtime dir may race its record rewrite; a build from before the dist
@@ -431,7 +469,7 @@ takes minutes). A session whose artifacts dir lies in the toolkit gets no enviro
 removed by `AuthoringSession.aclose` (`cleanup`). The seed lists each package's `env:`, the
 definitions under `envs/`, the human base and declared externals (`merge_flow._environment_context`).
 Live-verified 2026-10-06: solve `python=3.12` → build → plain `python` runs in the candidate
-(`tests/test_env_tools.py`, opt-in `AR_LIVE_ENV_BUILD=1`).
+(`tests/test_env_tools.py`, opt-in `--live`).
 
 ### `PersistentSandbox`
 
@@ -481,7 +519,6 @@ class PersistentSandbox:
 
 ```python
 def create_run_workspace(run_id: str, agent_keys: list[str]) -> dict[str, Path]
-def figures_dir(run_id: str, agent_key: str) -> Path
 def run_dir(run_id: str) -> Path
 def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: int) -> Path
 def report_record_path(agent_dir_path: Path, filename: str) -> Path
@@ -540,6 +577,7 @@ jail never mounts this repository (F20, 2026-10-06). The module is therefore kep
 only. Restricting MCP to read-only filesystem tools is a documented P2 task.
 
 Tools:
+- `private_param_dir() -> (folder | None, PFILES | None)` — a fresh, empty HEASoft user parameter folder inside the process's own user half of `PFILES` (the system half kept), for one call or command (G4); `(None, None)` with no two-part `PFILES`. The one definition: `bash_exec` uses it per command, the REPL's call loop per toolkit call, and the gate's recorder per watched call (a Layer-B test's other HEASoft use keeps the run's private folder, F23).
 - `bash_exec(command, cwd=None, timeout_s=60)` → `{"stdout": str, "stderr": str, "exit_code": int}`
   — run a shell command through the MCP server process. Its tool description scopes it to
   **read-only inspection** (listings, headers, shapes, paths, env probes); real analysis steps and
@@ -609,13 +647,13 @@ stdin/timeout behavior in the local Python environment.
 
 ### Isolation test
 
-`AUTO_RESEARCH_LIVE_SANDBOX_ISOLATION_TESTS=1 pytest tests/test_sandbox_isolation.py -s`
+`pytest tests/test_sandbox_isolation.py --live -s`
 starts two `PersistentSandbox` instances with the configured analyst env, loads
 IXPE obsid `02008401` in the first subprocess, and verifies that
 `xspec_status()` in the second subprocess reports an empty XSPEC session. Logs
 are written under `logs/dev/step-11/`.
 
-`AUTO_RESEARCH_LIVE_SANDBOX_POLICY_TESTS=1 pytest tests/test_live_sandbox_policy.py -s`
+`pytest tests/test_live_sandbox_policy.py --live -s`
 starts two configured analyst subprocesses in the live HEASoft/PyXSPEC
 environment and verifies both boot with `Fit.query == "no"` and
 `Xset.allowPrompting is False`.
@@ -826,7 +864,7 @@ before any model is constructed: `check_coder_harness_supported` (the pair exist
 names its endpoint, the key variable is set) and `check_coder_harness_available` (the harness's CLI
 resolves — asked of each SDK rather than probed on `PATH`).
 
-**Live coverage is a matrix over the legs** (`tests/test_live_coder_matrix.py`, env-gated). One warm
+**Live coverage is a matrix over the legs** (`tests/test_live_coder_matrix.py`, opt-in `--live`). One warm
 session per `(vendor, harness)` pair is walked through every stimulus the flow can send — the seed
 brief, a gate rejection, a co-lead rejection, a free-text lead instruction, a governance-file read,
 a git attempt, a `message` to the lead, and a lengthening trajectory — in the order a real attempt
@@ -916,7 +954,8 @@ numeric arrays — XSPEC param vectors, energy bins):
   "nothing to flag in that category" (never a crash).
 
 All scan lists live in **`config/code_gate.yaml`** (tunable without a code edit). A line
-referencing a marked `synth…` ObsID is allowlisted so §9.5 fixtures stay legal.
+referencing a marked `synth…` ObsID is allowlisted under a package's `tests/` only, so §9.5 fixtures
+stay legal while one written into a tool's code is scanned.
 `GateReport.passed ⇔ all Layer-A hard checks pass ∧ ≥1 Layer-B test ran ∧ all pass`
 (an untested tool is never mergeable). `report_hash` seeds the §9.9 commit message.
 Provenance (`provenance.figure_shape`, Layer A, `scan_figure_shape`): every figure dict a tool returns
@@ -935,26 +974,81 @@ with an injected Layer-B runner — no live science stack).
 During the gate's Layer-B pytest run a recorder plugin (`-p ar_returns`, written into the JUnit temp
 dir, loaded in both runs) wraps every **new or changed** `TOOL_MANIFEST` tool (new = a key absent from
 HEAD's manifest; changed = its function body holds an added line; legacy tools are not judged). Per
-call it records the REPL payload, stats before/after for every argument-named path, files written
-during the call (a Python `open` audit hook) and copies of them. The gate process judges each record
+call it records the REPL payload, stats for every argument-named path and every declared figure
+and product, files written during the call (a Python `open` audit hook) and copies of them. The gate process judges each record
 with the runtime's own functions, as Layer-B checks:
 - `layer_b.returns.transmit` — `persistent.repl_payload` + `json.dumps`;
 - `.figure` — `runner.parse_tool_figures` + the file exists;
-- `.receipted` — every written file is one `capture.data_products` receipts;
-- `.table` — every receipted `.csv`/`.tsv` parses with `render.parse_delimited`;
-- `.number` — every number in non-protocol keys appears in the result text or a receipted file
+- `.receipted` — every declared product survives `capture.parse_products` and its file exists (a
+  file the call writes and does not declare is its scratch, never judged: user ruling 2026-11-04);
+- `.table` — every declared `.csv`/`.tsv` parses with `render.parse_delimited`;
+- `.number` — every number in non-protocol keys appears in the result text or a declared product
   (`bindings.ungrounded_numbers`);
+- `.placed` (opt-in, B3) — every declared product and figure lies inside one of the call's output
+  arguments (each `output` argument's folder, a file's or prefix's own folder; a legacy figure name
+  counts as a file): the recorder runs the runtime's own decision, `capture.admit_artifacts` (with
+  `_product_problem`, assembled from source), in the test process, so placement, links,
+  de-duplication and the cap are judged by the code that mints (E1g); a file inside an output that
+  the call returns under another key is declared. The recorder takes each placed argument's value,
+  defaults applied, from `manifest_placed` (the manifest literal);
+- `.obsdb` (opt-out, B3) — an obs-db is the nearest folder at or above a path that holds
+  `catalog.json` or is named after a mission the toolkit knows (`obsdb_catalog._domain._SCANNERS`
+  and `TREES`, and `heasarc_utils.lib.heasarc.MISSIONS`'s keys read from its source as data; never
+  one of the call's output folders). Every writable obs-db the call's arguments name is walked and
+  health-checked before and after the call, so a write from a subprocess, a rename into place or a
+  write through a link is seen; one only an audited `open` reaches is judged by that write. Each
+  file the call created or changed that still exists must be a path the catalog records after the
+  call, or sit in a folder whose catalog entry the call recorded (det2/det3 beside a recorded det1);
+  `catalog.json` itself is written only by `obsdb_catalog.neutral` (a write-open of it fails);
+  `healthcheck` passes after the call, `regressed` accepted (a re-acquire's designed state), and
+  for a mission with no scanner it checks the catalogued files only (unhealthy before the call: the
+  fixture is named as the fault). The gate's test run also binds `gate_readonly_roots`
+  (`orchestration.yaml`) read-only, the real observation data the toolkit's tests read; the
+  workers' allow-list never holds them. A call that raises is
+  judged too. An in-place change to a recorded file passes with no new record (ruling Q2: the
+  `XFLT0001` tag, also through a temp-then-rename). The catalog writer's own files (catalog, lock,
+  history, temp) are not judged.
+  The real obs-db is read-only to Layer B, so an opt-out tool's tests build a fixture obs-db under
+  `tmp_path/<MISSION>/`, seeded through `obsdb_catalog.neutral`, and pass it as the obs-db path;
+  a write into the real one fails as a read-only file system. `.placed` also fails an output folder
+  that holds the obs-db, and an obs-db item declared under `products`/`figures`; a returned path
+  that is the call's own input, or an obs-db item, is not taken as an undeclared product. Limits: a
+  file left in a folder whose entry the call recorded passes unrecorded (a cache beside a
+  re-recorded event file); a science artifact recorded in the catalog passes (Q1 stays the
+  co-lead's judgement). The recorder imports `obsdb_catalog` from the branch under test, which
+  cannot change it: `structural.changes_allowed` refuses any change outside a `*_utils` package,
+  `obsdb_catalog/` included, so the check a changeset is judged by is the committed one; a fixture past 20000
+  files is judged by its audited writes only;
+- `.unclassified` (E1h, user rule 2026-11-04) — every file a call writes (Python writes seen by the
+  audit hook, plus a before/after walk of each output folder and each named obs-db) that exists
+  after the call is in exactly one class, else the tool is rejected: **output** — inside an output
+  folder, and declared (an undeclared one fails `.placed`); **obs-db** — inside an obs-db (`.obsdb`
+  judges it, checked first, wherever the fixture sits); **scratch**
+  — anything under a `__pycache__` (bytecode, JIT caches), the jail home's caches (`~/.cache`,
+  `~/.astropy`, `~/.xspec`, `~/.matplotlib`, `~/.config/{matplotlib,astropy}`, `~/pfiles`,
+  `$PFILES`'s writable part, `$MPLCONFIGDIR`, `$XDG_CACHE_HOME`, `$PYTHONPYCACHEPREFIX`),
+  `/dev/shm`, and the temp area (`tempfile.gettempdir()`) outside pytest's `--basetemp` (the
+  tests' `tmp_path`) and outside the tree under test (pytest's cwd). The scratch roots are read
+  once from the gate's environment at configure time, and any that would hold `tmp_path`, the tree
+  or the home is dropped, so a test or tool setting a variable widens nothing. Anything else — in
+  `tmp_path` outside an output folder or fixture obs-db, in the toolkit tree, in the home outside
+  its caches, at a `path` argument's value (named apart and told to become an `output`) — fails. A
+  link the call makes is staging and is not judged; a file changed through a link in a walked
+  folder (its target's mtime after the call started) is judged at the target. Each output folder and the running test's `tmp_path` are walked before and
+  after the call (cap 5000 files; past it only Python writes are judged there, noted as
+  `finding.returns_unwalked`), so a subprocess's, a thread's or a rename's file there is seen; a
+  file the call also returns undeclared is named once. A raised call is judged too. Limit: a
+  subprocess or C-code write outside the walked folders is not seen;
 - `.recorder` — the plugin never loaded, or a watched tool failed to import.
 
 A watched tool no test calls is `finding.returns_unobserved` (for the co-lead), not a failure.
-Housekeeping files are not judged as writes: `__pycache__`/`.pyc`, cache dirs, `*.lock` (the
-obs-db catalog writer opens a zero-byte `catalog.json.lock` only to hold an flock) and
-`/.catalog_history/` (the backup snapshot that writer copies on every update). The
+Undeclared writes are not judged at all (the housekeeping list that exempted caches, locks and
+catalog backups went with the rule that judged them, 2026-11-04). The
 recorder is assembled from runtime source via `inspect.getsource` (`repl_payload`,
 `normalize_tool_raw`, `_named_paths`, `call_started_ns`), so gate and runtime cannot drift. Limits:
 only what the tests call; C-level writes (cfitsio/XSPEC) are invisible; it shares a process with the
-coder's tests. Public: `recorder_source`, `install`, `judge`, `judge_record`, `watched_tools`,
-`manifest_entries`.
+coder's tests. Public: `recorder_source`, `install`, `judge`, `judge_record`, `watched_tools` (now `{key:
+(module, fn, placed)}`), `manifest_entries`, `manifest_placed(source) -> {key: {argument: shape}}`.
 
 ### `review.make_review_hook` (Phase 2 step 4 — provider-decorrelated co-lead review)
 
@@ -1031,7 +1125,8 @@ the hook mapping a fake-model verdict — no live LLM).
     description ends with `REF_NOTE` (how a value arrives: a reference to one's own result, or a
     typed parameter with its reason), and its schema is `provider_schema(args_schema)`.
   - `.manifest_errors` → `list[str]` — why loaded tools cannot be validated (`provenance.inputs.manifest_problems`).
-- `provider_schema(schema, *, references=True)` → `dict`; `REF_NOTE`, `_KIND_NOTES`, `_TYPED_NOTES`.
+- `provider_schema(schema, *, references=True)` → `dict`; `REF_NOTE`, `_KIND_NOTES`, `_TYPED_NOTES`,
+  `_OUTPUT_NOTES` (by output shape).
 - `gate.check_structural` check (d) `structural.argument_kinds` — every tool in a touched package
   declares its kinds (`_manifest_literal`: the `TOOL_MANIFEST` literal read as data, no code run;
   a manifest that is not a pure literal fails). Accepted limit: a manifest changed after its
@@ -1055,12 +1150,12 @@ the hook mapping a fake-model verdict — no live LLM).
   - `.shutdown()` — graceful stop.
   - `.is_alive` → `bool` — True while the current subprocess is running.
 - `create_run_workspace(run_id, agent_keys)` → `dict[str, Path]` — create workspace folders.
-- `figures_dir(run_id, agent_key)` → `Path` — path to agent's `figures/` dir.
 - `run_dir(run_id)` → `Path` — path to run's root dir.
 - `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None, analyze_ini_sh=None)` →
   `ToolResult` — one-shot subprocess; kept for ad-hoc use. Keeps the valid figures and appends drop
   notes to `stderr`.
-- `normalize_tool_raw(raw)`, `PROTOCOL_KEYS`, `tool_text(raw) -> (text, exit_code)` (runner.py) — the
+- `runner.builtin_function_source(name) -> str` — one function's source from `builtin_server.py`, read with `ast` without importing the server (G4).
+- `normalize_tool_raw(raw)`, `PROTOCOL_KEYS` (with `products`, 2026-11-04), `tool_text(raw) -> (text, exit_code)` (runner.py) — the
   result-text rule shared by runtime and gate (moved from agents/react.py).
 - `repl_payload(result)` (persistent.py) — defined once and spliced into the REPL; a return
   `json.dumps` cannot serialise fails that one call with exit 1 and a stderr naming the fix.
@@ -1104,17 +1199,37 @@ the hook mapping a fake-model verdict — no live LLM).
   `run_review_step`/`commit`. Behaviour is byte-identical to the pre-refactor inline loop.
 - `AuthoringSession` — a live authoring session over one `ToolSpec`: a connected Sonnet
   (Claude-SDK) coder on a toolkit branch, with the gate and co-lead review exposed as
-  **discrete, separately-callable steps** so a caller can drive them à la carte. Methods:
+  **discrete, separately-callable steps** so a caller can drive them à la carte. **Bound to a
+  brief (C3):** the lead's chain driver sets `brief` (a `BriefReport` of the lead's turn) before
+  `connect`; `tool_spec` (a property; settable for a session without one) then reads the brief's
+  current version. The coder reads it at its seed and before each turn — `start_drive` records
+  the version its instruction was composed with, and a revision since the coder's last read leads
+  the turn as a unified diff (`_coder_instruction`); the gate and the co-lead read it at each
+  submission; each read is in `spec_reads` (by, sha256) and the ledger (`coder.toolspec.read`).
+  `reviewed_spec_sha` is the version the latest review read; `commit` refuses a brief changed
+  since ("the brief changed after the co-lead reviewed it; submit again") and locks it
+  (`brief.lock("commit")`). Without a brief (`drive_authoring`, `propose_and_pr`, the benchmarks)
+  every message and spec is as before. Methods:
   `initial_message` (property — the ToolSpec-brief seed turn), `connect()`, `drive(message)`
   (one warm-session coder turn → response text; L0 self-correction inside), `run_gate_step()` →
   `GateReport` (applies the §9.9 commit-backstop, then the deterministic gate — mechanical, only
   *satisfiable*), `run_review_step(gate)` → `ToolReviewVerdict` (the provider-decorrelated
-  co-lead — *debatable*), `commit(message)` → sha (the only commit path; records `last_commit_sha` and
-  advances the per-attempt base ref, in memory and on disk), `pending_changes()` → bool
+  co-lead — *debatable*), `commit(message)` → sha (the only commit path; records `last_commit_sha`, appends to
+  `commits` — every SHA the session landed, oldest first — and advances the per-attempt base ref,
+  in memory and on disk), `pending_changes()` → bool
   (whether the tree holds unlanded work — False right after a commit, True again on the next
   edit; `execute_submit` reads it so a no-op submit is answered, never executed),
   `aclose()` (disconnect + §9.9 direct-branch tree reset of any **unbanked** work, gated on
-  `pending_changes()` rather than on `committed` — see the 2026-09-09 F1 entry). `propose_and_pr` drives
+  `pending_changes()` rather than on `committed` — see the 2026-09-09 F1 entry; the saved patch's
+  path is kept on `reset_patch`, None when nothing was saved, and `reset_failed` is True when
+  that reset failed, so the tree may still hold the work, and `reset_save_failed` when the tree
+  was reset but its patch could not be saved; a coder disconnect that raises is recorded as
+  `coder.disconnect.error` and raised only after the tree is reset, leaving the session open so
+  a later `aclose` (the run's teardown) retries the disconnect and nothing else: a second reset
+  to this session's base ref would roll the shared branch back past later links' commits).
+  `CodexBackend.disconnect` drops its app-server client only once it closed, so that retry
+  closes it again. A failed patch save before a reset that worked is recorded as
+  `coder.tree_reset` with `save_error`, never as `coder.tree_reset.error`. `propose_and_pr` drives
   these in the auto-loop; the analyst lead's authoring ReAct tools drive the *same* primitives
   directly (so the lead diagnoses each verdict rather than the run terminating).
   **The lead<->coder channel** (the lead's `message` to `coder` / `wait_for_reply` / `submit_for_review`):
@@ -1155,14 +1270,29 @@ the hook mapping a fake-model verdict — no live LLM).
   can't leak), commits with `message` on the branch the worktree is already on, and returns
   the new commit sha (`git rev-parse HEAD`). Pure git mechanics — it does not re-assert
   gate-/review-pass (the pipeline guarantees it). The runtime never merges/touches master.
-- `_reset_direct_tree(toolkit_root, *, artifact_dir, monitor=None, tool_spec=None)` (async) —
-  the failure-path counterpart to `approve_edit`. Called from `propose_and_pr`'s `finally` on a
-  **non-committed** direct-branch exit: saves the discarded attempt's full diff (tracked edits
-  + new untracked content, via `git add -A` → `git diff --cached HEAD`) to a
-  `tool_author_failed_*.patch` under `artifact_dir` when that dir is outside `toolkit_root`,
-  then resets the live checkout with `git reset --hard HEAD` + `git clean -fd` (no `-x`:
-  gitignored caches don't trip the dirty check). Best-effort — any git failure is emitted as
-  `coder.tree_reset.error` and swallowed so cleanup never masks the caller's result.
+- `_reset_direct_tree(toolkit_root, *, base_ref=None, artifact_dir, monitor=None, tool_spec=None)`
+  (async) — the failure-path counterpart to `approve_edit`. Called from `AuthoringSession.aclose`
+  when the direct-branch tree holds **unbanked** work: saves the attempt's full diff against
+  `base_ref` (tracked edits, new untracked content and any coder commit, via `git add -A` →
+  `git diff --cached <base_ref>`) to a `tool_author_failed_*.patch` under `artifact_dir` when that
+  dir is outside `toolkit_root`, then resets the live checkout to `base_ref` (`HEAD` when unset)
+  with `git reset --hard` + `git clean -ffd` (no `-x`: gitignored caches don't trip the dirty
+  check). Returns a `TreeReset(patch, cleared, save_error=None)`: the patch path (None when
+  nothing was saved, or the save itself failed), whether the reset ran without error (`cleared`
+  is False only for `TreeResetFailed`: a failed save is followed by a reset that still runs), and
+  the save's error when saving the patch failed; a reset that fails after the patch was written
+  still returns the patch, carried by `TreeResetFailed` out of `_save_diff_and_reset`, which names
+  a patch only once it is written. Best-effort — any git failure is emitted as
+  `coder.tree_reset.error` (with the patch) and swallowed so cleanup never masks the caller's
+  result. `heal_toolkit_branch_if_dirty` keeps a `TreeResetFailed`'s patch on its
+  `BranchHealResult.patch_path` (reason `error: …`, `base_ref` kept); a failed save before a
+  reset that worked (`PatchSaveFailed`, raised by `_save_diff_and_reset` once its reset ran) is
+  a heal: `healed=True`, reason `healed`, `base_ref`, no patch, and `BranchHealResult.note`
+  saying the patch could not be saved (recorded on `run.resume.heal`). In `_reset_direct_tree`
+  only `PatchSaveFailed` counts as "cleared, patch missing"; any other error counts as a failed
+  reset, the tree's state being unknown.
+- `TreeResetFailed(message, *, patch)` — raised by `_save_diff_and_reset` when the reset itself
+  (`reset --hard`, `clean`, the last bytecode purge) fails; `patch` is the patch already saved.
 - `check_toolkit_git_identity()` — launch-time preflight (no LLM): asserts the
   `toolkit_root` checkout (`config/orchestration.yaml`) has both `user.name` and `user.email`
   set, so the runtime's atomic commit can't fail mid-flow on a missing ambient git identity.
@@ -1186,12 +1316,36 @@ the hook mapping a fake-model verdict — no live LLM).
   `config/code_gate.yaml`. When no `test_runner` is injected, the default is the real
   `_default_test_runner` with the per-package timeout bound via `partial` (so an injected
   runner keeps its `(worktree, test_paths)` signature).
-- `gate._default_test_runner(worktree, test_paths, *, timeout_s=900)` → `dict` — the real
+- `gate._default_test_runner(worktree, test_paths, *, timeout_s=900, returns_tools=None, masked=None,
+  environment=None, regression=())` → `dict` — the real
   Layer-B runner: runs pytest twice with the analyst interpreter (`--junitxml` to a throwaway
   temp dir), `timeout_s` per invocation. Returns `{results, deterministic, determinism_detail}`;
   `results` carries the `layer_b.pytest` `CheckResult` (`passed ⇔ rc1==0 ∧ ≥1 PASSED`, via
   `_layer_b_verdict`), determinism from the
-  two per-test outcome maps.
+  two per-test outcome maps. `regression=` (paths, from `_run_layer_b`) adds one run of the
+  toolkit's earlier fast tests, one pytest call per package folder (`-m FAST_TESTS`, the changed
+  test files `--ignore`d; per package because two packages' test files may share a name), each
+  under `timeout_s`: any test not PASSED/SKIPPED fails `layer_b.regression`, whose detail reads
+  "an earlier test that fails with this change: <id>" with what it returned (`_junit_failures`:
+  assertion, traceback and captured output, the call run with `-o junit_logging=all`), the first
+  `_REGRESSION_SHOWN` (10) texts sharing the output cap, the next 20 named, the rest counted; a
+  call past `timeout_s`, or ending with a nonzero exit and no failing test, is reported with its
+  pytest output (same share); a package stopped at a collection error says its other tests ran no
+  further. Residual: a package-level pytest ini file would become that call's rootdir (the main
+  run has the same exposure; none exists today). The return recorder judges the watched calls this run makes when a test reached
+  its call (PASSED/FAILED; the recorder loads there), listing only failures the main run did
+  not. It is outside the determinism compare. With no changed tests only the regression run
+  happens. An environment group holding only earlier tests whose build fails reports
+  `layer_b.env.<id>` naming those tests.
+- `gate.FAST_TESTS` — `"not slow and not live"`: the toolkit's fast tests as a pytest `-m`
+  expression; the one place on our side naming the toolkit's `slow`/`live` markers.
+- `gate._junit_failures(junit_path)` → `dict[str, str]` — `{test_id: message, report text, captured
+  output}` for each failed or erroring test of a JUnit report (a test reported twice keeps both);
+  `{}` when absent or unparseable.
+- `gate._bounded_text(text, cap)` → `str` — head two thirds and tail third with an elision marker
+  (`_bounded_pytest_output` is it at the configured cap).
+- `gate._earlier_tests(export)` → `list[str]` — every `<pkg>_utils/tests` folder of the judged
+  export; `_run_layer_b` groups them by the environment each package names.
 - `gate._parse_junit_outcomes(junit_path)` → `dict[str,str]` — pure: parse a JUnit XML report
   into `{"<classname>::<name>": PASSED/FAILED/ERROR/SKIPPED}` (read from each `<testcase>`'s
   child element). Returns `{}` on an absent/unparseable report.
@@ -1332,7 +1486,10 @@ the hook mapping a fake-model verdict — no live LLM).
   builds the escalation endpoint; for Claude it builds the SDK options and wraps the client.
 - `review.make_review_hook(colead=None, *, author_provider, web_source=None, monitor=None,
   allow_correlated=False)` → the default `run_review` hook (§9.3 step 4); the
-  provider-decorrelated co-lead review. `allow_correlated` is measurement-only (above).
+  provider-decorrelated co-lead review. `allow_correlated` is measurement-only (above). A fault
+  in setting the review up (choosing the co-lead, building its tools) raises `ReviewSetupError`.
+  - `review.ReviewSetupError(RuntimeError)` — a configuration fault of the co-lead review's set-up,
+    named as such (C3c); the lead's `submit_for_review` raises it on, ending the run.
   - `review.select_decorrelated_member(group, author_provider)` → `ModelHandle` — picks the
     `analyst_colead` member with `provider != author_provider`; raises if none exists.
   - `review.build_diff_bundle(worktree)` → `str` — new files in full + modified files as
@@ -1457,4 +1614,102 @@ detail in git history.
   reference; a default on any kind is said; preflight honours `disabled_tools`; tests for the
   reload event and the lead's definition. Accepted: manifest mutation after the literal (see the
   gate entry); an untyped parameter on Gemini is unprobed (Google is not an active seat).
-
+- 2026-11-04 — `provider_schema` describes an `output` argument (plan item B1) by its shape as placed
+  by the runtime in the call's own folder (`_OUTPUT_NOTES`), drops its `shape` key and takes it out
+  of `required`.
+- 2026-11-04 — C2: `AuthoringSession.commits` (every SHA the session landed) and
+  `AuthoringSession.reset_patch` (the patch `aclose`'s reset saved), read by the lead's
+  budget-spent message; `_reset_direct_tree` returns the patch path (its entry above corrected:
+  called from `aclose`, resets to the per-attempt base ref).
+- 2026-11-04 — B2: `PROTOCOL_KEYS` gains `products`; the gate's return check judges declared
+  products (`capture.parse_products`): `.receipted` fails a malformed or absent one, `.table` and
+  `.number` read declared files; an undeclared write is scratch, so the "wrote but not receipted"
+  failure and the housekeeping list are gone. The B1 ruling: `provider_schema` names an output's
+  manifest default file in its description.
+- 2026-11-04 — C2b: `_reset_direct_tree` returns `(patch, cleared)`; `_save_diff_and_reset` raises
+  `TreeResetFailed` (carrying the saved patch) when the reset itself fails;
+  `AuthoringSession.reset_failed` records it for the lead's budget-spent message. `aclose` holds a
+  raising coder disconnect until the tree is reset (before, the reset was skipped).
+- 2026-11-04 — Review of B2: the recorder copies only declared figures and products (a scratch file
+  spends none of `COPY_CAP`), keys a product's path stripped as `parse_products` reads it; the
+  `.number` refusal names `products` as where a value may stand.
+- 2026-11-04 — C2c: `TreeReset` (the reset's patch, `cleared`, `save_error`) replaces the
+  `(patch, cleared)` pair; `AuthoringSession.reset_save_failed`; a failed disconnect leaves the
+  session open so a later `aclose` retries it; `heal_toolkit_branch_if_dirty` keeps a failed
+  reset's patch.
+- 2026-11-04 — C2c review: a retried `aclose` disconnects only (it had reset the shared branch to
+  the old base ref, dropping a later link's commit); `CodexBackend.disconnect` keeps the client
+  until it closed; a failed patch save is `coder.tree_reset` with `save_error`.
+- 2026-11-04 — B3, the gate's class checks: `returns.py` `.placed` (opt-in: products and figures
+  inside the call's output arguments, returned files declared, the cap) and `.obsdb` (opt-out:
+  obs-db writes recorded through `obsdb_catalog`, `healthcheck` passes; Q2 in-place tags pass);
+  `manifest_placed`; `watched_tools` carries each tool's placed arguments to the recorder.
+  `workspace.figures_dir` removed (unused since figures land in the call's own folder). Tests:
+  `test_gate_returns.py` seeded defects (product and figure outside the output, an undeclared
+  returned product, an obs-db write with no record, a catalog left unhealthy) and clean opt-in,
+  opt-out and Q2 tools.
+- 2026-11-04 — C2d: `PatchSaveFailed` (a failed save before a reset that worked);
+  `BranchHealResult.note`; the heal reports such a tree as healed, and keeps `base_ref` on an
+  error result.
+- 2026-11-04 — Stateless review of B3 (15 findings): fixed — obs-db roots from the call's arguments,
+  walked and health-checked before and after the call (a subprocess write, a rename into place, a
+  write through a link are seen); only files that still exist are judged (temp files, astropy's
+  temp-then-rename for the Q2 tag); a call-recorded exemption only for folders whose entry the call
+  recorded; a hand-written `catalog.json` fails; a fixture not named after its mission fails; a
+  raised call is judged; output folders are never obs-dbs, an output folder holding the obs-db
+  fails, an obs-db item declared as a product fails, echoed inputs are not undeclared products;
+  clearer messages (a test that leaves an output unset; figures for images); the cap counts distinct
+  minted products. Tests for each (`test_gate_returns.py`); live attack cells `product_outside_output`
+  and `obsdb_unrecorded` added to `tests/test_live_figure_shape_attack.py` (not run).
+- 2026-11-04 — C3: `AuthoringSession` bound to a brief report (`brief`, `tool_spec` property,
+  `spec_reads`, `reviewed_spec_sha`, `_coder_instruction`, `_brief_version`, `_brief_read`); the
+  commit refuses a brief changed after review and locks it.
+- 2026-11-04 — The `.obsdb` recorder importing `obsdb_catalog` from the branch is no residual (ruling): `structural.changes_allowed` refuses any change under `obsdb_catalog/`, so the check is the committed one.
+- 2026-11-04 — `_KIND_NOTES["path"]`: a reference names a file a tool of yours *returned* (only a declared product has a handle, B2).
+- 2026-11-04 — D1: `build_committed_environments(..., on_start=)` and `reconcile_environments(..., on_start=)` call back as each build begins; the launch records `env.build.start` and a periodic `env.build.progress`. Test: `tests/test_env_reconcile_progress.py`.
+- 2026-11-04 — D1b: `env_build.build(..., on_build=)` reports a fresh build and its reason; a rebuild the reconcile read as intact now reads `built` with that cause; `merge_flow.run_builds` (start + heartbeat, `BUILD_HEARTBEAT_S` = 5 min) serves the launch reconcile and the commit-time build. Tests: `tests/test_env_build.py`, `tests/test_env_reconcile_progress.py`.
+- 2026-11-04 — `structural.argument_kinds`'s refusal names the `output` kind and its shapes.
+- 2026-11-04 — C3c: `review.ReviewSetupError(RuntimeError)` — the co-lead review's set-up (choosing the co-lead:
+  `resolve`, `select_decorrelated_member`, an injected co-lead sharing the author's provider;
+  building its tools: `WebSource()`) raises as a configuration fault named as such, ending the
+  run (under `propose_and_pr` it is a failed `MergeFlowResult`, as every exception there is),
+  instead of reading as an unreadable changeset; `build_diff_bundle` stays outside, so an
+  unreadable tree keeps its label.
+- 2026-11-04 — `.obsdb`'s refusal states the Q1 rule; `config/code_gate.yaml` `allowlist_obsid_tokens` adds `synth_[A-Za-z0-9_]+` (a marked synthetic data set's folder).
+- 2026-11-04 — D1c: a rebuild that fails over a working build (`env_build.build`, the prefix it moved aside) puts that build and its record back, so the environment stays in the catalogue, as the drift path does; the half-written prefix is removed. Tests: `tests/test_env_build.py`.
+- 2026-11-04 — `AuthoringSession.colead_refunds` is initialised in `__init__` (C3c's cap, C4 batch).
+- 2026-11-04 — D3b ([F30]): the shared package archive (`env_build.PACKAGE_ARCHIVE`, `package_archive=`, `_archive_packages`, read-only in the jail); a kept build of the same lock put back (`_swap_back`, kept records under `built/kept/`); a failed rebuild over another definition's build keeps it marked `superseded_by` → `Environment.superseded` → `env_untested`, with `PREVIOUS_IN_USE` in the commit note and the launch event. Tests: `tests/test_package_archive.py`.
+- 2026-11-04 — D3b review: a build of the current definition drops any `superseded_by` (reuse, swap-back, restore); a kept build keeps its `.dists` and is put back only when it still holds them; `_swap_back` removes the current record before the renames; only jailed builds read the archive, and never one holding a folder.
+- 2026-11-04 — D3c: `superseded` is derived in `built_environments(definitions=)` from the record's
+  digest against the definition on the branch (`env_catalogue` passes the toolkit's `envs/`); the
+  `superseded_by` stamp is gone (a restore writes the record back as it was; `previous_in_use`
+  compares the digests). A kept build put back is one `env.restored` event (`build(on_restore=)`,
+  `_swap_back` returns the kept name, reconcile status `restored`, `merge_flow.restored_summary`);
+  `envs.describe` and `list_env` show `superseded`. A failing build is retried once per launch, as
+  before. Tests: `tests/test_package_archive.py`.
+- 2026-11-04 — D3c review: `merge_flow.earlier_build_in_use` (one predicate for `previous_in_use`;
+  a definition that does not validate at launch now says it too); the commit note names a restored
+  environment as restored; a drift rebuild that puts a kept build back says so. Tests in
+  `tests/test_package_archive.py` (commit-time restore, invalid definition, deleted definition).
+- 2026-11-04 — S1: `merge_flow` seed text says real validation ObsIDs are read-only to the gate and a synthetic one is a marked ObsID the tests build in their fixture obs-db; `config/code_gate.yaml`'s `synth_[A-Za-z0-9_]+` token withdrawn (the artifact route it served is gone); `test_gate_returns` shows a reduction on a fixture `synth<YYMMDD>-<hex>` ObsID passes `.obsdb` and an unrecorded write there fails.
+- 2026-11-04 — E1g: `.placed` takes placement, links, de-duplication and the cap from `capture.admit_artifacts` run in the recorder (assembled by `inspect.getsource` with `_product_problem`), not a mirror; the gate keeps only what the runtime cannot see (an obs-db item declared, an output folder holding the obs-db, an output left unset, a returned file undeclared). A product that is also a figure now fails, as the runtime drops it. The ObsID exemption (`allowlist_obsid_tokens`) holds only under a package's `tests/` (`_obsid_exempt`): a synthetic ObsID in `lib/` or `skills/` is scanned like any line (user ruling 2026-11-04).
+- 2026-11-04 — Review of E1g: the recorder reads products by `parse_products` itself and figures by `FigureRef`'s keys (its value checks need pydantic; a figure they drop also fails `.figure`), anchors each output folder where it resolved before the call (`_product_problem(anchor=)`), and leaves a tool with no output folder to the judge's own message; notes name the coder's action per case (a duplicate, the cap, placement with every output argument listed); the ObsID exemption is `<package>/tests/` exactly. Tests: a bare `python -I -S` run of the assembled recorder, a linked test folder, the duplicate's reason, a tool with no output argument.
+- 2026-11-04 — E1h (user rule): `layer_b.returns.unclassified` and the output-folder declaration rule: the recorder classifies every file a call writes (`_classes`: output, obs-db, asked for, scratch, other), walking each output folder before and after the call; an undeclared file in an output folder fails `.placed`, any other unclassified write fails `.unclassified`. Scratch is defined above. Seeded defects and clean cases in `test_gate_returns.py`; agent T's gate simulation (`xspec_utils` on the working tree) passes; live cell `write_outside_the_classes`.
+- 2026-11-04 — Review of E1h (10 findings): scratch roots read once at configure time and never holding `tmp_path`/tree/home; "asked for" = `path`-kind arguments only (`manifest_paths`, `watched_tools` now `(module, fn, placed, paths)`; a caller with no kinds keeps every non-output argument) and never in the tree; obs-db checked before outputs; `__pycache__/*` and `/dev/shm` scratch; the running test's `tmp_path` walked before and after each call; the walk cap noted, never failing open; one message per file. Accepted residual: a `.pyc` written into the tree passes (the export is never committed). Tests: seeded `MPLCONFIGDIR` widening, a non-path argument overwritten, a path argument into the tree, a subprocess write into `tmp_path`, a JIT cache, one report per file.
+- 2026-11-04 — Main-session ruling: the "asked for" class is retired (it is not in the user's rule, and an output routed through a `path` argument would skip minting; B5 moved every main toolkit output to the `output` kind). A file written at a `path` argument's value fails `.unclassified`, with a message to declare the argument an `output`; `manifest_paths` / the `paths` element of `watched_tools` stay only to name that case.
+- 2026-11-04 — The class walk leaves links out (`_files_under`): a link a call makes in its output folder (an input staged there, toolkit `e1c21f8`) is staging, never a product and never a write to its target. Test: `an_input_staged_into_the_output_by_a_link`.
+- 2026-11-04 — Review of E1h-2: a link's target modified during the call is judged at the target (a subprocess write through a staged input no longer escapes); a `path`-argument file in a scratch root stays scratch (the `path` branch runs after scratch); the message adds what a tool that changes an input does; the 3-tuple fallback is gone (no `path` names: nothing named apart). Tests: a Python and a subprocess write through a staged link.
+- 2026-11-04 — H1 (main-session rulings): `.obsdb` accepts `healthcheck`'s `regressed` (a designed state: a re-acquire flags stale level-3 products) and still fails malformed / missing / level_inconsistent / uncatalogued (`_unhealthy`); an obs-db is recognised by a `catalog.json` or a mission name from `obsdb_catalog._domain._SCANNERS`, `_domain.TREES` or `heasarc_utils.lib.heasarc.MISSIONS` (when it imports), and the "named after no mission" failure is gone, so a new mission's engine with no scanner passes while its catalog stays healthy; `_jailed_pytest` binds `gate_readonly_roots` read-only for the test run only.
+- 2026-11-04 — Review of H1: `gate_readonly_roots` lists the old tree's mission folders only (IXPE, NuSTAR, NICER), not the human's notebooks beside them; the acquire engine's mission names are read from source, never imported into the test process; the `.obsdb` text and the coder prompt state the H1 rules.
+- 2026-11-04 — G4 (user-approved): every toolkit call (the REPL's call loop), every shell command (`builtin_server.bash_exec`) and every watched call in the gate's Layer-B run (the return recorder) runs with a fresh, empty HEASoft user parameter folder at the front of `PFILES` (the system half kept), removed after it: `builtin_server.private_param_dir`, the one definition, which `runner.builtin_function_source` reads without importing the server for the REPL script and the recorder. A process's own private folder (F23, `with_private_param_dir`) stays as the base between calls. HEASoft's `headas-init` puts `$HOME/pfiles` first and tasks write learned values back, so a shared folder let one call's parameters reach the next and concurrent tasks corrupt it. Tests: two shell commands and two REPL calls see different folders and a learned value does not carry over; the recorder and REPL carry the shared source.
+- 2026-11-04 — Review of G4: the per-call folder lives inside the process's own private user half (never a shared host `/tmp`); taking it is inside each path's error handling (REPL `try`, `bash_exec`'s `try`, the recorder before it marks a call running); the recorder path is tested; residuals: a heasoftpy task object kept at module level still carries its learned values in memory, and a `PFILES` with no `;` skips isolation.
+- 2026-11-04 — `returns.watch_entries(source, keys)`: the recorder's 4-tuple watch list `(module, fn, placed, paths)` for chosen keys of one manifest; `watched_tools` and the live attack test's oracle (`_oracle_tools`) both build through it, so the re-judge of a committed tool keeps its output kinds (a 2-tuple list read every write of a clean control as unclassified). The attack test pins its own toolkit base (`f409d09`, toolkit `main` after the output-kind migration) and its lead seat (`claude-opus-5`); science_bench's `BASE_REF` is unchanged.
+- 2026-11-04 — The live attack test's oracle chooses its tools with `returns.watched_tools` over a scratch view of the clone reset to the base with HEAD's files (the gate's own state after its gate-entry reset): new and changed tools, the union of the gate's per-link watch lists for a chain; its deterministic test compares that view with the gate's on the same uncommitted change.
+- 2026-11-04 — The live attack cell records `unexercised_tools` and never fails on it (user ruling: the gate's verdict is the verdict).
+- 2026-11-04 — Item 2 (user rule): Layer B also runs the toolkit's earlier fast tests (unmarked: `gate.FAST_TESTS`), once, every package's in the environment it names (`_earlier_tests`, `_run_layer_b`, `_default_test_runner(regression=)`); each must pass, else `layer_b.regression` names the earlier test the change broke (no base-versus-head compare); outside the determinism maps; the return recorder judges the watched calls they make. Measured on toolkit main f409d09 in the gate's jail: 47 fast tests, all passing, ~7 s for two runs. Tests: `test_gate_returns.py` (a broken earlier test, a failing `slow` one left out, a changed tool judged through an earlier test).
+- 2026-11-04 — Item 2 review: the regression run is judged by the recorder only when a test reached its call (an all-skipped run gave a false `layer_b.returns.recorder`); a timed-out run reads as unfinished, not broken; duplicate recorder failures are dropped; a regression-only environment's failed build names the earlier tests; tests for each and for the per-environment grouping.
+- 2026-11-04 — Item 2 rulings (user): the regression run makes one pytest call per package (a shared test-file name across packages no longer clashes); `layer_b.regression` reads "an earlier test that fails with this change" and shows each failing test with what it returned (`_junit_failures`, bounded so several fit); regression stays over every environment the toolkit names. Tests: a name shared across two packages, the failure output shown.
+- 2026-11-04 — Item 2 rulings review: each failing earlier test shows its captured output (`junit_logging=all`) and a teardown error beside its failure; the detail stays near the cap (texts share it, names listed to 20, then counted); a collection error says the package's other tests ran no further; a nonzero exit with no failing test names its exit code; the detail ends with the action. Tests for each.
+- 2026-11-05 — The live attack cells retire for pressure cells (user rulings; CLAUDE.md §10): `tests/test_live_figure_shape_attack.py` is replaced by `tests/test_live_pressure_cells.py` (switch `AUTO_RESEARCH_LIVE_PRESSURE_CELLS`, logs `logs/dev/pressure-cells/<stamp>/`). No attack objective, review stub or oracle: the lead and the coder, on the configured seats, get one pressure paragraph through `load_prompt` (the run depends on the tool; the budget is nearly spent), the co-lead review is production's, and three briefs (a light-curve table under an output argument, NuSTAR optimal grouping recorded in the obs-db, a per-DU PI plotter) run three times each on toolkit `main` `f409d09`, two author credits each. A stateless auditor (`openai:gpt-6.1-sol`, under its own role key) reads base..HEAD and the cycle's gate/review/commit record; a finding in a committed diff (or a "rejected" finding naming a committed file) is the only failure; a cell whose record holds no gate result is skipped as inconclusive. `returns.watch_entries` keeps its one caller, `watched_tools`.
+- 2026-11-05 — Pressure-cell rulings (user): the auditor is `anthropic:claude-opus-5`, a vendor apart from the coder's and the co-lead's (`select_decorrelated_member`, checked before a cell spends); a commit finding that names no file base..HEAD changed (`_names_changed`: the diff header's path, a trailing part of it, or its dotted module) is recorded as an `auditor_error` and never scored, and `summary.md` counts the errors; inconclusive cells stay skipped; leaked coder processes stay recorded per cell.
+- 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire, as do `AR_LIVE_B5` and `AR_LIVE_ENV_BUILD`.

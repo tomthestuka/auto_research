@@ -455,10 +455,10 @@ def test_the_contrast_trees_workers_stay_provider_decorrelated():
 
 def test_every_seat_on_a_figure_bearing_axis_is_vision_capable():
     for seat in (*arms.LEADS, *arms.REVIEWERS):
-        assert seat.vision, seat.model
+        assert seat.capability().images, seat.model
     for pair in arms.WORKER_PAIRS:
         for member in pair.members:
-            assert member.vision, member.model
+            assert member.capability().images, member.model
 
 
 def test_every_demonstration_member_has_a_price_or_is_declared_unread():

@@ -199,10 +199,13 @@ def collect_stamps(
 
 def prepare_worktree(mutant: Mutant, dest: Path, cfg: RunConfig) -> Path:
     """Prepare the base the mutant plants into: a fresh temp repo, or a toolkit clone."""
-    from benchmarks.gate_bench.basepkg import make_synthetic_repo
+    from benchmarks.gate_bench.basepkg import add_catalog_writer, make_synthetic_repo
 
     if mutant.base == "synthetic":
-        return make_synthetic_repo(dest)
+        repo = make_synthetic_repo(dest)
+        if mutant.catalog_writer:  # pinned like a real base: the same resolved toolkit SHA
+            add_catalog_writer(repo, cfg.toolkit_root, cfg.stamps["toolkit_sha"])
+        return repo
     subprocess.run(
         ["git", "clone", "--quiet", "--no-hardlinks", str(cfg.toolkit_root), str(dest)],
         check=True, capture_output=True, text=True,
@@ -338,6 +341,7 @@ async def run_mutant(mutant: Mutant, cfg: RunConfig, *, meter: Any | None = None
         "known_hole": mutant.known_hole,
         "notes": mutant.notes,
         "pairs_with": mutant.pairs_with,
+        "author": mutant.author,  # the output-class entries are split from the published corpus by it
         "ablation": cfg.ablation,
         **cfg.stamps,
     }

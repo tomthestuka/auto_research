@@ -157,11 +157,20 @@ def _orch_config() -> dict:
         return {}
 
 
+#: Overrides ``runtime_dir`` for this process and its children (the test suite's isolation, D4).
+RUNTIME_DIR_ENV = "AUTO_RESEARCH_RUNTIME_DIR"
+
+
 def runtime_data_dir() -> Path:
     """Return the runtime data directory from config/orchestration.yaml.
 
-    Key: ``runtime_dir``.  Defaults to ``~/.auto_research`` when absent.
+    Key: ``runtime_dir``.  Defaults to ``~/.auto_research`` when absent. ``AUTO_RESEARCH_RUNTIME_DIR``,
+    when set, names it instead — resolved per call, so a subprocess (a sandbox REPL, a gate run)
+    inherits it.
     """
+    override = os.environ.get(RUNTIME_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
     return Path(_orch_config().get("runtime_dir", "~/.auto_research")).expanduser()
 
 
@@ -543,13 +552,16 @@ def declared_externals(config: dict | None = None) -> "dict[str, External]":
 def env_catalogue(config: dict | None = None) -> "list[Environment]":
     """Every environment a unit may list and use: the configured analysis environment (human) and
     each environment the coding pipeline has built (``agent_conda_dir()``), externals resolved from
-    the human's ``env_externals``."""
+    the human's ``env_externals``; a build of another definition than the toolkit's ``envs/`` holds
+    now is marked ``superseded`` (D3c)."""
     from auto_research.sandbox.env_build import built_environments
 
     config = config if config is not None else _orch_config()
     analysis = analysis_environment(config)
+    toolkit_root = config.get("toolkit_root")
     built = built_environments(agent_conda_dir(), declared_externals(config),
-                               {analysis.name: analysis} if analysis else {})
+                               {analysis.name: analysis} if analysis else {},
+                               definitions=Path(str(toolkit_root)) / "envs" if toolkit_root else None)
     return ([analysis] if analysis else []) + [env for env in built if not analysis or env.name != analysis.name]
 
 

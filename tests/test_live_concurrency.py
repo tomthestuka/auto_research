@@ -1,6 +1,6 @@
 """Opt-in LIVE probe: how many concurrent streams does each vendor in a batch actually hold?
 
-    AUTO_RESEARCH_LIVE_CONCURRENCY=1 pytest tests/test_live_concurrency.py -q -s
+    pytest tests/test_live_concurrency.py --live -q -s
 
 **Why this exists.** A batch's concurrency is a per-vendor question, and getting it wrong is not a
 slow batch, it is a **corrupted** one: Z.AI throttled 87 to 97 per cent of turns above two in
@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import statistics
 import time
 from typing import Any
@@ -39,10 +38,7 @@ from pydantic import BaseModel
 from tests.dev_logs import dev_log_path
 from tests.seats import from_seat, seated
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_CONCURRENCY") != "1",
-    reason="set AUTO_RESEARCH_LIVE_CONCURRENCY=1 to spend a few cents measuring vendor ceilings",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

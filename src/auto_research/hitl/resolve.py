@@ -12,6 +12,7 @@ directly) so the preflight can import it without pulling the graph stack.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
@@ -138,8 +139,31 @@ def make_human_channel_check(
             asked_by="preflight",
             message="Reply to confirm this run's human-response channel is live.",
         )
+        # The connector's own start-up (Telegram: getMe, deleteWebhook, setMyCommands) runs before
+        # the window, so the window measures only the human's reply, and a slow or failing start
+        # says so itself (D2 ruling).
+        start = getattr(handler, "start", None)
+        if callable(start):
+            try:
+                started = start()
+                if inspect.isawaitable(started):
+                    await started
+            except Exception as exc:  # noqa: BLE001 — named as the channel's start, not the human
+                closer = getattr(handler, "aclose", None)
+                if callable(closer):  # what the failed start opened is closed here (D1b)
+                    try:
+                        closed = closer()
+                        if inspect.isawaitable(closed):
+                            await closed
+                    except Exception:  # noqa: BLE001 — the start's failure is the news
+                        pass
+                raise RuntimeError(
+                    f"the human-response channel did not start: {type(exc).__name__}: {exc} "
+                    "(or set human_channel='none' for a headless run, 'cli' for an attended "
+                    "terminal)."
+                ) from exc
         print(
-            f"⏳ Launch preflight: a confirmation ping was sent to your human channel — "
+            f"⏳ Launch preflight: a confirmation ping is going to your human channel — "
             f"reply to it to start the run (waiting up to {limit:.0f}s).",
             flush=True,
         )

@@ -671,7 +671,13 @@ def test_f9_a_failed_link_does_not_end_the_chain_and_the_lead_is_told_why():
 
     specs = [_toolspec("link_one"), _toolspec("link_two")]
     cycle = LeadCycle(authoring_enabled=True, rounds_left=1)
-    cycle.brief = AuthoringDecision(should_author=True, tool_specs=specs, rationale="r")
+    # Filed as the lead files it (C3): one brief report per link, queued in order.
+    from auto_research.agents.react import execute_author_chain
+
+    asyncio.run(execute_author_chain(cycle, {
+        "first_link": specs[0].model_dump(mode="json"),
+        "additional_links": [s.model_dump(mode="json") for s in specs[1:]], "rationale": "r",
+    }))
     outcome = LeadCycleOutcome(filed=None, author_budget=4)
 
     opened: list[str] = []
@@ -690,7 +696,7 @@ def test_f9_a_failed_link_does_not_end_the_chain_and_the_lead_is_told_why():
         allow_correlated_review=False,
     )
 
-    async def _open(spec):
+    async def _open(spec, brief=None):
         opened.append(spec.proposed_tool_name)
         driver.session = SimpleNamespace(proposed=spec.proposed_tool_name)
         driver.spec = spec

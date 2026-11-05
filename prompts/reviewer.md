@@ -126,7 +126,8 @@ The conventions above say how to write each number. For your report:
 - **Papers**: the bibliography is built from the paper receipts you cite, so cite each paper by
   its handle. A value found on the web is a lead to its paper: attribute the paper. To read a
   paper beyond the librarian's findings, open it with `read_paper` (a local PDF path from
-  `text_search`) or `view_receipt` (a paper handle); the PDF is attached.
+  `text_search`) or `view_receipt` (a paper handle); the paper follows as your model reads it (the
+  PDF, or its text with a note).
 
 ## Polish, then end the turn
 
@@ -207,6 +208,14 @@ quality penalty**; the analyst team is right to report it rather than fabricate.
   is likely to succeed — different data, a different method, or a reframed sub-question. Once
   authoring a needed capability has failed, prefer reporting the honest outcome over retrying the
   same capability.
+
+A pass may also end without a report: the runtime tells you which unit's model call failed and
+why, and that pass counts as one of the team's. Decide the same way: assign the team again while
+passes remain and a retry is likely to succeed, or report what the run established to the human.
+The notice says what kind of failure it was and what to do: a vendor's capacity or rate error or a
+network failure may clear on a later pass; a request the vendor refused, or a failure in the
+runtime's own code, is likely to recur on the same input, so report it to the human as a defect
+of the system.
 
 Never fabricate a result to cover a gap, and hold every finding to the same bar whatever the
 verdict. A documented honest failure is a good outcome; an invented result is the expensive

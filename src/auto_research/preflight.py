@@ -1,8 +1,9 @@
 """Launch-time deterministic checklist.
 
-Every check that can be decided **without an LLM** runs here, once, at the very start of a
-run — before any model client is constructed — so a misconfigured run dies cheaply instead
-of after burning tokens (the ``.env`` shape, the author↔reviewer provider decorrelation,
+Every launch precondition runs here, once, at the very start of a run, so a misconfigured run dies
+cheaply instead of after burning tokens. All but one are decided **without an LLM**; the last,
+``member_media`` (Z1e), sends each configured chat member one tiny image and one tiny PDF, its cost
+on the ledger (the ``.env`` shape, the author↔reviewer provider decorrelation,
 …). This is the single place the run's preconditions are asserted.
 
 Design: a check is a zero-arg function that **raises on failure** and lives in its *own*
@@ -130,6 +131,8 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     """
     from auto_research.env import check_required_env
     from auto_research.graph.checkpoint import check_checkpointer_available
+    from auto_research.models.capabilities import check_member_capabilities
+    from auto_research.models.media_probe import check_member_media
     from auto_research.models.keys import check_api_key_fallbacks
     from auto_research.models.providers._doc_parse import check_document_parser_ready
     from auto_research.observations import check_catalog_health
@@ -155,6 +158,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight = Preflight()
     preflight.register("required_env", check_required_env)
     preflight.register("api_key_fallbacks", check_api_key_fallbacks)
+    preflight.register("member_capabilities", check_member_capabilities)
     preflight.register("document_parser_ready", check_document_parser_ready)
     preflight.register("checkpointer_available", check_checkpointer_available)
     preflight.register("database_health", check_database_health)
@@ -172,6 +176,9 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight.register("toolkit_manifests", check_toolkit_manifests)
     preflight.register("catalog_health", check_catalog_health)
     preflight.register("analyze_probe", check_analyze_probe)
+    # The one paid check (Z1e): one tiny image and one tiny PDF per distinct chat member, through the
+    # real call. Last, so a launch that fails a free check spends nothing.
+    preflight.register("member_media", check_member_media)
     if human_handler is not None:
         from auto_research.hitl import make_human_channel_check
 

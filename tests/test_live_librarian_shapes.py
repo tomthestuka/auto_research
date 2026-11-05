@@ -1,6 +1,6 @@
 """Opt-in LIVE check of EVERY path out of the librarian's loop, one dispatched agent per shape.
 
-    AUTO_RESEARCH_LIVE_LIBRARIAN_SHAPES=1 pytest tests/test_live_librarian_shapes.py -s
+    pytest tests/test_live_librarian_shapes.py --live -s
 
 The librarian's report is filed only through ``turn_end`` (CLAUDE.md §2b), and ``turn_end`` is only
 as good as the states it has met. So, as for the analyst lead (``test_live_turn_end_shapes.py``):
@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -37,10 +36,7 @@ from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_LIBRARIAN_SHAPES") != "1",
-    reason="set AUTO_RESEARCH_LIVE_LIBRARIAN_SHAPES=1 to spend provider tokens on the shapes",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

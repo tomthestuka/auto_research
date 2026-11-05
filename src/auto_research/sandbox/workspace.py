@@ -108,12 +108,6 @@ def agent_dir(run_id: str, agent_key: str) -> Path:
     return run_dir(run_id) / agent_key
 
 
-def figures_dir(run_id: str, agent_key: str) -> Path:
-    d = agent_dir(run_id, agent_key) / "figures"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def report_dir(run_id: str) -> Path:
     """Return (and ensure parent + figures/ exist for) the reviewer's report directory.
 

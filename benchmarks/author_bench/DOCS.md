@@ -169,10 +169,23 @@ the lead was Anthropic in all five arms, so the reviewer's relation to the autho
 moved together. Holding the author fixed and crossing the other two separates them, and the result
 decides whether §9.3 binds the right actor.
 
-**Axes.** Leads are `claude-opus-5`, `gpt-5.6-sol`, `glm-5.3`, `qwen3.8-max`; co-leads are those
-four plus `deepseek-v4-pro`. Author pinned at `deepseek-v4-flash` on the Codex harness, K=5, twenty
-cells, 100 trials. The axes are unequal because vision binds the roles that are sent figures: the
-lead is handed the accumulated per-worker catalog and the co-lead is handed none, so a text-only
+**Axes** (`grid.yaml`, read by `legs.GRID_LEADS` / `GRID_COLEADS`: model choices are configuration,
+user ruling 2026-11-04). Leads are `claude-opus-5`, `gpt-5.6-sol`, `glm-5.3-flash`, `qwen3.8-max`;
+co-leads are those four plus `deepseek-v4-pro`, so the lead-correlated diagonal is same-model in all
+four cells (Z.AI's co-lead is `glm-5.3-flash`, user ruling 2026-11-04). The 2026-08-26
+grid batch (20260826T022253Z, not reported in the manuscript) ran its Z.AI-lead cells with
+`glm-5.3`, which the vendor documents as text-only ("GLM-5.3 currently supports text-only inputs",
+docs.z.ai/guides/llm/glm-5.3), so any figures those cells sent their lead reached a text-only model.
+No figure reached it. Counted from each trial's `monitor.jsonl` (the 25 trials under
+`logs/dev/author-bench/20260826T022253Z/grid_lead_zai_*/trial-*/`): the lead's only loop there
+is `drive_authoring`, whose seed passes no image in the batch's recorded commit (`857025e`; its
+records mark the tree dirty), and all 682 of its `analyst_lead.drive_authoring.tool_result` events
+carry `figure_count` 0. The batch's Z.AI co-lead was `glm-5.3` too. The roster's Z.AI lead and
+co-lead are `glm-5.3-flash`, the current GLM its pages document with image input
+(docs.z.ai/guides/vlm/glm-5.3-flash). The batch's slugs are unchanged, so a `--resume` of it under
+this roster would run its missing Z.AI trials with `glm-5.3-flash`.
+Author pinned at `deepseek-v4-flash` on the Codex harness, K=5, twenty cells, 100 trials. The axes
+are unequal because vision binds the roles that are sent figures: the lead is handed the accumulated per-worker catalog and the co-lead is handed none, so a text-only
 vendor may review but not lead. Google is out of both, its second tool call in any loop being a
 hard 400 ([I8]).
 
@@ -183,7 +196,8 @@ already measured. A Flash co-lead would make that column same-*model* and incomp
 Live-probed 2026-08-25: nine of nine real schemas with tools declared, so Pro honours every
 DeepSeek descriptor flag previously measured on Flash alone.
 
-**The shape's virtue and its cost.** Because the author is DeepSeek and DeepSeek cannot lead, the
+**The shape's virtue and its cost.** Because the author is DeepSeek and DeepSeek is not on the lead
+axis, the
 two correlations are fully crossed and never coincide -- four lead-correlated cells, four
 author-correlated, twelve clean, none both -- so each is estimable free of the other. The cost is
 that the doubly-correlated cell is unreachable, so no interaction term is estimable, which the
@@ -240,7 +254,7 @@ batch reports both sittings instead of losing the first.
 | `legs.Leg` | One roster row: author (provider, harness, model, key var, endpoint), reviewer arrangement, purpose, brand colour, per-leg K and concurrency ceiling. |
 | `legs.ROSTER` / `legs.BY_SLUG` | The full roster (`CURATED + GRID`) and its index. |
 | `legs.CURATED` / `legs.GRID` | The hand-chosen author sweep, and the generated lead x co-lead product. |
-| `legs.GridMember` | One coordinate on a grid axis: vendor, model, declared vision, vendor concurrency ceiling. |
+| `legs.GridMember` | One coordinate on a grid axis: vendor, model, vendor concurrency ceiling (media capability is the adapter's, A1). |
 | `legs.GRID_LEADS` / `legs.GRID_COLEADS` / `legs.GRID_AUTHOR` | The two axes and the author held fixed across all twenty cells. |
 | `legs.GROUPS` | Named selections `--legs` accepts beside individual slugs (`grid`, `curated`). |
 | `plot_sweep_cost.collect()` / `.plot(corpus, out)` | Cumulative cost against elapsed time for the reported sweep trials, one line per trial. `LEGS` names the arms drawn and their line style; `K` is the trials-per-leg taken by number. |
@@ -398,3 +412,14 @@ Compacted 2026-09-01, 2026-09-24 and 2026-10-19 (every entry); detail in git his
 - 2026-09-21 -> 2026-09-22 — `plot_sweep_cost.py` promoted from `tmp_scripts/` (manuscript figure);
   it and `table_grid.py` use manuscript role names ("LLM reviewer", "coder"); Claude arm at full
   K=10; same-provider Claude arm no longer drawn.
+- 2026-11-04 — A1: `GridMember.vision`, `Leg.lead_vision`/`colead_vision` retired; the grid tests read
+  `media_capability`. `glm-5.3` is text-only by its vendor page, so its grid-lead test is a strict
+  xfail pending a ruling on the Z.AI lead.
+- 2026-11-04 — Z1: the grid's Z.AI lead is `glm-5.3-flash` (image input by docs.z.ai); the Z.AI
+  co-lead stays `glm-5.3` (`GRID_COLEADS` names it); the strict xfail on the Z.AI grid lead is
+  removed. The 2026-08-26 batch's Z.AI-lead cells ran with the text-only `glm-5.3` (Axes).
+- 2026-11-04 — Z1b: the Axes paragraph records that no figure reached the batch's text-only Z.AI lead
+  (682 `drive_authoring.tool_result` events over 25 trials, all `figure_count` 0; recounted).
+- 2026-11-04 — Z1d: the grid axes live in `grid.yaml` (`legs._grid_axis`); Z.AI's co-lead is
+  `glm-5.3-flash`, so the lead-correlated diagonal is same-model again (tested); a member's
+  capability is its `config/model_capabilities.yaml` entry.

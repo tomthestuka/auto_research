@@ -31,12 +31,17 @@ import asyncio
 import logging
 import random
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
 from auto_research.env import ProviderRetryPolicy, provider_retry_policy
 
 logger = logging.getLogger(__name__)
+
+#: A list a caller installs to hear each transient error a retry waits out; the launch media probe
+#: names the last one when its bound expires mid-backoff (Z1f). ``None``: nobody is listening.
+transient_errors: ContextVar[list[BaseException] | None] = ContextVar("transient_errors", default=None)
 
 _TRANSIENT_STATUS = (408, 409, 429)
 
@@ -309,26 +314,6 @@ def is_transient_provider_error(exc: BaseException, provider: str = "") -> bool:
     return isinstance(exc, (anthropic.APIConnectionError, openai.APIConnectionError))
 
 
-def is_provider_error(exc: BaseException) -> bool:
-    """True when ``exc`` came from a model provider's API: an error response or a failure to reach it.
-
-    The vendor SDKs' own base classes (``anthropic.APIError``, ``openai.APIError`` — which also
-    carries DeepSeek, Z.AI and Alibaba over the Responses dialect — and ``google.genai``'s
-    ``APIError``) plus raw ``httpx`` transport errors. What a unit's loop contains as that unit's
-    honest failure once :func:`call_with_transient_retry` has given up (CLAUDE.md §9.3.8). Our own
-    defects — a ``ValueError`` from request building, a ``TypeError`` in an adapter — are not
-    provider errors and keep propagating, unmasked.
-    """
-    import anthropic
-    import httpx
-    import openai
-    from google.genai import errors as genai_errors
-
-    return isinstance(
-        exc, (anthropic.APIError, openai.APIError, genai_errors.APIError, httpx.TransportError)
-    )
-
-
 async def call_with_transient_retry(
     provider_call: Callable[[], Awaitable[Any]],
     *,
@@ -395,6 +380,9 @@ async def call_with_transient_retry(
                 active.max_cooldown_s, active.base_cooldown_s * (2.0**attempt)
             ) * random.uniform(0.5, 1.0)
             attempt += 1
+            heard = transient_errors.get()
+            if heard is not None:
+                heard.append(exc)
             logger.warning(
                 "transient provider error on %s (%r) — waiting %.0fs, retry %d/%d",
                 describe,

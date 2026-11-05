@@ -22,6 +22,11 @@ supports:
 - **What remains unresolved or untested**, including any check that was written but did not run.
 - **Decisions the coder made that the brief left open**, and the reason it gave.
 
+A text from the human appears in the transcript as
+`[A text from the human; the runtime restates it word for word after the summary.]`. Write that the
+human sent a text at that point and what the session did next; the runtime places the human's words
+after your paragraph.
+
 ## How to write it
 
 - Report only what the transcript shows. Where the transcript is silent, say nothing about it

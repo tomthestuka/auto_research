@@ -1,7 +1,8 @@
 """The arguments a toolkit call ran with, rebuilt from the run ledger.
 
 A worker's call runs with the model's arguments completed by the runtime (a configured mission
-folder, a figure path under the worker's folder, the shell's folder and environment). The
+folder, a figure path under the worker's folder, each output argument in the call's own folder,
+the shell's folder and environment). The
 runtime's part is the call's *context*, recorded on its ``tool_result`` ledger line; the model's
 part is on its ``tool_call`` line. :func:`resolve_call_args` is the one statement of the
 completion: the tool provider builds every call with it, and the same function rebuilds a call
@@ -48,9 +49,16 @@ def resolve_call_args(arguments: Mapping[str, Any], context: Mapping[str, Any]) 
     - ``observation_paths``: ``{argument: folder}``, filled when the model's value is empty;
     - ``defaults``: ``{parameter: value}`` a toolkit manifest declares, filled when the model
       leaves the argument out (``provenance.inputs.declared_defaults``);
-    - ``figure_args`` + ``figures_dir`` + ``fn`` + ``stamp_ms``: each figure argument is placed in
-      ``figures_dir``, keeping the model's file name (``<fn>_<stamp_ms>`` when it gave none) with
-      the extension ``FIGURE_PATH_ARGS`` names;
+    - ``figure_args`` + ``products_dir`` + ``fn``: each figure argument is placed in the call's own
+      folder, keeping the model's file name (``<fn>`` when it gave none) with the extension
+      ``FIGURE_PATH_ARGS`` names (a ledger before 2026-11-04 records ``figures_dir`` and
+      ``stamp_ms`` instead: the worker's shared figures folder and ``<fn>_<stamp_ms>``);
+    - ``output_args`` + ``products_dir`` (+ ``fn``): ``{argument: shape}`` for every ``output``-kind
+      argument (``provenance.inputs.declared_outputs``), placed in the call's own folder
+      ``products_dir`` (``<workdir>/products/<fn>/<call id>``): a ``folder`` is that folder, whatever
+      the model wrote; a ``file`` or ``prefix`` keeps the model's file name, and with none the name
+      ``output_names`` gives (the manifest's ``default``), else the argument's name (``fn`` for a
+      prefix);
     - ``runtime_only``: argument names the runtime consumes and never sends (``env``,
       ``shell_env``); they stay in the result, which is what the receipt hashes
       (``LedgerCall.sent_args`` drops them).
@@ -68,16 +76,30 @@ def resolve_call_args(arguments: Mapping[str, Any], context: Mapping[str, Any]) 
     for name, value in (context.get("defaults") or {}).items():
         if name not in args:
             args[name] = value
+    from auto_research.provenance.inputs import output_name
+
     for name in context.get("figure_args") or ():
         value = args.get(name)
-        base = os.path.basename(value.strip()) if isinstance(value, str) and value.strip() else ""
+        if "figures_dir" in context:  # a ledger before 2026-11-04: rebuilt exactly as it ran
+            base = os.path.basename(value.strip()) if isinstance(value, str) and value.strip() else ""
+        else:
+            base = output_name(value)
         if not base:
-            base = f"{context['fn']}_{context['stamp_ms']}"
+            base = f"{context['fn']}_{context['stamp_ms']}" if "stamp_ms" in context else str(context["fn"])
         for known in _FIGURE_EXTENSIONS:
             if base.lower().endswith(known):
                 base = base[: -len(known)]
                 break
-        args[name] = str(Path(context["figures_dir"]) / f"{base}{FIGURE_PATH_ARGS[name]}")
+        folder = context.get("figures_dir") or context["products_dir"]
+        args[name] = str(Path(folder) / f"{base}{FIGURE_PATH_ARGS[name]}")
+    names = context.get("output_names") or {}
+    for name, shape in (context.get("output_args") or {}).items():
+        folder = Path(context["products_dir"])
+        if shape == "folder":
+            args[name] = str(folder)
+        else:  # the model's file name, else the manifest's, else the argument's (the tool's)
+            default = names.get(name) or (name if shape == "file" else context["fn"])
+            args[name] = str(folder / (output_name(args.get(name)) or default))
     return args
 
 

@@ -43,6 +43,7 @@ from auto_research.agents.react import (
     ReadOnlyToolProvider,
     ReportWorkspace,
     lead_turn_problems,
+    mint_brief,
     SUBMIT_TOOL,
     WAIT_FOR_REPLY_TOOL,
     SandboxToolProvider,
@@ -382,6 +383,45 @@ class AgentRole:
             )
             return parsed
 
+    # -- the seat's exchange with the human (C4): kept by code, restated after every cut --
+
+    def _load_exchange(self) -> None:
+        """Start this seat's exchange from the run's ledger once (a seat in a new process),
+        before any of its turns adds to it, so nothing is counted twice."""
+        if "_human_exchange" in self.__dict__:
+            return
+        from auto_research.agents.history import human_exchange
+
+        key = getattr(self, "agent_key", None)
+        monitor = getattr(self, "monitor", None)
+        self._human_exchange: list[tuple[str, str]] = (
+            human_exchange(monitor, key, run_id=getattr(monitor, "run_id", None))
+            if key and monitor is not None else []
+        )
+
+    @property
+    def human_exchange(self) -> list[tuple[str, str]]:
+        """Every text this seat sent the human and every human text it received, word for word,
+        oldest first: ``("to", text)`` / ``("from", text)``."""
+        self._load_exchange()
+        return self._human_exchange
+
+    def _note_human(self, direction: str, text: str) -> None:
+        self.human_exchange.append((direction, text))
+
+    def _note_inbox(self, entry: Any) -> None:
+        """A text the seat is shown: kept when the human sent it (a reply, a steer, a message)."""
+        if getattr(entry, "sender", None) == "human" and getattr(entry, "kind", None) != "notice":
+            self._note_human("from", str(getattr(entry, "text", "") or ""))
+
+    def _pin_state(self) -> str | None:
+        """What code restates after every cut (C4): the exchange with the human, word for word.
+        The analyst lead adds its chain."""
+        from auto_research.agents.compaction import human_exchange_text
+
+        exchange = self.human_exchange
+        return human_exchange_text(exchange) if exchange else None
+
     async def _react(
         self,
         *,
@@ -656,6 +696,8 @@ class AgentRole:
         so only the growing tail is re-sent.
         ``on_result(call, outcome)`` is an optional async hook (monitor/memory).
         """
+        # Before anything this loop records, so a ledger start never counts this turn's texts (C4).
+        self._load_exchange()
         # Normally a copy: a caller's seed is its own. `share_messages` hands the loop the
         # caller's actual list instead, which is what lets the lead's chain driver drop a finished
         # link's coding transcript from the LIVE trajectory (A7). The alternative was a nested
@@ -735,6 +777,7 @@ class AgentRole:
         # The inbox entries drained but not yet shown to the model, in arrival order (D1, D5):
         # what goes back to the inbox if this turn ends before showing them.
         unshown: list[Any] = []  # InboxEntry
+        to_note: list[Any] = []  # InboxEntry: kept in the exchange once shown (C4)
         # The absolute ceiling is a cap like the budget (ruling D4, 2026-10-18): a loop that must
         # file gets the same grace window there, counted in model turns (iterations at the
         # ceiling are mostly free calls, which never spend `grace_used`), and then fails loudly.
@@ -833,6 +876,7 @@ class AgentRole:
                 for entry in self.run_control.drain_inbox(self.agent_key):
                     injections.append((entry.kind, entry.render()))
                     unshown.append(entry)
+                    to_note.append(entry)
             # B4: the coder runs beside this loop, so when it stops the lead is TOLD rather than
             # having to poll. Same queue and the same hold rule as a human steer — a pushed event
             # is exactly what made the A2 race reachable, so it goes through the same gate.
@@ -861,6 +905,9 @@ class AgentRole:
                     )
                 injections.clear()
                 unshown.clear()
+                for entry in to_note:  # shown now, so kept; a text put back is kept when shown
+                    self._note_inbox(entry)
+                to_note.clear()
             elif injections:
                 await self._record(
                     f"{self.role}.{action}.injection_held", level=4,
@@ -870,26 +917,30 @@ class AgentRole:
                     ),
                     data={"held": len(injections), "kinds": sorted({k for k, _ in injections})},
                 )
+            # Built outside the containment below: a fault in our own schema code is no model call.
+            definitions = tools.tool_definitions()
+            viewers = _image_viewers(self)
             try:
                 response = await self.model.call(
                     messages,
-                    tools=tools.tool_definitions(),
+                    tools=definitions,
                     tool_choice="auto",
                     images=(),
                     documents=(),
                     cache_prefix=True,
+                    **viewers,
                 )
             except Exception as exc:
-                # Contained failure (CLAUDE.md §9.3.8, D1): whatever the provider returned that
-                # `call_with_transient_retry` would not wait out — a 400 "prompt is too long", an
-                # auth error, a retry budget spent — ends THIS unit's turn, recorded, with nothing
-                # filed on its behalf. Raised as the unit's own failure so the caller that has
-                # peers to carry on with (the debate) can, and one that has none ends honestly.
-                # Our own defects are not provider errors and propagate untouched.
-                from auto_research.models.retry import is_provider_error
-
-                if not is_provider_error(exc):
-                    raise
+                # Contained failure (CLAUDE.md §9.3.8; D1, widened by ruling A4 2026-11-04): any
+                # exception the model call raises — what the provider returned that
+                # `call_with_transient_retry` would not wait out (a 400 "prompt is too long", an
+                # auth error, a retry budget spent) or what raised before the provider (the
+                # refusal of a medium that ended run polevo-20261104, now sanitised instead, A2) —
+                # ends THIS unit's turn, recorded, with nothing filed on its behalf. Raised as the
+                # unit's own failure so the caller that has peers to carry on with (the debate)
+                # can, and one that has none ends honestly. A cancel is a `BaseException` and
+                # passes; `ReactBudgetExhausted` is raised by this loop, never by the call.
+                #
                 # Texts this call carried are in this turn's ledger history (B1), which the seat's
                 # next turn carries (B2). Texts still HELD for an unresolved server tool were never
                 # recorded or sent: back into the inbox, so the sender's "delivered" holds. Inbox
@@ -903,10 +954,10 @@ class AgentRole:
                 if action != "resume" or (kept is not None and kept.get("messages") is messages):
                     self._kept_turn = None
                 await self._record(
-                    f"{self.role}.{action}.provider_error", level=1,
+                    f"{self.role}.{action}.model_call_failed", level=1,
                     summary=(
-                        f"{self.agent_key or self.role}'s turn ended on a provider error, "
-                        "nothing filed"
+                        f"{self.agent_key or self.role}'s turn ended on a failed model call "
+                        f"({type(exc).__name__}), nothing filed"
                     ),
                     data={
                         "error": repr(exc),
@@ -918,8 +969,9 @@ class AgentRole:
                         "requeued_texts": len(unread),
                     },
                 )
-                raise ProviderTurnFailed(
-                    agent=self.agent_key or self.role, action=action, cause=exc
+                raise ModelCallFailed(
+                    agent=self.agent_key or self.role, action=action, cause=exc,
+                    provider=getattr(getattr(self.model, "config", None), "provider", "") or "",
                 ) from exc
             self.last_response = response
             await self._record_context_edit(response, action)
@@ -951,6 +1003,7 @@ class AgentRole:
                 task = messages[task_index].content if task_index is not None else None
                 injections.append(("compaction_pin", pin_text(
                     session["task_receipt"], session["produced"], task=task,
+                    state=self._pin_state(),
                 )))
             if not response.tool_calls:
                 # A turn with no tool calls is FIVE different outcomes, and breaking here
@@ -1216,6 +1269,7 @@ class AgentRole:
             # hold check — and by then this batch's results are complete, so an injected turn can
             # never split a `tool_use` from its `tool_result`.
             injections.extend((entry.kind, entry.render()) for entry in batch_steers)
+            to_note.extend(batch_steers)
             # Budget accounting: an iteration consumes budget unless EVERY tool it called is
             # free (e.g. plan_and_debate). Free-only iterations advance `iteration` (so the
             # absolute backstop still bounds them) but not `budget_used`.
@@ -1379,6 +1433,13 @@ class AgentRole:
         text = transcript(turn.messages, names)
         figures = image_budget.keep_newest(turn_figure_sets(turn.messages))
         text = await self._condensed_transcript(text, list(turns.values()))
+        state = self._pin_state()
+        from auto_research.agents.compaction import RESTATED_END, restated as restate
+
+        if state and not text.rstrip().endswith(RESTATED_END):
+            # Whether or not the transcript was condensed (C4): the index lines shorten a long
+            # answer, so what code restates follows the earlier turns whole.
+            text = f"{text}\n\n{restate(state)}"
         opening = [
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=text, figures=figures),
@@ -1436,7 +1497,8 @@ class AgentRole:
             summariser = resolve("session_compactor").handles[0]
             reply = await summariser.call([
                 ModelMessage(role="system", content=load_prompt("session_compactor")),
-                ModelMessage(role="user", content=text),
+                # What code restates is restated again after the summary, never by it (C4).
+                ModelMessage(role="user", content=compaction.for_summariser(text)),
             ])
             summary = compaction.summary_text(reply.content or "")
         except Exception as exc:  # noqa: BLE001 — a long transcript beats no history
@@ -1476,7 +1538,8 @@ class AgentRole:
             data={"chars": len(text), "summary_chars": len(summary)},
         )
         return (f"{TRANSCRIPT_MARK} {CONDENSED_NOTE}\n"
-                f"{summary}\n\n{compaction.pin_text(None, produced, earlier_turns=True)}")
+                f"{summary}\n\n"
+                f"{compaction.pin_text(None, produced, earlier_turns=True, state=self._pin_state())}")
 
     # -- session history (B1): the parts a rebuild needs, recorded where the loop adds them --
 
@@ -1674,7 +1737,8 @@ class AgentRole:
             data={"prompt_tokens": round(estimate), "window": window, "trigger": trigger,
                   **self._history_part("rewrite", turn=turn_id, **part)},
         )
-        pin = compaction.pin_text(session["task_receipt"], session["produced"])
+        pin = compaction.pin_text(session["task_receipt"], session["produced"],
+                                  state=self._pin_state())
         appended_now = [ModelMessage(role="user", content=pin)]
         if last_round:
             figures = [f for m in last_round if isinstance(m, ToolResultMessage)
@@ -1845,11 +1909,14 @@ class ReviewerAgent(AgentRole):
         budgets: Mapping[str, int] | None = None,
         human_attended: bool = False,
         render: Any | None = None,
+        failure: str | None = None,
     ) -> "ReviewerReport":
         """Run one reviewer turn and return the report it filed.
 
         ``arrived`` names what came back since the last turn (``request``, ``librarian``,
-        ``analysts`` or ``human``); ``literature`` is every literature report of the run and
+        ``analysts``, ``human``, or ``librarian_failed`` / ``analysts_failed`` for a pass that
+        filed no report, A4b, with ``failure`` the runtime's notice naming the unit and the
+        exception: navigation, never a receipt); ``literature`` is every literature report of the run and
         ``literature_receipts`` the documents those filed reports cite; ``previous`` is the reviewer's own earlier
         reports; ``human_nudges`` the human's replies (guidance, never receipts) and
         ``human_files`` the handles of files the human sent; ``budgets`` the passes left per capped
@@ -1929,7 +1996,7 @@ class ReviewerAgent(AgentRole):
             "request": request.model_dump(mode="json"),
             "request_receipt": request_handle,
             "arrived": arrived,
-            "your_turn": _review_instruction(arrived, budgets, human_attended),
+            "your_turn": _review_instruction(arrived, budgets, human_attended, failure=failure),
             "your_earlier_reports": [_earlier_report(r) for r in previous],
             "literature_reports": [_for_reader(lit, self.receipts) for lit in literature_now],
             "literature_documents": [
@@ -2024,11 +2091,26 @@ _ARRIVED = {
         "The human replied to your report (the newest in human_nudges). Discuss it with them where "
         "useful, then decide the next step."
     ),
+    "librarian_failed": (
+        "The librarian's pass ended without a report, and it counts as one of its passes. "
+        "{failure} Decide the next step from the work you have."
+    ),
+    "analysts_failed": (
+        "The analysts' pass ended without a report, and it counts as one of their passes. "
+        "{failure} Decide the next step from the work you have."
+    ),
 }
 
 
-def _review_instruction(arrived: str, budgets: Mapping[str, int], human_attended: bool) -> str:
-    """The reviewer's task for this turn, with the budgets the graph actually has left."""
+def _review_instruction(
+    arrived: str, budgets: Mapping[str, int], human_attended: bool, *, failure: str | None = None
+) -> str:
+    """The reviewer's task for this turn, with the budgets the graph actually has left.
+
+    ``failure`` is the runtime's notice for a pass that filed no report (A4b)."""
+    arrival = _ARRIVED[arrived]
+    if arrived.endswith("_failed"):
+        arrival = arrival.format(failure=failure or "")
     lit, ana = budgets.get("librarian", 0), budgets.get("analysts", 0)
     human = (
         "A report to the human is sent to them as a document, and their reply comes back to you."
@@ -2036,7 +2118,7 @@ def _review_instruction(arrived: str, budgets: Mapping[str, int], human_attended
         "No human is attending this run: a report to the human is published and ends the run."
     )
     return (
-        f"{_ARRIVED[arrived]} Write your report with write_report and edit_report and set assign_to: "
+        f"{arrival} Write your report with write_report and edit_report and set assign_to: "
         "'librarian' or 'analysts' with follow_up as their task, or 'human' with the full report "
         "(title, abstract, sections, key_findings, figures and tables; turn_end typesets it and "
         f"names anything it cannot typeset). {human} {lit} literature pass(es) and {ana} analysis "
@@ -2500,6 +2582,32 @@ def _for_reader(item: Any, store: ReceiptStore | None) -> Any:
     return walk(dumped)
 
 
+def _image_viewers(seat: Any) -> dict[str, Any]:
+    """``{"viewers": [...]}`` for a seat whose member takes no images, else ``{}`` (A2).
+
+    The peers on the seat's channel whose members take images, sorted, for the note the
+    model-input sanitiser writes in place of an image this member cannot take. Empty for a seat
+    that takes images (nothing is withheld) or has no channel, and for a duck-typed model, so a
+    stand-in's ``call`` signature is never asked to take it.
+    """
+    from auto_research.models.providers import media_capability
+    from auto_research.models.types import ModelHandle
+
+    router = getattr(seat, "channel", None)
+    if not isinstance(seat.model, ModelHandle) or media_capability(seat.model.config).images:
+        return {}
+    from auto_research.hitl.router import HUMAN
+
+    viewers = []
+    for key in router.directory(seat.agent_key) if router is not None else ():
+        if key == HUMAN:
+            continue
+        peer_config = getattr(getattr(router.seat(key), "model", None), "config", None)
+        if isinstance(peer_config, RoleModelConfig) and media_capability(peer_config).images:
+            viewers.append(key)
+    return {"viewers": sorted(viewers)}
+
+
 def _seat_viewable(seat: Any, handle: str) -> bool:
     """Whether ``handle`` is a receipt of the seat's run (openable with ``view_receipt``)."""
     store = getattr(seat, "receipts", None)
@@ -2626,15 +2734,19 @@ def _render_span(span: list, *, per_message: int = 4000) -> str:
     them apart. Each turn is capped so one enormous tool result cannot crowd out the rest of a
     session that the summary is supposed to cover end to end.
     """
+    from auto_research.agents.compaction import for_summariser
+
     out: list[str] = []
     for message in span:
         if isinstance(message, ToolResultMessage):
             for part in message.results:
                 label = f"result of {part.name}" + (" (error)" if part.is_error else "")
-                out.append(f"[{label}]\n{(part.content or '')[:per_message]}")
+                out.append(f"[{label}]\n{for_summariser(part.content or '')[:per_message]}")
             continue
         calls = getattr(message, "tool_calls", None) or ()
-        text = (getattr(message, "content", "") or "")[:per_message]
+        # What code restates, and the human's own words, are not the compactor's to paraphrase
+        # (C4, C4b): it reads a placeholder where the human spoke.
+        text = for_summariser(getattr(message, "content", "") or "")[:per_message]
         if text:
             out.append(f"[lead]\n{text}")
         for call in calls:
@@ -2651,14 +2763,19 @@ def _media_trigger(
     under: what the cut keeps (``kept``: the task and the latest round) is below the line, so a
     boundary never fires again on media it cannot remove. Else ``None``."""
     from auto_research.agents.compaction import MEDIA_BYTES_FRACTION, MEDIA_IMAGES_FRACTION
-    from auto_research.models.providers import media_limits
+    from auto_research.models.providers import media_capability, media_limits
     from auto_research.models.providers._media import media_load
 
     limits = media_limits(member)
     if limits is None or not (limits.max_images or limits.max_request_bytes):
         return None
-    images, size = media_load(messages)
-    kept_images, kept_size = media_load(kept)
+    # A document sent as its local parse carries none of its bytes to the provider (Z1f), and a
+    # member that takes no images is sent none (Z1h review): only what reaches the provider counts.
+    capability = media_capability(member)
+    images, size = media_load(messages, documents=capability.native_documents,
+                              images=capability.images)
+    kept_images, kept_size = media_load(kept, documents=capability.native_documents,
+                                        images=capability.images)
     image_line = MEDIA_IMAGES_FRACTION * limits.max_images
     byte_line = MEDIA_BYTES_FRACTION * limits.max_request_bytes
     over_images = limits.max_images and images >= image_line
@@ -2717,7 +2834,8 @@ def _compact_coding_span(messages: list, mark: int, summary: str) -> list:
     """Close a finished link's coding span as a segment bound (human ruling B14 (c)).
 
     A coding session is opened by a tool call — ``author_chain`` for the first link, the
-    ``submit_for_review`` that closed the previous one thereafter — and ``mark`` is where that
+    ``submit_for_review`` or ``respond_to_review`` that closed the previous one thereafter — and
+    ``mark`` is where that
     call's result lands. Applied at a complete tool round (the batch that closed the link has its
     results), the cut keeps everything before ``mark`` word for word, rewrites the opening answer
     to the link's outcome, and removes the rest — the coder transcript and the closing turn::
@@ -2756,7 +2874,8 @@ def _authoring_result(session: Any, spec: Any) -> MergeFlowResult:
     """The terminal ``MergeFlowResult`` for one authoring attempt, read off its session.
 
     A recorded ``last_commit_sha`` is the only success, and it is set by ``approve_edit`` inside
-    ``submit_for_review`` on gate-pass ∧ review-pass — so this reads a fact, never a claim
+    ``submit_for_review`` or a persuaded ``respond_to_review``, on gate-pass ∧ review-pass — so
+    this reads a fact, never a claim
     (§9.9: commit ⇔ gate ∧ review, and code issues the git).
     """
     spec_id = getattr(session.tool_spec, "id", None) or spec.proposed_tool_name
@@ -2775,6 +2894,19 @@ def _authoring_result(session: Any, spec: Any) -> MergeFlowResult:
     return MergeFlowResult(
         tool_spec_id=spec_id, status="failed", branch=session.branch,
         gate_report=session.last_gate, review=session.last_review, reason=reason,
+    )
+
+
+def _chain_decision(cycle: LeadCycle, attempted: Sequence[str]) -> AuthoringDecision | None:
+    """The cycle's authoring decision: every brief filed, the attempted links first in the order
+    they opened (aligned with ``outcome.authored``; each locked at its link's end, so it is the
+    version the attempt was given), then those never opened (C3)."""
+    if cycle.brief is None or not cycle.briefs:
+        return cycle.brief
+    order = [*attempted, *(bid for bid in cycle.briefs if bid not in attempted)]
+    return AuthoringDecision(
+        should_author=True, tool_specs=[cycle.briefs[bid].value for bid in order],
+        rationale=cycle.brief.rationale,
     )
 
 
@@ -2819,19 +2951,83 @@ class _ChainDriver:
         self.human_handler = human_handler
         self.coder = coder
         self.allow_correlated_review = allow_correlated_review
-        self.index = 0            # links opened so far
+        # The ids of the briefs whose links were opened, in order (C3: a session is bound to its
+        # brief by id; the queue of links still to open is the cycle's, `cycle.queue`).
+        self.attempted: list[str] = []
         self.session: Any = None  # the live one, if any
         self.spec: Any = None
+        self.brief: Any = None    # the live link's brief report
+        self.patches: dict[str, Any] = {}  # brief id -> (its link's saved patch, reset failed)
         self.mark = 0             # where the current link's coding transcript starts
         self.turn_id: str | None = None  # the lead turn whose conversation this driver edits
         # (mark, summary, tool, status) per link closed since the last boundary, in order.
         self.pending_cuts: list[tuple] = []
+        # Set when a link was refused because the toolkit tree is dirty (C2d): every later link
+        # would be refused the same way, so none is opened and no further credit is spent.
+        self.blocked: str | None = None
 
     async def advance(self) -> str:
         """Close the current link and open the next; return what to tell the lead."""
-        await self._close_current()
-        specs = list(self.cycle.brief.tool_specs) if self.cycle.brief is not None else []
-        if self.index >= len(specs):
+        closed = await self._close_current()
+        opened = await self._open_next()
+        return f"{closed}\n\n{opened}" if closed else opened
+
+    def state_lines(self) -> list[str]:
+        """One line per brief of the turn, written by code from the driver's own state (C4)."""
+        results = dict(zip(self.attempted, self.outcome.authored))
+        lines = []
+        for brief_id, brief in self.cycle.briefs.items():
+            if self.brief is brief:
+                state = "its coding session is running"
+            elif brief_id in results:
+                result = results[brief_id]
+                if result.status == "committed":
+                    state = f"committed {(result.commit_sha or '')[:10]}"
+                else:
+                    state = f"ended uncommitted ({(result.reason or 'no commit').rstrip('.')[:200]})"
+                patch, failed_reset = self.patches.get(brief_id) or (None, False)
+                if failed_reset:
+                    state += ("; clearing its uncommitted work from the toolkit failed, so the tree "
+                              "may still hold it" + (f"; saved as a patch at {patch}" if patch else ""))
+                elif patch:
+                    state += f"; work left uncommitted was saved as a patch at {patch}"
+            elif brief_id in self.attempted:
+                # Opened, never closed by the chain: the run ended with it (a stop), and the
+                # stop's cleanup resets its work.
+                state = "its coding session ended with the run; the stop's cleanup resets its work"
+            elif brief.stranded:
+                state = "never attempted: no link can open it"
+            elif brief_id in self.cycle.queue:
+                state = f"queued, {self.cycle.queue.index(brief_id) + 1} of {len(self.cycle.queue)}"
+            else:
+                state = "filed"
+            from auto_research.agents.react import _LOCKED_BY
+
+            lock = (f"; locked ({_LOCKED_BY.get(brief.locked_by, brief.locked_by)})"
+                    if brief.locked_by else "")
+            lock += f", receipt {brief.receipt}" if brief.receipt else ""
+            lines.append(f"- brief {brief_id} ({brief.value.proposed_tool_name}): {state}; "
+                         f"version {brief.sha256[:8]}{lock}")
+        return lines
+
+    def state_text(self) -> str:
+        """The chain as the runtime holds it (C4), restated after every cut."""
+        lines = self.state_lines() or ["- no brief filed yet this turn"]
+        return ("Your coding chain this turn, as the runtime holds it:\n" + "\n".join(lines)
+                + f"\nAuthor credits left: {self.outcome.author_budget}.")
+
+    def _strand_queue(self) -> None:
+        """The queued briefs no link can open any more (ruling C3c): each is kept, locked at
+        turn_end as what was never attempted, and its validator blocks nothing."""
+        for brief_id in self.cycle.queue:
+            self.cycle.briefs[brief_id].stranded = True
+
+    async def _open_next(self) -> str:
+        """Open the next unfinished link, if any; return what to tell the lead."""
+        if self.blocked is not None:
+            self._strand_queue()
+            return self.blocked
+        if not self.cycle.queue:
             return (
                 "The chain is finished — every link you briefed has been attempted. Write your "
                 "report with edit_report and call turn_end. You may also brief a new chain with "
@@ -2839,16 +3035,20 @@ class _ChainDriver:
                 f"({self.outcome.author_budget} left)."
             )
         if self.outcome.author_budget <= 0:
+            self._strand_queue()
             return (
                 "No author credits remain, so no further link can be opened. Write your report "
                 "with edit_report — say what capability is still missing — and call turn_end. An "
                 "honest stop is a correct outcome with no quality penalty (§9.6)."
             )
-        spec = specs[self.index]
-        self.index += 1
+        brief_id = self.cycle.queue.pop(0)
+        brief = self.cycle.briefs[brief_id]
+        spec = brief.value
+        self.attempted.append(brief_id)
+        position, total = len(self.attempted), len(self.attempted) + len(self.cycle.queue)
         self.outcome.author_budget -= 1
         try:
-            await self._open(spec)
+            await self._open(spec, brief)
         except Exception as exc:  # noqa: BLE001 — an unopenable link is a result, not a crash
             # A dirty authoring branch is the known case (ToolkitBranchUnclean); anything else
             # that stops a session from opening is treated the same way, because an F6-class
@@ -2863,16 +3063,43 @@ class _ChainDriver:
                 status="failed",
                 reason=f"the coding session could not be opened: {exc}",
             )
+            # An attempt that never opened ended too: its brief locks as given (C3 ruling).
+            brief.lock("link_end")
+            mint_brief(brief, getattr(self.provider, "receipts", None),
+                       getattr(self.provider, "receipt_source", None))
             self.outcome.authored.append(result)
             await self.lead._record(
                 "analyst.tool.authored", level=5,
                 summary=f"Tool authoring failed: {spec.proposed_tool_name}",
                 data={"result": result.model_dump(mode="json")},
             )
-            return await self.advance()
+            # The lead is told which link and why, in the result that closed the previous one
+            # (C2c); before, it read only what came next, as if the link had been attempted.
+            from auto_research.sandbox.merge_flow import ToolkitBranchUnclean
+
+            if isinstance(exc, ToolkitBranchUnclean):
+                # One fixed sentence (C2d): the refusal's own text is written for a human (paths,
+                # git commands), and it is in the ledger above.
+                self.blocked = (
+                    "The chain stops here: the toolkit tree still holds uncommitted changes, so "
+                    "no further link can be opened. Write your report with edit_report — say "
+                    "which capabilities are still missing — and call turn_end."
+                )
+                self._strand_queue()
+                return (
+                    f"Coding session {position} of {total} on '{spec.proposed_tool_name}' "
+                    "could not be opened: the toolkit tree still holds uncommitted changes. It is "
+                    "recorded as a failed link and used one author credit.\n\n" + self.blocked
+                )
+            return (
+                f"Coding session {position} of {total} on '{spec.proposed_tool_name}' "
+                f"could not be opened ({type(exc).__name__}: {exc}); it is recorded as a failed "
+                "link and used one author credit.\n\n" + await self._open_next()
+            )
         return (
-            f"Coding session {self.index} of {len(specs)} is open on "
-            f"'{spec.proposed_tool_name}'. The coder has your brief and is working on it now — "
+            f"Coding session {position} of {total} is open on "
+            f"'{spec.proposed_tool_name}' (brief {brief_id}). The coder has your brief and is "
+            "working on it now — "
             "you keep your turn, and it will take minutes rather than seconds. Spend them on "
             "the library it is extending, the next link, or your report, and when you have "
             "nothing else to do for this link call wait_for_reply: it returns the moment the coder "
@@ -2909,13 +3136,41 @@ class _ChainDriver:
             monitor=self.lead.monitor,
         )
 
-    async def _open(self, spec: Any) -> None:
+    async def _open(self, spec: Any, brief: Any = None) -> None:
         session = await self._build_session(spec)
-        await session.connect()
+        control = self.lead.run_control
+        if brief is not None:
+            # Bound by id (C3): the session reads the brief's current version from here on.
+            session.brief, brief.bound = brief, True
+        try:
+            await session.connect()
+        except Exception:
+            # Built but never published, so nothing else would close it (C2d): its coder and any
+            # restored submission in the tree go with it, then the refusal is the caller's.
+            if brief is not None:
+                brief.bound = False  # no session reads it: the link never opened
+            try:
+                await session.aclose()
+            except Exception as close_exc:  # noqa: BLE001 — the connect error is the one raised
+                await self.lead._record(
+                    "analyst.tool.close_failed", level=2,
+                    summary=f"Closing an unconnected coding session failed ({spec.proposed_tool_name})",
+                    data={"error": repr(close_exc)},
+                )
+                if control is not None:
+                    control.unclosed_sessions.append(session)  # the run's teardown retries it
+            raise
+        except BaseException:
+            # A cancel (a /stop): the bounded teardown closes it, leaf to root (D8).
+            if brief is not None:
+                brief.bound = False
+            if control is not None:
+                control.unclosed_sessions.append(session)
+            raise
         if self.lead.run_control is not None:
             self.lead.run_control.authoring_session = session
         self.provider.authoring_session = session
-        self.session, self.spec = session, spec
+        self.session, self.spec, self.brief = session, spec, brief
         self.cycle.session_open = True
         # A message for the lead (a human steer, the coder's question) wakes a pending `wait_for_reply` at once, rather than at its
         # timeout; the steer itself is still delivered by the loop's own drain (A2 hold rule).
@@ -2942,12 +3197,25 @@ class _ChainDriver:
         else:
             await session.drive(session.initial_message)
 
-    async def _close_current(self) -> None:
-        """Record the finished link's result, compact its coding span, release the session."""
+    async def _close_current(self) -> str:
+        """Record the finished link's result, compact its coding span, release the session.
+
+        Returns "" or, when the session's close raised, the sentence telling the lead so (C2b):
+        the tool call that closed the link still returns, so a commit it landed keeps its receipt.
+        """
         if self.session is None:
-            return
+            return ""
         session, spec = self.session, self.spec
         self.session = self.spec = None
+        brief_id = self.brief.id if self.brief is not None else None
+        if self.brief is not None:
+            # Its consumption ended (C3 ruling): an uncommitted link's brief locks here and keeps
+            # what the failed attempt was given; a committed one locked at its commit.
+            self.brief.bound = False
+            self.brief.lock("link_end")
+            mint_brief(self.brief, getattr(self.provider, "receipts", None),
+                       getattr(self.provider, "receipt_source", None))
+            self.brief = None
         self.cycle.session_open = False
         result = _authoring_result(session, spec)
         self.outcome.authored.append(result)
@@ -2970,7 +3238,37 @@ class _ChainDriver:
             data={"result": result.model_dump(mode="json")},
         )
         self.provider.authoring_session = None
-        await session.aclose()
+        try:
+            await session.aclose()
+        except Exception as exc:  # noqa: BLE001 — a session that will not close is a result, not a crash
+            if brief_id is not None:
+                self.patches[brief_id] = (getattr(session, "reset_patch", None),
+                                      bool(getattr(session, "reset_failed", False)))
+            # The handle moves to the run's unclosed sessions (C2c): the run's teardown closes it
+            # again, leaf to root (D8), and the next link's `_open` cannot overwrite it.
+            control = self.lead.run_control
+            if control is not None:
+                if control.authoring_session is session:
+                    control.authoring_session = None
+                control.unclosed_sessions.append(session)
+            try:
+                dirty = session.pending_changes()
+            except Exception:  # noqa: BLE001 — an unreadable tree is reported as possibly dirty
+                dirty = True
+            await self.lead._record(
+                "analyst.tool.close_failed", level=2,
+                summary=f"Closing the coding session failed ({spec.proposed_tool_name})",
+                data={"error": repr(exc), "tree_dirty": dirty},
+            )
+            return (
+                f"Closing the coding session for {spec.proposed_tool_name} failed "
+                f"({type(exc).__name__}: {exc}); "
+                + ("the toolkit tree may still hold its uncommitted changes." if dirty
+                   else "the toolkit tree is clean.")
+            )
+        if brief_id is not None:
+            self.patches[brief_id] = (getattr(session, "reset_patch", None),
+                                      bool(getattr(session, "reset_failed", False)))
         # Released only once it closed (D8): a /stop landing mid-close leaves the handle, and the
         # stop's cleanup closes it again, resetting the branch.
         if (
@@ -2978,6 +3276,7 @@ class _ChainDriver:
             and self.lead.run_control.authoring_session is session
         ):
             self.lead.run_control.authoring_session = None
+        return ""
 
     async def _outcome_for(self, spec: Any, result: Any, span: list, session: Any) -> str:
         """What the opening call answers with once its link is decided.
@@ -3068,7 +3367,16 @@ class _ChainDriver:
             for message in messages[mark + 1:] if isinstance(message, ToolResultMessage)
             for part in message.results if part.name in _CHAIN_DRIVING_TOOLS
         ]
-        outcome = summary + (f"\n\n{closing[-1]}" if closing else "")
+        # Code restates what the cut removes and a summary may lose (C4): the human's words in the
+        # span, word for word, and the chain as it stands. The summariser never writes these.
+        from auto_research.agents.compaction import human_exchange_text, restated as restate
+
+        # The whole exchange, not the span's share: a later link's cut rewrites this same answer,
+        # so a ruling restated only once would leave with it.
+        spoken = list(getattr(self.lead, "human_exchange", ()) or ())
+        blocks = ([human_exchange_text(spoken)] if spoken else []) + [self.state_text()]
+        outcome = (summary + (f"\n\n{closing[-1]}" if closing else "")
+                   + "\n\n" + restate("\n\n".join(blocks)))
         dropped = len(messages) - mark - 1
         messages[:] = _compact_coding_span(messages, mark, outcome)
         if self.session is not None:
@@ -3100,6 +3408,8 @@ class _ChainDriver:
         """
         if self.session is not None and _run_ending(self.lead.run_control):
             self.session = self.spec = None
+            if self.brief is not None:
+                self.brief.bound, self.brief = False, None
             self.pending_cuts = []
             self.provider.authoring_session = None
             self.cycle.session_open = False
@@ -3149,6 +3459,33 @@ class AnalystLeadAgent(AgentRole):
         self._figure_catalog: dict[str, list[FigureRef]] = {}
         self._round = 0
         self._last_report: AnalystReport | None = None
+
+    def _load_exchange(self) -> None:
+        """The exchange, and the chain lines of earlier cycles, from the run's ledger once (C4b)."""
+        super()._load_exchange()
+        if "_earlier_chain" in self.__dict__:
+            return
+        from auto_research.agents.history import chain_states
+
+        key, monitor = getattr(self, "agent_key", None), getattr(self, "monitor", None)
+        self._earlier_chain: list[str] = (
+            chain_states(monitor, key, run_id=getattr(monitor, "run_id", None))
+            if key and monitor is not None else []
+        )
+
+    def _pin_state(self) -> str | None:
+        """The exchange with the human, then the chain as the runtime holds it: this turn's
+        briefs and those of earlier cycles (C4)."""
+        self._load_exchange()
+        parts = [part for part in [super()._pin_state()] if part]
+        driver = getattr(self, "_chain_driver", None)
+        if driver is not None:
+            parts.append(driver.state_text())
+        earlier = getattr(self, "_earlier_chain", None)
+        if earlier:
+            parts.append("Your briefs of earlier cycles, as they ended:\n"
+                         + "\n".join(f"- {line}" for line in earlier))
+        return "\n\n".join(parts) or None
 
     def _make_report_workspace(
         self, source_reports: dict[str, AnalystReport]
@@ -3339,6 +3676,12 @@ class AnalystLeadAgent(AgentRole):
         provider.report_workspace = workspace
         provider.cycle = cycle
         provider.turn_end_validator = lambda: lead_turn_problems(cycle, workspace, viewable=self._viewable_by_message)
+        if workspace is not None:
+            # The turn's briefs are reports of the same turn (C3): one dict, reached by id.
+            workspace.briefs, workspace.viewable = cycle.briefs, self._viewable_by_message
+            from auto_research.agents.react import _brief_viewable
+
+            cycle.brief_viewable = _brief_viewable(workspace)
 
         driver = _ChainDriver(
             lead=self,
@@ -3355,6 +3698,7 @@ class AnalystLeadAgent(AgentRole):
             allow_correlated_review=allow_correlated_review,
         )
         cycle.advance_chain = driver.advance
+        self._chain_driver = driver  # its state is restated after every cut (C4)
         driver.turn_id = turn_id = new_turn_id(self.agent_key or self.role)
 
         turn = TurnOutcome()
@@ -3375,18 +3719,52 @@ class AnalystLeadAgent(AgentRole):
                 turn_id=turn_id,
                 history_base=history_base,
             )
+        except BaseException as exc:
+            if isinstance(exc, ModelCallFailed):
+                # The cycle's outcome leaves with the failure (C3b): the debate charges the author
+                # credits it spent (N11), and the close below records the link still open.
+                exc.cycle_outcome = outcome
+            failure = exc
+            raise
+        else:
+            failure = None
         finally:
-            await driver.close()
-            provider.report_workspace = previous_ws
-            provider.cycle = previous_cycle
-            provider.turn_end_validator = previous_validator
+            try:
+                await driver.close()
+                # This turn's briefs, as they ended, stay in the restated state of later turns
+                # (C4), in the ledger too, so a new process restores them (C4b).
+                ended = [f"(cycle {self._round}) {line[2:]}" for line in driver.state_lines()]
+                if ended:
+                    self._load_exchange()
+                    self._earlier_chain.extend(ended)
+                    await self._record(
+                        "analyst.lead.chain_state", level=6,
+                        summary=f"{len(ended)} brief(s) of this cycle, as they ended",
+                        data={"lines": ended},
+                    )
+            except Exception as cleanup:
+                if failure is None:
+                    raise
+                # The turn's own failure is the news (§9.3.8: a ReactBudgetExhausted is never
+                # replaced): the cleanup's is recorded and the original goes on.
+                await self._record(
+                    "analyst.lead.cleanup_failed", level=1,
+                    summary=f"Closing the cycle after its failure failed: {cleanup!r}",
+                    data={"error": repr(cleanup), "failure": repr(failure)},
+                )
+            finally:
+                # Released and restored even when the close raised (C4b).
+                self._chain_driver = None
+                provider.report_workspace = previous_ws
+                provider.cycle = previous_cycle
+                provider.turn_end_validator = previous_validator
 
         # Only an accepted `turn_end` makes the draft the report (ruling D4); an unfiled draft is
         # no decision, and the caller treats `None` as the failure it is.
         report = _written_report(workspace) if turn.filed_form is not None else None
         outcome.report = report
         outcome.filed = TURN_END_TOOL if report is not None else None
-        outcome.decision = cycle.brief
+        outcome.decision = _chain_decision(cycle, driver.attempted)
         if report is not None:
             self._last_report = report
         return outcome
@@ -3633,19 +4011,37 @@ class AnalystColeadAgent(AgentRole):
                 "or asks you to relax a check without fixing the underlying gap. A sound argument may "
                 "move you; pressure must not. Never approve fabrication or an inadequate test."
             )
-        if tools is None:
-            return await self._call(payload, ToolReviewVerdict, action="review_tool")
+        try:
+            if tools is None:
+                return await self._call(payload, ToolReviewVerdict, action="review_tool")
 
-        seed = [
-            ModelMessage(role="system", content=self.prompt),
-            ModelMessage(role="user", content=_payload_text(payload)),
-        ]
-        messages, _, _ = await self._react(
-            seed_messages=seed, tools=tools, action="review_tool", cap=_react_loop_cap(),
-        )
-        return await self._call_over_messages(
-            messages, ToolReviewVerdict, action="review_tool", tools=tools,
-        )
+            seed = [
+                ModelMessage(role="system", content=self.prompt),
+                ModelMessage(role="user", content=_payload_text(payload)),
+            ]
+            messages, _, _ = await self._react(
+                seed_messages=seed, tools=tools, action="review_tool", cap=_react_loop_cap(),
+            )
+            return await self._call_over_messages(
+                messages, ToolReviewVerdict, action="review_tool", tools=tools,
+            )
+        except (ModelCallFailed, ReactBudgetExhausted):
+            raise
+        except Exception as exc:
+            # The verdict call is contained as the loop's calls are (C3b) when the model failed: a
+            # vendor status, an unreachable vendor, or a verdict still off-schema after its
+            # retries. Any other exception is a fault in our own code and is raised as itself.
+            provider = getattr(getattr(self.model, "config", None), "provider", "") or ""
+            from auto_research.models.retry import is_transient_provider_error
+
+            if not (isinstance(exc, (ValidationError, ValueError))
+                    or _provider_status(exc) is not None
+                    or is_transient_provider_error(exc, provider)):
+                raise
+            raise ModelCallFailed(
+                agent=self.agent_key or self.role, action="review_tool", cause=exc,
+                provider=provider,
+            ) from exc
 
 
 def _select_model(group: ModelGroupHandle, model_name: str | None) -> ModelHandle:
@@ -3714,25 +4110,45 @@ class TurnOutcome:
     requeued_from: list[tuple[str, str]] = field(default_factory=list)
 
 
-class ProviderTurnFailed(RuntimeError):
-    """A unit's turn ended because its model provider failed in a way retry does not fix (D1).
+class ModelCallFailed(RuntimeError):
+    """A unit's turn ended because its model call raised (D1; every exception since A4, 2026-11-04).
 
-    Raised by :meth:`AgentRole._react_loop` when ``ModelHandle.call`` raises a provider error
-    (``is_provider_error``) — a 400 such as "prompt is too long", a 401, or a transient condition
-    whose retry budget is spent. The event ``<role>.<action>.provider_error`` is already in the
-    ledger when this is raised, and nothing was filed on the unit's behalf (§2b). A caller with
-    peers to carry on with contains it (the analyst debate drops that worker's report for the
+    Raised by :meth:`AgentRole._react_loop` when ``ModelHandle.call`` raises anything — a provider
+    error retry does not fix (a 400 such as "prompt is too long", a 401, a transient condition
+    whose retry budget is spent) or an exception raised before the provider (building the
+    request). The event ``<role>.<action>.model_call_failed`` is already
+    in the ledger when this is raised, and nothing was filed on the unit's behalf (§2b). A caller
+    with peers to carry on with contains it (the analyst debate drops that worker's report for the
     round); a caller with none lets it end the run (CLAUDE.md §9.3.8: contained failure).
-    ``agent`` is the unit's key, ``action`` its loop, ``cause`` the provider's exception and
-    ``status_code`` the HTTP status it carries (``None`` for a connection failure).
+    ``agent`` is the unit's key, ``action`` its loop, ``cause`` the exception the call raised and
+    ``status_code`` the HTTP status it carries (``None`` for a connection failure or a refusal
+    before the provider), ``provider`` the failing seat's vendor (its error vocabulary).
     """
 
-    def __init__(self, *, agent: str, action: str, cause: BaseException) -> None:
+    def __init__(
+        self, *, agent: str, action: str, cause: BaseException, provider: str = ""
+    ) -> None:
         self.agent = agent
         self.action = action
         self.cause = cause
+        self.provider = provider  # the failing seat's vendor, which classifies its error (A4b)
         self.status_code = _provider_status(cause)
-        super().__init__(f"{agent}.{action}: provider error ended the turn: {cause!r}")
+        super().__init__(f"{agent}.{action}: a failed model call ended the turn: {cause!r}")
+
+    #: The lead's cycle outcome when this left ``run_cycle`` (C3b): the author credits it spent
+    #: are charged from it, never refilled (N11).
+    cycle_outcome: Any = None
+
+    @property
+    def account_wide(self) -> bool:
+        """A failure of the account rather than of this turn: an auth refusal, or every key
+        spent — read in the vocabulary of the seat that failed (``provider``). It ends the run
+        (ruling (c), A4b), wherever it is raised."""
+        if self.status_code in (401, 403):
+            return True
+        from auto_research.models.retry import is_exhausted_key_error
+
+        return bool(self.provider) and is_exhausted_key_error(self.cause, self.provider)
 
 
 #: Said once, at budget exhaustion, before the grace window opens.
@@ -3889,6 +4305,10 @@ class ChannelTools:
                 kind=str(arguments.get("kind") or "clarify_science"),
                 model=_model_label(role.model) or "",
             )
+            if not is_error and str(arguments.get("to") or "") == "human":
+                note = getattr(role, "_note_human", None)
+                if note is not None:
+                    note("to", str(arguments.get("text") or ""))
             return ToolOutcome(text=text, is_error=is_error)
         if name == LIST_PEERS_TOOL:
             listed = execute_list_peers(router, key, _model_label)
@@ -3901,10 +4321,7 @@ class ChannelTools:
             ))
         if name == VIEW_RECEIPT_TOOL:
             store = router.store if router.store is not None else getattr(role, "receipts", None)
-            return await execute_view_receipt(
-                store, arguments,
-                images_ok=bool(getattr(getattr(role.model, "config", None), "vision", True)),
-            )
+            return await execute_view_receipt(store, arguments)
         if name == WAIT_FOR_REPLY_TOOL:
             session = getattr(self._base, "authoring_session", None)
             if not self.resumed and session is not None and hasattr(session, "wait_for_event"):

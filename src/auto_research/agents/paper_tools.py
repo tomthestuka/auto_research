@@ -114,9 +114,9 @@ class PaperReader:
             "name": READ_PAPER_TOOL,
             "description": (
                 lead
-                + "Open a paper: its PDF is attached to your context, so you read the whole paper as "
-                "printed — text, tables, equations and figures — and it stays attached for the rest "
-                "of your work. Open a local PDF with path=..., or a paper you can read by handle. "
+                + "Open a paper: it joins your context as your model reads a paper (the PDF as "
+                "printed, or its extracted text with a note saying so) and stays for the rest of "
+                "your work. Open a local PDF with path=..., or a paper you can read by handle. "
                 "Cite it by the handle this returns, e.g. {{lib:p3}}. A paper is cited, not quoted: "
                 "state what it reports in your own words, and attribute each value with its place, "
                 '{{lib:p3 "value" Table 2}}.'
@@ -185,7 +185,7 @@ class PaperReader:
         ids = format_ids(receipt.ids or {}) or "no identifiers recorded"
         return ToolOutcome(
             text=(
-                f"[{receipt.handle}] {receipt.title} — the PDF is attached ({ids}). Cite it as "
+                f"[{receipt.handle}] {receipt.title} — the paper follows ({ids}). Cite it as "
                 f'{{{{{receipt.handle}}}}}, and a value from it with its place, '
                 f'{{{{{receipt.handle} "<value>" Table 2}}}}.'
             ),

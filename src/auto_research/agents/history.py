@@ -215,6 +215,74 @@ def ledger_events(source: Any, actor: str, *, run_id: str | None = None) -> list
     return [r for r in rows if r.get("actor") == actor and HISTORY_KEY in (r.get("data") or {})]
 
 
+#: How a human's text opens when a seat is shown it (``run_control.InboxEntry.render``).
+_HUMAN_HEADS = ("[Reply from the human] ", "[Human steer] ", "[Message from human] ")
+
+
+def _human_words(rendered: str) -> str:
+    """The human's own words in a rendered inbox text: the head, the receipts line and the closing
+    guidance paragraph taken off."""
+    body = rendered
+    for head in _HUMAN_HEADS:
+        if body.startswith(head):
+            body = body[len(head):]
+            break
+    body = body.rsplit("\n\n(", 1)[0]
+    return body.split("\n\nReceipts this text names", 1)[0]
+
+
+def human_exchange(source: Any, actor: str, *, run_id: str | None = None) -> list[tuple[str, str]]:
+    """The actor's exchange with the human, oldest first, read from the run's ledger (C4, C4b):
+    what it sent the human (``channel.message`` to ``human``, ``("to", text)``) and every human
+    text it was shown — a reply, a ``/steer``, a message (the ``<role>.<action>.<kind>`` record of
+    the injection, ``("from", words)``). A seat in a new process starts from this."""
+    path = getattr(source, "jsonl_path", None) if not isinstance(source, str | Path) else source
+    if path is None or not Path(path).is_file():
+        return []
+    out: list[tuple[str, str]] = []
+    needle = json.dumps(actor)
+    with Path(path).open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if needle not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if run_id is not None and row.get("run_id") != run_id:
+                continue
+            data = row.get("data") or {}
+            event = str(row.get("event") or "")
+            if event == "channel.message" and data.get("from") == actor and data.get("to") == "human":
+                out.append(("to", str(data.get("text") or "")))
+            elif row.get("actor") == actor and event.rsplit(".", 1)[-1] in ("reply", "steer", "message"):
+                message = str(data.get("message") or "")
+                if message.startswith(_HUMAN_HEADS):
+                    out.append(("from", _human_words(message)))
+    return out
+
+
+def chain_states(source: Any, actor: str, *, run_id: str | None = None) -> list[str]:
+    """The lead's chain lines of its earlier cycles, as each cycle recorded them when it ended
+    (``analyst.lead.chain_state``), oldest first (C4b)."""
+    path = getattr(source, "jsonl_path", None) if not isinstance(source, str | Path) else source
+    if path is None or not Path(path).is_file():
+        return []
+    lines: list[str] = []
+    with Path(path).open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if '"analyst.lead.chain_state"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("actor") != actor or (run_id is not None and row.get("run_id") != run_id):
+                continue
+            lines.extend(str(x) for x in (row.get("data") or {}).get("lines") or ())
+    return lines
+
+
 def _from_jsonl(path: Path, actor: str) -> list[dict[str, Any]]:
     needle = json.dumps(actor)
     out: list[dict[str, Any]] = []

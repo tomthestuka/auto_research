@@ -409,7 +409,10 @@ def test_the_coding_middle_goes_and_the_opening_call_carries_the_outcome(monkeyp
         "the opening call's answer must carry the link's outcome — it is the only account of "
         "the link the lead keeps"
     )
-    assert answer.content.endswith("\n\nok"), "what the closing call answered rides along"
+    from auto_research.agents.compaction import RESTATED_MARK
+
+    # What the closing call answered rides along, then what code restates (C4).
+    assert f"\n\nok\n\n{RESTATED_MARK}\n" in answer.content
 
 
 def test_a_failed_link_hands_the_choice_back(monkeypatch):
@@ -654,7 +657,9 @@ def test_the_lead_provider_declares_its_own_surface(tmp_path):
     )
     # A5: value fields replaced when sent; findings and figures edited in place.
     # A7: Edit over the draft document; the lead's blocks are named in the description.
-    assert set(declared["input_schema"]["properties"]) == {"old_string", "new_string", "replace_all"}
+    # C3: a lead with authoring on also names the report it changes (its result, or a brief).
+    assert set(declared["input_schema"]["properties"]) == {
+        "old_string", "new_string", "replace_all", "report"}
     for field in LEAD_REPORT_FIELDS:
         assert f"# {field} —" in declared["description"]
     assert "# tool_request" not in declared["description"]
@@ -678,7 +683,13 @@ def _driver_with(monkeypatch, statuses):
 
     parsed = [ToolSpec.model_validate(spec) for spec in specs]
     cycle = LeadCycle(authoring_enabled=True, rounds_left=1)
-    cycle.brief = AuthoringDecision(should_author=True, tool_specs=parsed, rationale="r")
+    # Filed as the lead files it (C3): one brief report per link, queued in order.
+    from auto_research.agents.react import execute_author_chain
+
+    asyncio.run(execute_author_chain(cycle, {
+        "first_link": parsed[0].model_dump(mode="json"),
+        "additional_links": [s.model_dump(mode="json") for s in parsed[1:]], "rationale": "r",
+    }))
     outcome = LeadCycleOutcome(filed=None, author_budget=len(statuses) + 2)
     messages: list = [ModelMessage(role="user", content="seed")]
 

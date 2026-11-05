@@ -37,19 +37,40 @@ providers by editing YAML alone
   configs. (All roles are currently required; non-required roles return only as the system
   grows.)
 - Model identifiers and per-role parameters live in YAML, not Python source.
-- `ModelHandle.call()` accepts text messages and optional `FigureRef` images.
-  If images are passed to a role member whose config has `vision: false`, it
-  raises `ValueError`.
-- `ModelHandle.call()` also accepts optional `DocumentRef` attachments. If
-  documents are passed to a role member whose config has `documents: false`, it
-  raises `ValueError`, and so do documents nested in a tool result. A document a tool opened
+- **A member's media capability is its model's entry in `config/model_capabilities.yaml`** (Z1d,
+  user ruling 2026-11-04; partly reverses A1), read by `providers.media_capability(config)`; the
+  builders write each entry from the vendor's documentation and the adapters trust it. Never a
+  member flag (`vision`/`documents` retired; the registry refuses them as unknown keys).
+- **The model-input sanitiser** (`models.sanitise.sanitise`, A2, CLAUDE.md §9.3.9) runs inside
+  `ModelHandle.call()` on the whole normalised request before any adapter sees it: every figure
+  and document in a user message (a task's, a peer's, the history seed's), in a tool result, and on
+  the call-time `images=` / `documents=` channel, judged against the member's capability:
+  - a medium the member takes natively passes untouched (the same object, so the request is
+    byte-identical to what it was);
+  - a document for a member with no native document channel becomes the local parse
+    (`_doc_parse.parse_document`): an `[extracted document]` note with the text, in place where
+    the document rode, plus its figure crops when the member takes images;
+  - an image for a text-only member, or a document the parser cannot read, is withheld: a
+    `[withheld]` / `[unavailable]` note the model reads names it (a figure by its receipt handle,
+    `FigureRef.receipt`, when it has one, A3) and asks the peers whose members take images
+    (`viewers=`, which `_react_loop` passes from the seat's channel, A2) to look at it with
+    `view_receipt`; with no viewer named it states the fact alone.
+  Call-time media the member cannot take natively arrive as one trailing user message. The same
+  input gives the same output (fixed notes, the parse read from its content-keyed cache, a failed
+  parse remembered), so a replayed turn keeps the prompt cache. The adapter keeps only the volume
+  limits. For a member without native documents the sanitiser runs in a worker thread
+  (`asyncio.to_thread`, A3), so a first Docling parse (~40 s) leaves the event loop free; parses are
+  serialised by `_doc_parse._PARSE_LOCK`. A cancelled call (`/stop`) returns at once while its parse
+  thread runs to completion (a thread cannot be cancelled; the cache stays whole, the manifest is
+  written last), so process exit can wait up to one parse.
+- `ModelHandle.call()` accepts text messages, optional `FigureRef` images and optional
+  `DocumentRef` attachments, and documents nested in a tool result. A document a tool opened
   rides that result (`ToolResultPart.documents`, R2): Anthropic nests a `document` block in the
   `tool_result` content ("Example of tool result with documents", handle-tool-calls), Responses
   vendors put an `input_file` in the user item right after the `function_call_output` items,
   Google a part after the function response — so it is sent once, at its place, inside the cached
-  prefix. Alibaba, which reads a document only as locally extracted text, moves a nested document
-  to its call-time substitution (`_media.hoist_documents`; residual: there it is re-sent at the end
-  of every call). Call-time `documents=` (a tool-less structured call) stay where they were: first
+  prefix. A vendor that reads a document only as locally extracted text gets the parse at that same
+  place (A2; the R2 residual of re-sending it at the end of every call is gone). Call-time `documents=` (a tool-less structured call) stay where they were: first
   after `system` on Anthropic, last elsewhere.
 - **Figures carry pixels at the multimodal boundary, two ways.** A `FigureRef`'s
   bytes are loaded and base64'd into a native image block only inside the adapter —
@@ -69,7 +90,7 @@ providers by editing YAML alone
   | OpenAI | a `user` item after the `function_call_output` | `output` **may** be an array ("For functions that return images or files, you can pass an array of image or file objects instead of a string"), but OpenAI publishes no counterpart to the "only `tool_result` blocks" rule, its input is a flat item list rather than paired messages, and no failure has been observed on the current shape (548 requests in one measured leg, one carrying 18 image blocks). Left as-is deliberately; 8-20 parts in one output is undocumented and has no published example |
   | Alibaba | a `user` item after the `function_call_output` | `function_call_output.output` is typed "(string, required)" with no array variant, and image parts are legal only inside a `user` item. Bundling would violate a published type. Its one ordering rule — a `function_call_output` "must immediately follow its corresponding function_call message" — is why the image item comes strictly after, never between |
   | Z.AI | a `user` item after the `function_call_output` | Publishes no Responses item-level reference at all; its only documented tool-result schema (Chat Completions `tool` role) is string-only. Silence is not permission |
-  | DeepSeek | withheld (`images_accepted=False`) | Its reference *does* document the array form for `deepseek-flash`, but this adapter sends no images, so the branch is unreachable |
+  | DeepSeek | a `user` item after the `function_call_output` | Its reference documents `input_image` parts inside `function_call_output.output` for `deepseek-flash`; the shared Responses placement (a following `user` item) is also legal there ("allowed in `user` / `developer` messages") and is what this adapter sends |
   | Google | a `user` `Content` after the `functionResponse` | Its nesting is a different mechanism — `FunctionResponse.parts[].inline_data`, "available for Gemini 3 series models", and `FunctionResponsePart` has no text variant so a caption cannot travel with the image. Out of every figure-receiving seat anyway ([I8]) |
 - **Provider-native context editing (Anthropic, beta — the context-pressure valve for long
   loops).** On the `cache_prefix` paths (the ReAct tool loop and the terminal report call),
@@ -130,17 +151,18 @@ providers by editing YAML alone
   Being stateless is what makes that possible — the adapter holds everything before it sends, and
   provider limits are defined over exactly that set. Each adapter owns its own `_LIMITS`
   (`MediaLimits`), every field quoting the provider doc it comes from, because the limits differ
-  enough that a shared cap would be wrong for all three:
+  enough that a shared cap would be wrong for any two of them:
 
-  | | Anthropic | OpenAI | Google |
-  |---|---|---|---|
-  | image mimes | jpeg/png/gif/webp | png/jpeg/webp/gif | png/jpeg/webp/heic/heif |
-  | max images | 100 | 1500 | 3600 |
-  | >20 blocks ⇒ stricter edge | **2000 px** | — | — |
-  | max edge | 8000 px | — | — |
-  | max bytes/image | 10 MB | — | — |
-  | max request | 32 MB | 512 MB | **20 MB inline** |
-  | documents | PDF ≤100 pages | ≤50 MB | within 20 MB |
+  | | Anthropic | OpenAI | Google | Alibaba | Z.AI |
+  |---|---|---|---|---|---|
+  | image mimes | jpeg/png/gif/webp | png/jpeg/webp/gif | png/jpeg/webp/heic/heif | jpeg/png/webp | jpeg/png |
+  | max images | 100 (600 above a 200k window) | 1500 | 3600 | 250 (Base64) | — |
+  | >20 blocks ⇒ stricter edge | **2000 px** (page: 3,000; 2677 px refused, run 8c75990e) | — | — | — | — |
+  | max edge | 8000 px | — | — | — | 6000 px |
+  | max bytes/image (base64-encoded) | 10 MB | — | — | 13.3 MB (10 MB raw) | 5 MB |
+  | max request | 128 MB | 512 MB | **20 MB inline** | 16 MiB (DashScope domain) | — |
+  | documents | PDF ≤100 pages per request, summed (600 at 1M) | ≤50 MB | within 20 MB | parsed | parsed |
+  | shape | — | — | — | sides >10 px, ≤200:1; above 3840x2160 JPEG/PNG only (WebP re-encoded) | — |
 
   Checks apply in order — mime, count, pages, per-item bytes, dimensions, then the whole-request
   payload budget, which evicts **oldest-first** (the current turn's evidence is what the model is
@@ -154,14 +176,16 @@ providers by editing YAML alone
   which cannot be, is **withheld**. Either way the block is replaced by a model-visible note naming
   the file and the reason — never a silent absence, which is what invites invention.
 
-  **A vendor with no usable file channel gets the document assembled locally instead.**
+  **A vendor with no usable file channel gets the document assembled locally instead** (by the
+  model-input sanitiser since A2, no longer inside this adapter).
   `ResponsesVendor.accepts_inline_documents` declares whether a vendor takes the inline base64
-  `input_file` part this adapter builds. It is a *capability*, read from that vendor's own
-  reference, defaulting `True` (the OpenAI shape) so every unread vendor stays byte-identical on
-  the wire. Alibaba is the one `False`: its Create-a-response reference accepts `input_file` by
-  **`file_url` (a public URL) only** — neither `file_data` nor `file_id` — and restricts PDF input
-  to `qwen3.5-ocr`. Our papers are local files, and publishing one to obtain a URL is not something
-  a run may do.
+  `input_file` part this adapter builds. It is a wire fact of the vendor's dialect (which model
+  reads PDFs is the capability table's), read from that vendor's own reference, defaulting `True`
+  (the OpenAI shape). `False` for Alibaba — its Create-a-response
+  reference accepts `input_file` by **`file_url` (a public URL) only** — neither `file_data` nor
+  `file_id` — and restricts PDF input to `qwen3.5-ocr`; our papers are local files, and publishing
+  one to obtain a URL is not something a run may do — and for DeepSeek (file input unsupported, its
+  Responses reference) and Z.AI (no document route documented on this dialect).
 
   What replaces it is not a downgrade invented for one vendor: Anthropic and OpenAI both ingest a
   PDF as *text plus a rendered image per page* by their own documentation, so `_doc_parse` builds
@@ -171,10 +195,10 @@ providers by editing YAML alone
   carry no embedded image at all, because matplotlib/TikZ/R emit path operators, not image
   XObjects).
 
-  Three properties keep it honest. The crops are added to the request **before** planning, so they
-  are counted, budgeted and evicted like any other image rather than bypassing the guard. The
-  extracted text is added to `reserved_bytes`, because it is request weight the plan cannot see.
-  And a parse failure reports the document **UNREAD** rather than letting it look empty — "I
+  Three properties keep it honest. The crops are added to the request **before** the adapter plans
+  it, so they are counted, budgeted and evicted like any other image rather than bypassing the
+  guard. The extracted text is ordinary message text, so `nonmedia_weight` reserves it. And a parse
+  failure names the document unread rather than letting it look empty — "I
   received nothing" and "I received an empty paper" invite different and equally wrong inferences.
   Results are cached on disk under `<runtime_dir>/parsed_docs/<sha256>/` (text, figure PNGs, and a
   manifest naming the Docling version and `images_scale`), because a ReAct loop re-sends its
@@ -284,13 +308,15 @@ turns on one distinction:
   `HarnessOnlyProvider`. Membership means a chat call *reaches* the vendor; role eligibility also
   requires the member's media and structured-output capabilities. Z.AI and Qwen reach schemas
   through function-tool arguments because their native strict-output path is unsuitable here.
-  DeepSeek is treated as text-only **by policy, not by vendor limitation** — its only multimodal
-  model is experimental (see `limits_for` below). Alibaba's current `qwen3.8-max` model page lists
+  DeepSeek's V4.1-Flash (`deepseek-flash`) takes images and `deepseek-v4-pro` does not (their table
+  entries, see `media_capability`); the 2026-08-25 text-only policy is retired (user ruling
+  2026-11-04). Alibaba's current `qwen3.8-max` model page lists
   image, text, and video input.
 - `ResponsesVendor` — one vendor's Responses-API policy: `name`, `limits` (its own documented
   `MediaLimits`), `base_url`, `key_env`, `supports_prompt_cache_key`, `cache_headers`, `supports_strict_schema`,
   `schema_via_tool`, `forces_tool_choice`, `strict_schema_formats`, `resolve_refs_in`,
-  `supports_tool_search`, and `vision_models`.
+  `supports_tool_search`, and `accepts_inline_documents` (a wire fact: whether its dialect takes
+  an inline document). Which model takes what is the capability table's, never the vendor's.
   `cache_headers` are sent on every request; Qwen uses this to opt into Alibaba's session cache
   globally rather than depending on individual role call sites.
   **Reference resolution is per vendor AND per position** (`resolve_refs_in`), which is why it is
@@ -326,33 +352,55 @@ turns on one distinction:
 
   **Two routes to a structured answer.** Native decoding via `text.format` where
   `supports_strict_schema` holds (OpenAI, DeepSeek); otherwise `schema_via_tool` declares one
-  synthetic tool whose parameters *are* the schema (Z.AI, Qwen). Z.AI pins the choice; Qwen keeps
-  automatic choice while thinking and appends a terminal emit instruction. A response containing
+  synthetic tool whose parameters *are* the schema (Z.AI, Qwen). Both keep automatic choice and
+  append a terminal emit instruction (`forces_tool_choice=False`): Qwen while thinking, Z.AI because
+  it ignores a named `tool_choice` (measured 2026-08-27). A response containing
   both the emitter and a working-tool request is rejected as premature, allowing the role's
   bounded structured retry to make a clean attempt. The tool route is the mechanism Claude Code's and
   Codex's own editing tools are JSON-Schema functions, so it reaches a vendor whose `text.format`
   is a no-op. The emit call is consumed into `parsed` and never appears in `tool_calls`; the
   loop's own tools stay declared beside it so a replayed trajectory still resolves. A vendor with
   neither route raises rather than returning invented keys. Every flag defaults to the OpenAI behaviour and
-  is turned off only with a citation. `limits_for(model)` narrows the limits to what one model
-  accepts, so a text-only model withholds images with a note. DeepSeek's Responses endpoint accepts
-  `deepseek-v4-flash`, `deepseek-v4-pro` and `deepseek-v4-flash-vision-exp`, replacing image input
-  with placeholder text on every model but the last
-  (api-docs.deepseek.com/guides/responses_api). That vision model **is** documented, with its own
-  limits — 600 images, 8192 px per side dropping to 4096 at 15 or more, 32 MiB per image, 48 MiB
-  body (api-docs.deepseek.com/guides/vision) — so `images_accepted=False` for this vendor is a
-  **standing policy decision taken 2026-08-25**, not an absent capability: the project declines to
-  depend on a multimodal path the vendor labels experimental, and revisits when DeepSeek ships a
-  non-experimental one. Alibaba's current `qwen3.8-max` page lists native visual understanding and
+  is turned off only with a citation. Which model takes images is its capability-table entry
+  (`media_capability`); the vendor's `limits` are vendor-wide. DeepSeek's Responses endpoint
+  "accepts images with the `deepseek-flash` model" (V4.1-Flash; the legacy names `deepseek-v4-flash`
+  and `deepseek-v4-flash-vision-exp` are served by it) as `input_image` parts, and "File inputs are
+  not supported" (api-docs.deepseek.com/guides/responses_api); its limits — 600 images, 8192 px per
+  side dropping to 4096 at 15 or more, 32 MiB per image, 48 MiB body (guides/vision) — are the
+  adapter's `_LIMITS` (Z1h). The 2026-08-25 text-only policy is retired. Alibaba's current `qwen3.8-max` page lists native visual understanding and
   image/text/video input.
   Qwen's `cache_headers` enables the vendor's session cache on every request; Alibaba documents
   that cache as disabled by default. Callers still mark stable-prefix paths with `cache_prefix`
   through the common interface so the intent remains explicit across providers.
 - `media_limits(config: RoleModelConfig) -> MediaLimits | None` — the documented media ceilings a
   member's requests meet (Anthropic per window via `_limits_for`, Google's `_LIMITS`, a Responses
-  vendor's `limits_for(model)`), read without building a client; `None` for a harness-only vendor.
-- `_media.media_load(messages) -> (images, base64_bytes)` and `_media.hoist_documents(messages) ->
-  (messages, documents)` — see the R2/R3 changelog entry.
+  vendor's `limits`), read without building a client; `None` for a harness-only vendor.
+- `MediaCapability(images: bool, native_documents: bool)` and
+  `media_capability(config) -> MediaCapability` (A2, Z1d) — what a member may be sent: its model's
+  entry in `config/model_capabilities.yaml` (`models.capabilities.capability_for`), which the
+  adapters trust. `images` is the entry's; `native_documents` is the entry's `documents` and false
+  for a Responses vendor with `accepts_inline_documents=False` (a wire fact: Alibaba takes
+  `file_url` only), whose documents the sanitiser sends as the local parse. A model with no entry
+  raises `MissingModelCapability` naming the table; the launch preflight
+  (`member_capabilities`) refuses such a member first. **This partly reverses A1** (user ruling
+  2026-11-04): capability moved from the adapters' declarations into the config table the builders
+  write from vendor docs; the members still carry no capability flag.
+- `models.capabilities` — `ModelCapability(images, documents)`, `load_capabilities(path=None)`
+  (keyed by `(provider, model)`, re-read when the file changes; a malformed entry raises),
+  `capability_for(provider, model)`, `MissingModelCapability`, `check_member_capabilities()`
+  (preflight: every `models.yaml` member's model has an entry; a config dir without the table, a
+  duplicate key, an unknown provider or a malformed entry is refused naming it).
+- `models.media_probe.check_member_media()` (async, preflight `member_media`, the last check,
+  Z1e) — every distinct chat endpoint among the configured members (provider, model, `base_url`,
+  `key_env`; a harness member such as the coder is skipped: it is never a `ModelHandle.call`) is
+  sent one tiny PNG and one tiny PDF through the real `ModelHandle.call`, concurrently, each
+  bounded by `PROBE_TIMEOUT_S` (180 s, retries included); the sanitiser shapes each request by the
+  member's capability entry. Passes only when every call returns; the refusal names the endpoint,
+  every member and role sharing it, the medium and the vendor's error (or "no answer within 180
+  s"). Each call's cost lands on the ledger through the run's cost meter.
+- `models.sanitise.sanitise(messages, images, documents, capability, *, viewers=()) ->
+  (messages, images, documents)` — the model-input sanitiser above.
+- `_media.media_load(messages) -> (images, base64_bytes)` — see the R2/R3 changelog entry.
 - `responses_vendors() -> tuple[ResponsesVendor, ...]` — every Responses-dialect descriptor, so
   a check can hold a property across all of them instead of per adapter.
 - `HarnessName` — which author harness drives a `coder` member: `claude_sdk` or `codex`. Legal
@@ -421,8 +469,7 @@ turns on one distinction:
   upstream instead: **a request that replays a trajectory declares its tools**, with
   `tool_choice="none"` when it must not call them. Only a turn we *synthesized* (a test fake) has
   no array to echo and is rebuilt from the interpreted views.
-- `RoleModelConfig(name: str, provider: ProviderName, model: str,
-  vision: bool = False, documents: bool = False, priceMTk: dict[str, float] = {},
+- `RoleModelConfig(name: str, provider: ProviderName, model: str, priceMTk: dict[str, float] = {},
   parameters: dict[str, Any] = {}, context_tokens: int | None = None,
   harness: HarnessName | None = None, base_url: str | None = None, key_env: str | None = None)` —
   one model member from YAML. `context_tokens` overrides the member's input limit, which is
@@ -462,12 +509,6 @@ turns on one distinction:
   Anthropic/OpenAI, or `code`, Google genai) and connection/timeout drops
   (`httpx.TransportError`, the SDKs' `APIConnectionError`). Auth/bad-request/other
   exceptions are not transient.
-- `retry.is_provider_error(exc) -> bool` — True when `exc` came from a model provider's API: an
-  error response or a failure to reach it (`anthropic.APIError`, `openai.APIError` — which also
-  carries DeepSeek, Z.AI and Alibaba — `google.genai.errors.APIError`, `httpx.TransportError`).
-  What an agent's ReAct loop contains as that agent's honest failure once
-  `call_with_transient_retry` has given up (`agents.roles.ProviderTurnFailed`, D1). Our own
-  defects (`ValueError`, `TypeError`, …) are not provider errors and propagate.
 - `retry.is_key_scoped_provider_error(exc, provider) -> bool` — True when the failure is a
   quota of the API **key**, not of the provider, judged in **that provider's own vocabulary**
   (`retry._PROVIDER_KEY_ERROR_RULES`, each entry citing the provider's error documentation).
@@ -628,3 +669,74 @@ Compacted 2026-09-01, again 2026-09-24, and 2026-10-19 (every entry); detail in 
   here) pass unchecked; a decompression-bomb-sized image is named as such; only decodable images
   count toward the image limit; the unplanned fallback checks too; the note asks the producer for a
   readable copy.
+- 2026-11-04 — A4: `retry.is_provider_error` no longer decides what a unit's loop contains (every
+  exception a model call raises is contained, `agents/DOCS.md`); docstring and entry updated.
+- 2026-11-04 — A4 cleanup: `retry.is_provider_error` deleted (no caller since a unit's loop contains
+  every exception its model call raises).
+- 2026-11-04 — A1: media capability from the adapter. `RoleModelConfig.vision`/`documents` retired
+  (`extra="forbid"` refuses them); `providers.MediaCapability`, `media_capability`,
+  `MediaLimits.documents_accepted`
+  (DeepSeek, Z.AI false); Z.AI `vision_models={"glm-5.3-flash"}` from its model pages;
+  `ModelHandle.call` refuses by capability ("takes no image/document input"); the
+  `document_parser_ready` check reads capability `"parsed"`. Tests: `tests/test_models.py`.
+- 2026-11-04 — A2: the model-input sanitiser (`models/sanitise.py`) runs inside `ModelHandle.call`
+  in place of the A1 refusal; `ModelHandle.call(viewers=)`. The docling substitution moved out of
+  `ResponsesProvider.call`; `_media.hoist_documents` and the media plan's `images_accepted`
+  withholding are deleted (the adapter keeps the volume limits). `MediaCapability.documents`
+  collapses to `native_documents`; `MediaLimits.documents_accepted` retires; DeepSeek and Z.AI
+  declare `accepts_inline_documents=False`. `document_parser_ready` needs docling for any chat
+  member without native documents. Tests: `tests/test_model_inputs.py`,
+  `tests/test_document_substitution.py`.
+- 2026-11-04 — A2 review: `_doc_parse.parse_document` remembers a failed parse for the process
+  (`_FAILED`), so a document that cannot be parsed is answered at once and identically on every
+  later call; a note names viewers only when the caller passed them (`viewers=`), else states the
+  fact alone. `tests/conftest.py` gives every test a private parse cache.
+- 2026-11-04 — A3: for a member without native documents `ModelHandle.call` runs the sanitiser in
+  a worker thread (`asyncio.to_thread`), so a first Docling parse leaves the event loop free; a
+  withheld figure's note names its receipt handle (`FigureRef.receipt`) and `view_receipt`.
+- 2026-11-04 — A3 review: `_doc_parse._PARSE_LOCK` serialises parses across threads (two seats
+  parsing one paper had raced on its cache folder); the cancelled-parse residual documented.
+- 2026-11-04 — A4b prelude: the media plan's notes name an item by `MediaItem.label` — its receipt
+  handle and file name when the ref carries one (`FigureRef.receipt`), else the file name — so a
+  figure withheld for size, count or type can be opened by a peer with `view_receipt`.
+- 2026-11-04 — Z1: Z.AI declarations re-read from each model's docs.z.ai page (`glm-5.3`, `glm-5.2`,
+  `glm-5-turbo` text-only; `glm-5.3-flash` image and file input); `vision_models` and
+  `accepts_inline_documents` unchanged. docs.z.ai has no Responses API reference, so the image route
+  on this dialect for `glm-5.3-flash` is inferred from Chat Completions and not yet live-probed.
+- 2026-11-04 — Z1b: Z.AI `_LIMITS` follow its Chat Completions image rules (jpg/png, 6000 px, "under
+  5M per image" read as 5,000,000 base64 bytes, so 3,750,000 raw; `image/webp` dropped); the structured-answer paragraph says Z.AI keeps automatic
+  choice (`forces_tool_choice=False`). Test: `tests/test_media_guards.py`.
+- 2026-11-04 — Z1c: `MediaLimits.max_image_bytes` → `max_image_encoded_bytes`, compared on the base64
+  size (Anthropic "10 MB (base64-encoded)", Z.AI 5,000,000); an image over it is downscaled in steps
+  until it fits (`_MIN_EDGE` 256 px, then withheld), and each note names the limit that applied.
+  Z.AI comments: the emit tool rides under `auto`; its docs document only `auto` for `tool_choice`.
+- 2026-11-04 — Z1d (user rulings): model capability is the config table
+  `config/model_capabilities.yaml` (new `models/capabilities.py`), the one source; the adapters keep
+  only vendor-wide wire behaviour and limits. Removed: `ResponsesVendor.vision_models` and
+  `limits_for` (callers use `vendor.limits`), `MediaLimits.images_accepted` (DeepSeek's policy now
+  its table entries). `media_capability` reads the table; preflight `member_capabilities` refuses a
+  member with no entry. Partly reverses A1. Tests: `tests/test_model_capabilities.py`; the suite's
+  stand-in ids (`fake`, `fake-model`, ...) get entries from `tests/conftest.py`.
+- 2026-11-04 — Z1d review: `claude-opus-5-5` entry (a live-test seat); the roster test reads the
+  live tests' seats; the loader refuses a missing table (naming the copy to make), duplicate keys and
+  unknown providers, and compares entry keys as a set.
+- 2026-11-04 — Z1e: `models.media_probe.check_member_media` (preflight `member_media`): one tiny image
+  and one tiny PDF per distinct configured member through `ModelHandle.call`. Test:
+  `tests/test_media_probe.py` (vendor client faked; a refusal names member, medium and error).
+- 2026-11-04 — Z1f: Alibaba `_LIMITS` enforce its vision page (250 Base64 images, 10 MB raw per image as
+  base64, 16 MiB request body on a DashScope domain); Anthropic's request ceiling is the current
+  128 MB and its quotes are re-read (many-image edge kept at 2000 px, stricter than the page's
+  3,000, because a 2677 px figure was refused); `retry.transient_errors` lets the media probe name
+  the last error a timed-out call retried. Tests in `tests/test_media_guards.py`, `tests/test_media_probe.py`.
+- 2026-11-04 — Z1f review: Anthropic's 10 MB and 128 MB read as decimal megabytes (the stricter
+  reading); `_media.media_load(documents=False)` leaves out documents a member is sent as their
+  parse; stale DashScope/Anthropic docstrings re-quoted.
+- 2026-11-04 — Z1g: `MediaLimits.min_side`, `max_aspect`, `large_box` + `large_image_mimes`
+  (Alibaba: sides over 10 px, at most 200:1, only JPEG/PNG between 4K and 8K — a smaller or longer
+  image withheld with a note, a large WebP re-encoded as PNG); `max_pdf_pages` is per request, summed
+  over the request's PDFs (`_apply_page_budget`, oldest evicted first). Tests: `tests/test_media_guards.py`.
+- 2026-11-04 — Z1h (user ruling): the DeepSeek member is V4.1-Flash (`deepseek-flash`, `config/models.yaml`
+  coder); `deepseek-flash` and the legacy `deepseek-v4-flash` take images (`deepseek-v4-pro` does not);
+  DeepSeek `_LIMITS` from its vision page (600 images, 4096/8192 px, 32 MiB per image, 48 MiB body);
+  documents stay the local parse ("File inputs are not supported"). The 2026-08-25 text-only policy
+  is retired. Tests: `tests/test_responses_vendors.py`; text-only fixtures moved to `deepseek-v4-pro`.

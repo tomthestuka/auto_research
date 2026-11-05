@@ -61,7 +61,7 @@ gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run
 # Governance basenames (CLAUDE.md/DOCS.md/AGENTS.md) are denied even inside an allowed root.
 agent_fs_allow:
   - /data/fzhou/research_toolkit          # toolkit_root (coder's worktree)
-  - /data/fzhou/XSPEC/Cyg_X-1             # obs_db_root (observations.yaml)
+  - /xray02/fzhou_obsdb                  # obs_db_root (observations.yaml)
   - /data/fzhou/XSPEC/relxill             # relxill local models (envs/xspec/boot.py lmod)
   - /grad/fzhou/.conda/envs/astropy       # analyze_env
   - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS
@@ -82,6 +82,10 @@ agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-on
   - /opt/heasoft/heasoft-6.34                                # HEASoft release root
   - /man1/CALDB                                              # CALDB
   - /data/fzhou/XSPEC/relxill                                # relxill local models
+gate_readonly_roots:          # read-only to the gate's Layer-B test run only, never on the workers' allow-list
+  - /data/fzhou/XSPEC/Cyg_X-1/IXPE                           # the toolkit tests' real observation data
+  - /data/fzhou/XSPEC/Cyg_X-1/NuSTAR
+  - /data/fzhou/XSPEC/Cyg_X-1/NICER
 
 # ── Tool discovery ──
 mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)

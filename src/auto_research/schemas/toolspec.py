@@ -35,9 +35,9 @@ RequestKind = Literal["new_capability", "fix_existing"]
 class ValidationDataset(MessageModel):
     """A real (or marked-synthetic) input the tool's checks run against.
 
-    ``synthetic=True`` flags a ``synth…`` ObsID generated as *data* under the mission
-    ``obs_db_path`` (§9.5) — never as toolkit code; provenance then flags any science
-    result computed on it.
+    ``synthetic=True`` flags a marked ``synth<YYMMDD>-<hex>`` ObsID the coding session's tests build
+    in their fixture obs-db and record through ``obsdb_catalog`` (user ruling 2026-11-04: an obs-db
+    item, never the tool's code); provenance then flags any science result computed on it.
     """
 
     mission: NonEmptyStr = Field(
@@ -45,13 +45,15 @@ class ValidationDataset(MessageModel):
                     "source name for a literature tool."
     )
     obsid: NonEmptyStr = Field(
-        description="The observation identifier, exactly as it appears in the archive."
+        description=("The observation identifier, exactly as it appears in the archive, or the marked "
+                     "synthetic ObsID the tests build.")
     )
     synthetic: bool = Field(
         default=False,
         description=(
-            "True only for a marked synth… ObsID generated as DATA under the mission path — never "
-            "for anything a toolkit function fabricates, which is banned outright."
+            "True for a marked synthetic ObsID (synth<YYMMDD>-<hex>, lowercase hex) the coder's tests build in "
+            "their fixture obs-db and record through obsdb_catalog; the tool's own code fabricates "
+            "nothing, which is banned outright."
         ),
     )
 
@@ -211,7 +213,8 @@ class ToolSpec(MessageModel):
         min_length=1,
         description=(
             "At least one REAL input the tool's checks run against — this is what makes the tool "
-            "verifiable rather than merely tested."
+            "verifiable rather than merely tested; a marked synthetic ObsID the tests build is added "
+            "beside it."
         ),
     )
 

@@ -1,5 +1,7 @@
 """Provider adapter factory."""
 
+from dataclasses import dataclass
+
 from auto_research.models.providers._harness_only import HarnessOnlyProvider
 from auto_research.models.providers._responses import ResponsesVendor
 from auto_research.models.providers.anthropic import AnthropicProvider
@@ -49,7 +51,35 @@ def media_limits(config: RoleModelConfig) -> MediaLimits | None:
     if config.provider == "google":
         return google._LIMITS
     vendor = getattr(_ADAPTERS.get(config.provider), "vendor", None)
-    return vendor.limits_for(config.model) if isinstance(vendor, ResponsesVendor) else None
+    return vendor.limits if isinstance(vendor, ResponsesVendor) else None
+
+
+@dataclass(frozen=True)
+class MediaCapability:
+    """What a member can be sent: its model's entry in the capability table (Z1d,
+    ``models.capabilities``), sent over what its adapter's dialect carries.
+
+    ``images``: the model takes image input. ``native_documents``: the model reads a PDF itself and
+    the dialect carries an inline document; otherwise the model-input sanitiser sends the local
+    parse (``models.sanitise``).
+    """
+
+    images: bool
+    native_documents: bool
+
+
+def media_capability(config: RoleModelConfig) -> MediaCapability:
+    """The member's media capability: its model's capability-table entry, which the adapters trust
+    (user ruling 2026-11-04). A model with no entry raises ``MissingModelCapability`` naming the
+    table; the launch preflight refuses such a member before any call."""
+    from auto_research.models.capabilities import capability_for
+
+    entry = capability_for(config.provider, config.model)
+    vendor = getattr(_ADAPTERS.get(config.provider), "vendor", None)
+    # A wire fact, not a capability: a Responses vendor that takes no inline `file_data` (Alibaba:
+    # `file_url` only) is sent the local parse even for a model that reads PDFs.
+    inline = not (isinstance(vendor, ResponsesVendor) and not vendor.accepts_inline_documents)
+    return MediaCapability(images=entry.images, native_documents=entry.documents and inline)
 
 
 def responses_vendors() -> tuple[ResponsesVendor, ...]:

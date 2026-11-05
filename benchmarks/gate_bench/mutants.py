@@ -73,6 +73,9 @@ FAMILY_ORDER = [
 AUTHOR_BLIND = "claude-opus-5/blind"
 AUTHOR_LEDGER = "claude-opus-5/ledger"
 AUTHOR_CODEX = "gpt-5.6-sol/ledger"
+# Written 2026-11-05 from the gate's own output-class rules (`sandbox/returns.py`), after the
+# benchmark had run: neither imagined before it nor observed in a ledger.
+AUTHOR_RULES = "claude-opus-5.5/gate-rules"
 
 # ── Attribution layers (also the matrix columns) ─────────────────────────────
 DETERMINISTIC_LAYERS = ("scan", "structural", "determinism", "layer_b")
@@ -99,6 +102,8 @@ class Mutant:
     cleanup_markers: bool = False  # the test leaves a temp marker the harness removes
     author: str = AUTHOR_BLIND  # who wrote this entry (see AUTHOR_* above)
     attested: str = ""  # the ledger record this defect was observed in, when it was observed
+    catalog_writer: bool = False  # the synthetic base also commits the toolkit's obsdb_catalog,
+    # at the pinned toolkit ref (`harness.prepare_worktree`), for a tool that writes an obs-db
 
     @property
     def expects_deterministic_catch(self) -> bool:
@@ -1135,9 +1140,11 @@ def corpus() -> list[Mutant]:
     # citation in ``attested``; the entries above predate any benchmark run and carry none.
     from benchmarks.gate_bench.mutants_ledger import ledger_corpus
     from benchmarks.gate_bench.mutants_ledger_codex import ledger_codex_corpus
+    from benchmarks.gate_bench.mutants_outputs import outputs_corpus
 
     out.extend(ledger_corpus())
     out.extend(ledger_codex_corpus())
+    out.extend(outputs_corpus())  # the gate's output classes, breached one anchor each
 
     # One matched control per planted defect (imported here rather than at module scope: the
     # controls are built from these mutants, so a top-level import would be a cycle).

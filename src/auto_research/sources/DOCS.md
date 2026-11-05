@@ -55,7 +55,7 @@ Each source module is independent; no source imports another.
   `web_search` tool unconditionally (`TAVILY_API_KEY` is a launch preflight requirement)
   and keeps the deterministic suite key-independent. Pass `client` to inject a fake.
 - Live source verification is opt-in:
-  `AUTO_RESEARCH_LIVE_SOURCE_TESTS=1 pytest tests/test_live_sources.py -s`.
+  `pytest tests/test_live_sources.py --live -s`.
   It queries `black hole binary` against arXiv, NASA ADS, and Tavily, and writes
   timestamped JSONL and Markdown summary logs under `logs/dev/step-5/`.
 - arXiv results include `pdf_url` and can be downloaded/ingested into storage.
@@ -120,3 +120,4 @@ Compacted 2026-10-19 (every entry); detail in git history.
 - 2026-09-24 — `receipts.py` (P5) paper/web receipts (`lib`, `rev`); [I9] closed
   (`librarian.source.error`); arXiv ANDs terms first, PDFs from `export.arxiv.org`. Ruling: papers
   cited, never text-matched; Docling, `parse_root`, then pypdf left the librarian's path.
+- 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire.

@@ -1,8 +1,8 @@
-"""Env-gated LIVE test of the authoring auto-reset (todo #5) — drives the REAL deterministic
+"""Opt-in LIVE test of the authoring auto-reset (todo #5) — drives the REAL deterministic
 gate (no stub) with scripted "bad diffs" and asserts the working tree self-heals.
 
 Activate with:
-    AUTO_RESEARCH_LIVE_MERGE_FLOW_TESTS=1 pytest tests/test_live_merge_flow.py -q
+    pytest tests/test_live_merge_flow.py --live -q
 
 Unlike the deterministic ``test_merge_flow.py`` (which stubs ``run_gate``), this runs the real
 ``gate.run_gate`` so the gate↔reset interaction is exercised end-to-end. It operates on a
@@ -17,7 +17,6 @@ tests.
 """
 
 import asyncio
-import os
 import subprocess
 from pathlib import Path
 
@@ -36,10 +35,7 @@ def _coder_member(model: str):
         name="test_coder", provider="anthropic", harness="claude_sdk", model=model
     )
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_MERGE_FLOW_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_MERGE_FLOW_TESTS=1 to run the live authoring-reset test",
-)
+pytestmark = pytest.mark.live
 
 
 class ScriptedCoder:

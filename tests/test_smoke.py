@@ -1,6 +1,6 @@
 """Sandbox + MCP env smoke test.
 
-Activate with: AUTO_RESEARCH_SMOKE_TESTS=1
+Activate with: pytest tests/test_smoke.py --live
 
 Runs a minimal directive request through the complete Phase 1 graph.  The prompt
 instructs the analyst to:
@@ -22,15 +22,13 @@ Logs: logs/dev/step-11/
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
 
-LIVE = os.getenv("AUTO_RESEARCH_SMOKE_TESTS") == "1"
-skip_live = pytest.mark.skipif(not LIVE, reason="Set AUTO_RESEARCH_SMOKE_TESTS=1 to run")
+pytestmark = pytest.mark.live
 
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "step-11"
 
@@ -92,7 +90,6 @@ def _evaluate_run(monitor_jsonl: Path) -> tuple[set[str], list[str]]:
     return succeeded, infra_errors
 
 
-@skip_live
 def test_sandbox_env_smoke() -> None:
     """Smoke test: verify analyst sandbox env and both MCP + xspec_utils tool paths.
 

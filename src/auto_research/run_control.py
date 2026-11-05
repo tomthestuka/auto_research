@@ -160,6 +160,9 @@ class RunControl:
         self.fatal: BaseException | None = None
         self._cancel_sent = False  # the run task's stop/failure cancel goes out once
         self.authoring_session: Any | None = None
+        # Coding sessions whose close raised (a coder disconnect that failed, C2c): the run's
+        # teardown closes each again, leaf to root (D8), so no coder process outlives the run.
+        self.unclosed_sessions: list[Any] = []
 
     # ── stop ──────────────────────────────────────────────────────────────────
     def request_stop(self, reason: str = "", by: str = "human") -> None:

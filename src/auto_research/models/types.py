@@ -395,8 +395,6 @@ class RoleModelConfig(BaseModel):
     name: str = Field(min_length=1)
     provider: ProviderName
     model: str = Field(min_length=1)
-    vision: bool = False
-    documents: bool = False
     priceMTk: dict[str, float] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
     context_tokens: int | None = Field(default=None, ge=1)
@@ -482,6 +480,7 @@ class ModelHandle:
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
         cache_prefix: bool = False,
+        viewers: Sequence[str] = (),
     ) -> ModelResponse:
         """Call the configured provider for this role.
 
@@ -491,7 +490,9 @@ class ModelHandle:
         forbid calling them — the terminal-compose shape).
         ``messages`` may include prior ``ModelResponse`` / ``ToolResultMessage`` turns
         for ReAct-loop replay; ``cache_prefix`` requests provider-native caching of the
-        stable prefix.
+        stable prefix. Every attachment passes the model-input sanitiser first
+        (``models.sanitise``); ``viewers`` names the peers whose members take images, for the note
+        that replaces an image this member cannot take.
         """
 
         normalized = [
@@ -500,19 +501,24 @@ class ModelHandle:
             else ModelMessage.model_validate(message)
             for message in messages
         ]
-        if (images or any(isinstance(m, ModelMessage) and m.figures for m in normalized)) and (
-            not self.config.vision
-        ):
-            raise ValueError(
-                f"role {self.role!r} member {self.config.name!r} is not configured for vision inputs"
+        # The model-input sanitiser (A2): every attachment of the whole request, judged against
+        # what the member's model takes (its capability-table entry, Z1d) — passed, parsed, or withheld with a
+        # note — before any adapter sees it. The adapter keeps only the volume limits.
+        from auto_research.models.providers import media_capability
+        from auto_research.models.sanitise import sanitise
+
+        capability = media_capability(self.config)
+        if capability.native_documents:
+            normalized, images, documents = sanitise(
+                normalized, images, documents, capability, viewers=viewers
             )
-        if (documents or any(
-            (isinstance(m, ToolResultMessage) and any(p.documents for p in m.results))
-            or (isinstance(m, ModelMessage) and m.documents)
-            for m in normalized
-        )) and not self.config.documents:
-            raise ValueError(
-                f"role {self.role!r} member {self.config.name!r} is not configured for document inputs"
+        else:
+            # A first parse of a paper is a ~40 s Docling run: in a worker thread, so the event
+            # loop (other seats, the /stop listener) runs on meanwhile (A3 ruling).
+            import asyncio
+
+            normalized, images, documents = await asyncio.to_thread(
+                sanitise, normalized, images, documents, capability, viewers=viewers
             )
         # Additive, and only when asked: with the flag unset this is one `os.environ.get` and the
         # request below is byte-identical. See `_dump_prompt` for why the dump lives HERE.

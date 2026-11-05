@@ -76,10 +76,16 @@ def code_gate_yaml() -> Path:
     return config_dir() / "code_gate.yaml"
 
 
+def model_capabilities_yaml() -> Path:
+    """What each model takes (``models.capabilities``): copied unchanged into any other config dir."""
+    return config_dir() / "model_capabilities.yaml"
+
+
 __all__ = [
     "CONFIG_DIR_ENV",
     "code_gate_yaml",
     "config_dir",
+    "model_capabilities_yaml",
     "models_yaml",
     "observations_yaml",
     "orchestration_yaml",

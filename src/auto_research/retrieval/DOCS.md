@@ -32,7 +32,7 @@ and opens chosen PDFs (`open_paper`) inside its ReAct loop. The `literature_node
 ingests.
 
 Live retrieval verification is opt-in:
-`AUTO_RESEARCH_LIVE_RETRIEVAL_TESTS=1 pytest tests/test_live_retrieval.py -s`.
+`pytest tests/test_live_retrieval.py --live -s`.
 
 ## Interfaces / Contracts
 - `text_search_paths(query, *, limit=10, backend=None) -> list[Path]`
@@ -73,3 +73,4 @@ Live retrieval verification is opt-in:
 - 2026-06-22 — A paper and its memory abstraction are one hit keyed by paper id (memory text folded
   into the haystack); `require_local_path=True` filters before the `limit`; orphan memories stay
   standalone.
+- 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire.

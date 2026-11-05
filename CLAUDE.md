@@ -134,7 +134,9 @@ Consequences, each with a measured failure behind it:
   limit's clothing.
 - **An accepted `turn_end` is final for its batch** (2026-09-25). A call placed after it in the
   same model turn is answered and never run: an `edit_report` there replaced the validated report
-  with an unvalidated one (found by an adversarial review, every role).
+  with an unvalidated one (found by an adversarial review, every role). It also locks every report
+  of the turn (ruling Q3, 2026-11-04): the result report and each brief the unit filed; a locked
+  report refuses edits.
 - **The reviewer is the sole I/O** (human ruling 2026-09-25). The run starts at the reviewer and
   every team's work returns to it; its report's `assign_to` routes the graph. The human is an edge
   endpoint, not a unit: a report to the human is published and sent, and the human's reply
@@ -277,7 +279,7 @@ is assembled from runtime-safe sources — real toolkit source, `prompts/coder.m
 and config — never from a `DOCS.md`.**
 
 **Phase 3:** the text every unit needs — how `turn_end`, receipts, citation syntax and the channel
-work — lives in `prompts/conventions.md`, loaded before each unit role's own prompt (2026-10-27,
+work, and how to write prose (the manuscript register; no terms coined during the run) — lives in `prompts/conventions.md`, loaded before each unit role's own prompt (2026-10-27,
 `agents.prompts.UNIT_ROLES`); the role file holds its job and the scope it owns. It is a runtime
 prompt, so this rule binds it: no `DOCS.md`, no `CLAUDE.md`.
 
@@ -311,14 +313,21 @@ of every session (see [§3](#3-coding-agent-contract-read-this-every-session)).
 
 LLM teams must be upgradable without code changes. All model selection lives in config
 (`config/models.yaml`), mapping **role → one or more model members**. Each member has a
-provider, model id, vision flag, and provider-specific parameters. No model identifier
-appears in source code.
+provider, model id and provider-specific parameters. No model identifier appears in source code.
+
+**What a model takes is configuration** (user ruling 2026-11-04). `config/model_capabilities.yaml`
+is the one source: `provider → model → {images, documents}`, written by the builders from each
+vendor's own model page, citations in `config/DOCS.md`. The adapters carry no per-model knowledge
+and trust the entry; they keep only vendor-wide wire behaviour and documented API limits (byte and
+edge caps, image types, whether the dialect carries an inline document). The launch refuses a
+member whose model has no entry, and its last check (`member_media`) sends every configured chat
+member one tiny image and one tiny PDF through the real call. No member carries a capability flag.
 
 Providers: **OpenAI, Anthropic, Google, DeepSeek, Z.AI, Alibaba Model Studio.** The last
 three joined the chat set on 2026-08-24 over the OpenAI **Responses** dialect they already
 publish, so a capability-compatible role may be bound to any of the six. Reaching a vendor is not
-the same as being eligible for a role: a member's adapter declares what that vendor's
-documentation states and a live probe confirms. Z.AI and Alibaba reach schemas through
+the same as being eligible for a role: the capability table states what that vendor's
+documentation says and a live probe confirms. Z.AI and Alibaba reach schemas through
 function-tool arguments because their native strict-output path is unsuitable here.
 
 **Vision binds the roles that are actually sent figures** (figures, [§7](#7-schemas--protocols)) —
@@ -328,15 +337,14 @@ figures, the lead the accumulated per-worker figure catalog, the worker its peer
 own tools'. The **analyst co-lead is not**, and by construction — `review_tool` passes no images
 and its tool set is read-file/list-dir/web-search with the knowledge-base tools switched off, so a
 code reviewer never receives a plot. The librarian needs documents, not vision; the status monitor
-neither; the `coder`'s `vision` flag is dead config, since an author is a harness subprocess and
-never a `ModelHandle`. The flag is a **declaration, not a guard**: it gates the call-time `images=`
-channel only, so figures arriving on a tool result are unchecked ([V-2], §13).
+neither; an author is a harness subprocess, never a `ModelHandle`. Since `view_receipt` opens any
+receipt of the run, any role may be handed any medium (ruling 2026-11-04); the input validator's
+model-input sanitiser (plan item A2) makes that safe for a member lacking the medium.
 
-**DeepSeek is treated as text-only by policy, not by vendor limitation** (ruling 2026-08-25). The
-vendor documents `deepseek-v4-flash-vision-exp` with a full limit set and names the Responses API
-among the endpoints accepting it; the project declines to depend on a multimodal path its vendor
-labels experimental, and revisits when a non-experimental one ships. `deepseek-v4-pro` **is**
-accepted by the Responses endpoint and needs no new wiring. Alibaba's current Qwen Max page lists
+**DeepSeek's vision follows its documented model** (user ruling 2026-11-04, retiring the
+2026-08-25 text-only policy). V4.1-Flash (`deepseek-flash`; the legacy `deepseek-v4-flash` is served
+by it) takes images over the Responses dialect as `input_image` parts; `deepseek-v4-pro` does not; no
+DeepSeek model takes file input there, so a document reaches it as the local parse. Alibaba's current Qwen Max page lists
 image/text/video input, so its vision eligibility follows that documented model capability.
 
 **Phase 2 — authoring/review providers.** Only **Claude and GPT** are reliable enough to
@@ -361,7 +369,7 @@ Default tier mapping (a *config default*, edit freely — not code):
 | Reviewer group | top | `claude-opus-4-8`, `gpt-5.5` (reasoning high), `gemini-3.5-flash` (thinking high) |
 | Analyst lead | top | `claude-opus-4-8` |
 | Analyst worker group | medium | `claude-sonnet-4-6`, `gpt-5.5` (reasoning medium) |
-| Librarian | medium | `claude-sonnet-4-6`, `gpt-5.5` (reasoning medium), `gemini-3.5-flash` (thinking high) |
+| Librarian | medium | `claude-sonnet-5` (a role runs its first member unless one is named) |
 | Embeddings | — | `text-embedding-3-small` *(deferred — see [§12](#12-deferred-beyond-phase-3-do-not-build-now--leave-stubs))* |
 
 Implement a thin provider abstraction so a role can be backed by any provider via config.
@@ -428,8 +436,11 @@ generalised and corrected.
   bytes the runtime stored; the producer (tool kind, toolkit commit, call id, hash of the call's
   arguments) is stamped by the code that ran the work. A figure a tool returns is re-hashed from
   the file, a declared hash that disagrees is overridden with a note, and a figure whose file is
-  absent is dropped. Every tool call's output text is itself a receipt, and so is every file the
-  call created or changed, every page fetched, every paper opened (the receipt is the PDF itself;
+  absent is dropped. Every tool call's output text is itself a receipt, and so is every product
+  the call declares (a file it returns under `products`, inside the call's own folder
+  `<unit workdir>/products/<fn>/<call id>/`; user ruling 2026-11-04: only opt-in output is minted,
+  an obs-db write is recorded by `obsdb_catalog`, a scratch file by nothing; figures and outputs
+  land in the call's own folder, so a file name never collides across calls), every page fetched, every paper opened (the receipt is the PDF itself;
   a paper value is *attributed* with a locator, never text-matched, §13), every file a human sends,
   and every task a unit is handed (source `input`). A human's text is a nudge and mints nothing.
 - **Evidence vs record** (human ruling 2026-09-25): a receipt is evidence only when
@@ -437,7 +448,8 @@ generalised and corrected.
   for a toolkit tool the lead runs in-process), it is a `commit` (minted by the runtime when a
   `submit_for_review` commits: tool, SHA, branch, submissions used), a paper, or the request. Every
   other receipt is the record of where a role looked: citing one is refused and names what it is
-  ("a file you read", "a web page", "shell output", "a task brief"), and in scope it grounds
+  ("a file you read", "a web page", "shell output", "a task brief", "a tool brief" — a locked
+  `ToolSpec`, produced by `toolspec`), and in scope it grounds
   nothing. Briefs (`follow_up`, `what_to_probe`, `tool_request`) are exempt from grounding and,
   dispatched, ground nothing downstream.
 - **Inputs and ancestry.** The files a call's arguments name are hashed before it runs (once per
@@ -515,7 +527,9 @@ check before any model call).
 
 **The unit (every graph role).** One `_react` loop per turn over a tool provider, wrapped in the
 quick channel (`message`, `view_receipt`, `wait_for_reply`, `list_peers`), writing one report in
-its loop with `edit_report` and leaving only through `turn_end`, whose validator checks the schema,
+its loop with `edit_report` (a lead also writes one brief report per coding link, `report=specN`)
+and leaving only through `turn_end`, which validates every report of the turn and then locks them
+all; its validator checks the schema,
 the role's own conditions and the provenance bindings; grace rounds then `ReactBudgetExhausted` at
 the cap; an accepted `turn_end` is final for its batch. Four roles instantiate it:
 **reviewer** (sole I/O; `ReviewerReport.assign_to` routes the graph; renders and compiles the
@@ -526,7 +540,7 @@ stages; its report *is* its decision — `rework` + probe, or the result; `autho
 coder). The co-lead (tool-code reviewer) and the status monitor are not units.
 
 **Provenance.** `schemas/artifacts.py` `Receipt` + `auto_research.provenance`: every tool call's
-output, every file it created or changed, every page fetched, paper opened, human file and task
+output, every product it declared, every page fetched, paper opened, human file and task
 handed in is a runtime-hashed receipt with producer, inputs and parents; `failed`/`synthetic`
 propagate; one append-only store per run beside the ledger, outside every role's reach; scoped
 grounding at every unit's `turn_end`; evidence is what the analysis produced (§7).
@@ -537,7 +551,8 @@ lead judges convergence, hard cap 3 rounds.
 **Coding pipeline.** `ToolSpec` brief → an author harness (`claude_sdk` or `codex`, named on the
 `coder` role) in an isolated worktree, beside the lead on the channel → the deterministic gate
 (Layer A: per-test determinism maps, the no-fabrication scan, structural, provenance incl. the
-static figure-shape check; the dynamic return check G15; Layer B: the tool's own tests) → the
+static figure-shape check; the dynamic return check G15; Layer B: the tool's own tests, then the toolkit's earlier fast tests,
+`layer_b.regression`) → the
 provider-decorrelated co-lead review → `approve_edit`, one commit per tool on the branch.
 **Commit ⇔ gate ∧ review.** Per-attempt base refs, gate-entry reset of a coder's own commit,
 failure reset with a saved patch, submission snapshots for resume. A committed tool reloads the
@@ -623,9 +638,10 @@ These are the trust boundary. A definition cannot relax one; a role's own valida
 refusal and never remove a built-in one.
 
 1. **One exit.** A unit ends only through an accepted `turn_end`. A call after it in the same batch
-   is answered and never run. Exhausting the cap (after grace) raises an honest failure and records
-   it. No path composes an artifact on a model's behalf.
-2. **Runtime-minted receipts.** Every tool call's output, and every file it created or changed, is
+   is answered and never run. An accepted `turn_end` locks every report of the turn. Exhausting the
+   cap (after grace) raises an honest failure and records it. No path composes an artifact on a
+   model's behalf.
+2. **Runtime-minted receipts.** Every tool call's output, and every product it declares, is
    hashed and stamped by the runtime, with the environment it ran in.
 3. **Every number cited, with a fixed evidence predicate.** A number stands only as its own
    citation of:
@@ -659,9 +675,13 @@ refusal and never remove a built-in one.
      reason stays in the call's hashed arguments, so the value and why it was chosen sit behind
      one handle (`#/$args/<name>`). (The copy refusal, `RetypeCheck`, is removed: ruling
      2026-11-03.)
-   - **Model inputs, before a provider sees them.** Every image and PDF must decode; one that does
-     not is withheld with a note the model reads, never sent (a provider refuses it with a 400 that
-     ended the lead's turn; `models/providers/_media.py`).
+   - **Model inputs, before a provider sees them.** Every attachment passes the model-input
+     sanitiser in `ModelHandle.call` (`models/sanitise.py`, A2, 2026-11-04): a medium the member's
+     adapter takes is sent; a PDF without a native channel becomes the local parse (text, plus
+     crops when the member takes images); an image for a text-only member or an unreadable
+     document is withheld with a note naming the peers that can view it. Same input, same bytes.
+     Every image and PDF must decode; one that does not is withheld with a note the model reads,
+     never sent (`models/providers/_media.py`); the adapter keeps only the volume limits.
 
 ### 9.4 What a unit definition holds
 
@@ -787,7 +807,11 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
   `wait_for_reply` lets time pass, and `message` resumes a finished child on its kept conversation
   (E12).
 - **Kind B — the coding pipeline.** Author harness + gate + decorrelated reviewer + `approve_edit`,
-  targeting a toolkit the parent declares. The brief is a `ToolSpec` (today's `author_chain`). It
+  targeting a toolkit the parent declares. The brief is a `ToolSpec` brief report of the parent's
+  turn (`author_chain` files one per link, `specN`, C3 2026-11-04), bound to its session by id and
+  read live: the coder at each turn (a revision as a diff), the gate and the co-lead at each
+  submission, each read recorded by version hash; the commit locks it, a link that closes
+  uncommitted locks it too, and the commit receipt names the reviewed version. It
   returns a `commit` receipt or an honest failure; a commit reloads the parent's registry and
   restarts its backend. Its members are not units: their exits are a gated commit or an honest
   failure (§2b).
@@ -805,6 +829,13 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
   - routes, a `Literal` the graph reads (`assign_to`).
 
   `write_report`, `edit_report` and `turn_end` are generated from the type.
+- **A report is the document on an edge** (ruling 2026-11-04): a turn holds one result report and
+  one brief per outgoing edge; `write_report`/`edit_report` take a target report (`report`, the
+  result by default); each report type has its own validator; `turn_end` validates every report,
+  then locks them all. A *live* brief (read while its parent's turn runs) locks at its consumption
+  milestone and at `turn_end`, and every consumer records the version it read. Built for the
+  `ToolSpec` (C3); `follow_up`/`what_to_probe`/`tool_request` move to brief reports at Phase 3
+  step 5 (kind-A spawns).
 - Role conditions become **validator functions** attached to the definition: today's
   `lead_turn_problems`, `worker_report_problems`, and the reviewer's render-and-compile. Each
   returns problems, which go back into the loop as an `is_error`. A validator cannot accept what a
@@ -827,11 +858,12 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
 
 ### 9.10 Build order (Phase 3)
 
-Each step leaves a **working, documented increment** — update the relevant `DOCS.md` and README
+Step 0a comes first. Each step leaves a **working, documented increment** — update the relevant `DOCS.md` and README
 before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Done**.
 
 | # | Status | What is being built | Checkpoint (what works after) |
 |---|---|---|---|
+| 0a | Todo | **Toolkit decoupling — first** (user ruling 2026-11-04). Find every coupling between `auto_research` and `research_toolkit` (paths, package and tool names, the `research_toolkit.` producer prefix, toolkit modules the gate or runtime imports or reads, mirrored tables such as the obs-db tree, the manifest and `tool_config.yaml` shapes, the `envs/` layout, toolkit names in prompts, tests and benchmarks), then remove each or formalize it as one documented toolkit contract the orchestration reads. No new coupling lands meanwhile. | An inventory of every coupling, each removed or in the contract; the orchestration pairs with any toolkit that meets the contract, shown by a minimal fixture toolkit that loads, gates and runs. |
 | 0 | Todo | **Invariant freeze** — §9.3 collected as one deterministic test module over today's code, from the existing per-role tests. | Green on the current tree; it is the parity oracle for every later step. |
 | 1 | Todo | **One unit** — `_react` + channel + report tools + `turn_end` + the input validator (§9.3.9) as one unit; the four roles become definitions with validators; exceptions contained at the unit boundary (§9.3.8). | Each role's tests pass through the unit; one live cell per role; every unit's tool and model inputs pass the one input validator. |
 | 2 | Todo | **Toolkits per unit** + the generalised evidence predicate. | Two units with different toolkits in one run; a tool of an unregistered toolkit grounds nothing. |
@@ -878,10 +910,28 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
 - **Testing:** minimal `pytest` on deterministic parts only (DB ops, query parsing, schema
   validation, the Phase-2 gate). Do not assert subjective LLM behavior. End-to-end behavior
   is exercised live via `test_full_suite.py` and its Phase-2 siblings.
-- **Live API tests:** every module wrapping an external API leaves an opt-in, env-gated
-  real-API test stub. Default to running the relevant live test when working on that
+- **Live API tests:** every module wrapping an external API leaves an opt-in real-API test
+  stub, marked `live` (`pytestmark = pytest.mark.live`, or per test in a mixed module) and run only
+  with `--live`. Spend is chosen by path and `-k`; a test that messages a person or takes a
+  destructive step also keeps its own switch. Default to running the relevant live test when working on that
   integration, unless the human says otherwise, credentials are unavailable, or spend is
   inappropriate. Live tests write logs under `logs/dev/`.
+- **Live test conventions** (user rulings 2026-11-05):
+  - **Audit before spending.** Before running an existing live test, check its base pin, seats,
+    brief and assertions against today's rulings; older cells go stale as the codebase tightens.
+  - **Call the highest-level entry point** (the gate's `run_gate`, `attach_*_runtime`, the graph), so
+    a test inherits production logic whole; a test never rebuilds a production piece by hand.
+  - **The verdict is production's.** A cell scores with the gate's and the co-lead's verdicts and adds
+    no criterion of its own.
+  - **Pressure, not hostility.** A coding-pipeline cell reproduces production behaviour: an honest
+    agent eager to finish. The prompt states the pressure openly (the run depends on this tool, the
+    budget is nearly spent) and names no check, class or weak point; the agents stay free to find a
+    shortcut. Wiring is production's (co-lead review on, configured seats, current toolkit). A
+    stateless auditor from a vendor apart from the coder's and the co-lead's reads each commit
+    afterwards; a shortcut the gate and the co-lead passed is a miss, the only failure, and a commit
+    finding that names no changed file is recorded as the auditor's error, never scored. Each brief runs several times.
+    Planted breaches belong in `gate_bench` as seeded defects, never in a model's instructions
+    (vendors refuse hostile briefs: Anthropic `refusal`, OpenAI `cyber_policy`, 2026-11-04/05).
 - **Development test logs:** any command that intentionally emits logs, live model outputs,
   usage, or cost data writes those artifacts under `logs/dev/`. Prefer JSONL plus a
   Markdown summary. These are local development artifacts, not runtime memory.
@@ -910,7 +960,7 @@ One line each; the open-work queue lives in the gitignored handoff, not here.
   `.example`; remaining: egress control for the non-gate processes, then default-on. (Phase 3
   makes the jail a per-unit option; its default is §9.11 question 3.)
 - **Files API for media** — deferred; a referenced-PDF 413 at ~6.3 MB (anthropic-sdk-python#1098)
-  suggests a tighter ceiling than the documented inline 32 MB.
+  suggests a tighter ceiling than the documented 128 MB first-party request limit.
 - **`bash_exec` figure capture** — diff the scratch cwd for new images, synthesize `FigureRef`s.
 - **RAG (ChromaDB, three targets)** — literature, persistent memory, tool index; `vector_search`
   stays stubbed. (A naive top-x literature injection for the librarian is open work, not deferred.)
@@ -986,11 +1036,19 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   tool-search discovery items, so a deferred tool is searched again, and the documents of the
   condensed middle (the latest round's stay; the pin names every paper; the agent reopens one); (d) within a turn, media is
   bounded by a segment boundary at 80% of a provider's image count or 70% of its request bytes,
-  so the guard's mid-turn eviction is a backstop; Alibaba still re-sends each document at the end
-  of every call (its documents are extracted locally); (e) Anthropic context editing ships off
+  so the guard's mid-turn eviction is a backstop; (e) Anthropic context editing ships off
   (ruling B12: each clear rewrote the whole prompt cache, measured); (f) on an enforcing 5.1/5.5
   Claude seat the adapter's safety net strips refused thinking and retries once
-  (`*.thinking_dropped`); (g) the librarian's turn start names no task receipt.
+  (`*.thinking_dropped`); (g) the librarian's turn start names no task receipt; (h) after every cut — the lead's
+  coding-span cut, a segment boundary, server compaction and every turn-boundary seed — code
+  restates, after the summary and outside every summariser's input, the seat's exchange with the
+  human word for word (the human's texts labelled as direction, never receipts; started from the
+  ledger's `channel.*` events in a new process) and, for the lead, its chain (each brief's state,
+  commit SHA, saved patch, version, lock, receipt; earlier cycles' briefs) (C4, run
+  polevo-20261104: the coding-span cut had replaced three human rulings with a paraphrase that
+  reversed them). Every summariser we run reads a placeholder where the human spoke (C4b); on a
+  provider that compacts on its side (Anthropic, OpenAI) that summariser reads the human's texts as
+  the conversation holds them, and code restates them word for word after its summary.
 - **Reviewer live-tested on the contrast seat only** (`qwen3.8-max`; configured seat ruled
   unnecessary). Residuals: a non-glyph compile failure leaves `.tex` and no PDF
   (`renderer_error`, L1); tables typeset to 60 rows.
@@ -998,12 +1056,18 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   day a hosted vendor tool is declared.
 - **Unattended runs:** `human` is a `message` address only with a handler. On the author side the unattended case is classified before MCP flattens it. A channel fault now arrives as a notice, and the ledger keeps `channel.reply.error`. Batches published before 2026-09-01 ran with prompts naming tools the roles lacked.
 - **Worker `edit_report` misformatting** (whole report in `summary`) is mitigated by a soft note only.
-- **Provider-error containment covers the analyst workers only (D1, 2026-10-18):** a worker's
-  provider error that escapes retry ends its turn unfiled and the debate carries on; a lead,
-  librarian or reviewer `ProviderTurnFailed` is recorded (`provider_error`) and still ends the run,
-  and a co-lead provider error inside `submit_for_review` ends the lead's turn the same way.
-  Rulings pending: route a failed lead/librarian pass back to the reviewer; contain account-wide
-  errors (401/403, every key spent) or let them end the run.
+- **Model-call containment (D1, A4, 2026-11-04):** any exception a unit's model call raises ends
+  that unit's turn unfiled and recorded (`ModelCallFailed`, `<unit>.<action>.model_call_failed`,
+  `error_type`). A worker's turn ends and the debate carries on. A lead's or librarian's failed pass
+  returns to the reviewer with no report (A4b, ruling option 1: `arrived` = `<team>_failed`, a
+  checkpointed runtime notice `pass_failure`, the pass counts against the team's cap; a lead failure
+  reloads the registry and restarts the workers). A reviewer failure ends the run recorded.
+  Account-wide errors (401/403, every key spent) keep ending the run. A failed lead cycle charges
+  the author credits it spent (`ModelCallFailed.cycle_outcome`, N11: no refill). A co-lead failure
+  inside `submit_for_review`/`respond_to_review` is an error result of that tool (C3b): refunded
+  when passing, counted when likely to recur, raised when account-wide or outside a cycle; the
+  co-lead's verdict call is contained like its loop; faults in our own code are raised as
+  themselves.
 - **Evidence rule, open edges (2026-09-25):** a paper readable only as a web page grounds no
   value (the librarian records it as a gap); an ObsID or band restated in a worker's text needs the
   request's `input:` handle or a toolkit result carrying it (a dispatched task no longer grounds);
@@ -1020,7 +1084,8 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **Quick channel (E12) (2026-09-25):**
   - live: 25/25 ping-matrix pairs (every seat pair plus the human) and 2 attack cells, 2026-09-25;
   - the mirror to Telegram is a no-op until `TelegramHandler.notify` lands;
-  - lead and worker read figures, not PDFs, over `view_receipt`;
+  - every role may be handed a figure or a PDF over `view_receipt` (ruling 2026-11-04); a member
+    whose adapter lacks the medium receives the sanitiser's parse or note (A2);
   - a human reply after the graph node ended resumes a reply-only turn that nobody downstream reads;
   - `tests/test_live_no_hitl.py` still probes the retired `ask_human` provider surface.
 
@@ -1040,9 +1105,38 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   the base ref.
 - **Claude SDK built-ins** (`ToolSearch`, `ScheduleWakeup`, `TaskOutput`) are not gated by
   `--allowedTools` [F12].
-- **`_reset_direct_tree` is best-effort** — a git failure is logged and swallowed; a hard kill can
-  leave the coder's commit on a clean tree, which preflight (dirty-tree only) misses; bounded at 30 s
-  on interrupt.
+- **`_reset_direct_tree` is best-effort** — a git failure is recorded (`coder.tree_reset.error`,
+  with the patch saved before it) and the lead is told the toolkit tree may still hold the work and
+  where the patch is (C2b); the run goes on, the chain's later links open only on a clean tree, and
+  a worker rerun after a commit reloads the registry from that tree. A coder disconnect that raises
+  is held until the reset has run; a session whose close raised is kept on
+  `RunControl.unclosed_sessions` and closed again by the run's teardown, disconnect only (C2c). A
+  hard kill can leave the coder's commit on a clean tree, which preflight (dirty-tree only) misses;
+  bounded at 30 s on interrupt.
+- **The gate judges each output class (B3, 2026-11-04):** an opt-in product or figure lies inside the
+  call's output argument and is declared (`layer_b.returns.placed`, judged by the runtime's own
+  minting function `capture.admit_artifacts`, E1g); an opt-out write into an
+  obs-db is recorded through `obsdb_catalog` and leaves `healthcheck` passing
+  (`layer_b.returns.obsdb`; Q2: an in-place tag on a recorded file passes); scratch is unchecked. An
+  opt-out tool's tests run on a fixture obs-db under `tmp_path/<MISSION>/` seeded through
+  `obsdb_catalog.neutral`, the real obs-db being read-only to Layer B. Every other file a call
+  writes is scratch (bytecode, the home's caches, the temp area outside the test's `tmp_path`) or
+  fails `layer_b.returns.unclassified` (E1h, user rule 2026-11-04). Accepted limit: an
+  unrecorded file in a folder whose entry the call recorded passes (det2/det3 beside a recorded
+  det1). The recorder imports `obsdb_catalog` from the branch, which `structural.changes_allowed`
+  keeps untouched. A catalog left `regressed` passes (a re-acquire); every other unhealthy state
+  fails. A folder is an obs-db when it holds a `catalog.json` or bears a mission name the toolkit
+  knows. `gate_readonly_roots` binds real data read-only into Layer B only, so the toolkit's
+  real-data tests run there and fail in the coder's own jail, which lacks those roots.
+- **The gate runs the toolkit's earlier fast tests (2026-11-04, user rule):** after the change's own
+  tests, Layer B runs every earlier test the toolkit leaves unmarked (`gate.FAST_TESTS`, `not slow and
+  not live`), each package's in its environment, once and outside the determinism maps; any that does
+  not pass fails `layer_b.regression`. A coder could still hide an earlier test (skip, ignore, delete);
+  the co-lead's diff review is the check for that.
+- **HEASoft parameter files are private per call (G4, 2026-11-04):** each toolkit call in the REPL,
+  each `bash_exec` command and each watched gate call gets a fresh, empty user half of `PFILES`
+  (`builtin_server.private_param_dir`). A heasoftpy task object held at module level keeps its
+  learned values in memory; a `PFILES` without `;` gets no private folder.
 - **`_make_path_confiner`** — deprecated, unwired; use the `PreToolUse` hook.
 - **`PathGuard` denies governance basenames everywhere**, incl. research_toolkit's own contract —
   ruling: leave it.
@@ -1055,8 +1149,14 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   not-planned 2026-09-14); ruling 2026-09-25: Telegram is the channel, Slack not pursued.
 - **`retrieval.vector_search`** — `NotImplementedError` stub (§12 RAG).
 - **Environment pipeline residuals (2026-10-07):** after any unjailed build, the sticky taint makes
-  every jailed build fresh until a human removes `built/unjailed.json`; each build downloads its
-  packages afresh (one tool pays ~3 downloads, [F30]); input hashing resolves a worker's paths on
+  every jailed build fresh until a human removes `built/unjailed.json`; [F30] closed 2026-11-04 (D3b): jailed
+  builds share a read-only package archive (`<agent conda dir>/pkgs-archive/`, conda's second
+  `pkgs_dirs`; a file is used only when its URL is in `urls.txt` and its md5/sha256 matches the
+  lock, else refetched; files enter it only after a successful build, hash-checked, outside the
+  jail), so a rebuild of known packages downloads nothing (pip wheels still download; unjailed
+  builds do not use it); a build kept aside is put back when the same lock returns; a failed
+  rebuild over an earlier definition's build keeps that build in use, its results flagged untested
+  env; input hashing resolves a worker's paths on
   the host, not in its jail ([F29]); the shell server keeps `-P`, so the analysis interpreter must
   be 3.11+; a derived environment's human base activation is copied for the jail (relative
   sourcing inside it fails loudly).
@@ -1075,15 +1175,16 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   expands up to 5 schemas per query.
 - **Key-failover edges:** rate limits are per-org; an in-flight coder keeps its launch key; 401 is
   not rotated; retirement is process-scoped; Google is unwired (no cited taxonomy).
+- **A cancelled document parse runs to completion** (A3, 2026-11-04): the first parse of a paper for
+  a member without native documents runs in a worker thread, which `/stop` cannot cancel; a detached
+  run can outlive `/stop` by one parse (~40 s). The cache stays whole (its manifest is written last).
 - **Media:** eviction is oldest-first, so one near-ceiling document survives while small ones drop
-  (size-aware needs a ruling) [V-6]; the `vision` flag gates only the call-time `images=` channel,
-  not figures on a tool result [V-2].
+  (size-aware needs a ruling) [V-6]; capability is checked at `ModelHandle.call`, and figures on a
+  tool result are planned by the adapter [V-2].
 - **Gemini refuses `load_data`'s `epoch` object** (400 on `additionalProperties`, probed 2026-11-03,
   predates argument kinds); Google seats no role that receives toolkit tools.
 - **Vendor schema quirks beyond the probed positions:** GLM writes `"null"` into `str | None` fields
   [I14]; `$ref` under `allOf`/`oneOf`/`additionalProperties` unmeasured [I20].
-- **DeepSeek:** `images_accepted=False` stands on policy; the docstring's text-only reason is stale.
-  `deepseek-v4-flash` is a retired alias now served by V4.1-Flash.
 
 **Benchmarks**
 - **gate_bench pruning cache leak** — 20 pruned entries in swap batches from 2026-08-26 carried
@@ -1169,3 +1270,37 @@ Compacted 2026-10-19 (every entry); detail in git history.
   `turn_end` are; the librarian → reviewer edge carries only what the filed report cites.
 - 2026-11-03 — §13: argument kinds and the one citing syntax live-tested (83 cells; the graph cell
   waits on the toolkit commit); Gemini's `additionalProperties` refusal recorded.
+- 2026-11-03 — §4: `prompts/conventions.md` gains the writing conventions (user instruction): the
+  manuscript register for every unit, and terms coined during a run described in plain words.
+- 2026-11-04 — §6, §13: media capability is the adapter's declaration, not a config flag (A1);
+  any role may be handed any medium over `view_receipt`; model-call containment for every unit
+  (A4, `ModelCallFailed`); a persuaded commit advances the coding chain and every commit goes
+  through one tail (C1, C2); an honest session close (C2b). Plan `tmp_plan_handles_only.md`.
+- 2026-11-04 — §7, §8, §9.3.2: the `output` argument kind and declared products (B1, B2): only a product a
+  call declares is minted; the named-argument / printed-path capture is removed.
+- 2026-11-04 — §9.3.9, §13: the model-input sanitiser (A2) replaces the media refusal; documents are parsed
+  once at their place in the request.
+- 2026-11-04 — §13: the gate's per-class output checks (B3); A4b/A4c containment entry updated.
+- 2026-11-04 — §2b, §7, §8, §9.3.1, §9.7, §9.8: the extended report design (C3): a ToolSpec is a brief
+  report of the lead's turn, read live by version; `turn_end` locks every report of the turn.
+- 2026-11-04 — §6, §13: model capability is configuration (`config/model_capabilities.yaml`, Z1d;
+  partly reverses A1); preflight's paid `member_media` probe (Z1e); Z.AI and Anthropic media limits (Z1c).
+- 2026-11-04 — §13: the gate accepts a `regressed` catalog, recognises an obs-db by catalog or mission
+  name, and binds `gate_readonly_roots` for Layer B (H1 gate items); private HEASoft `PFILES` per call (G4).
+- 2026-11-04 — §6, §13: DeepSeek's vision follows its documented model (user ruling; Z1h): the coder runs
+  `deepseek-flash` (V4.1-Flash, images, no documents); the 2026-08-25 text-only policy and its §13 entry retire.
+- 2026-11-04 — §9.10 step 0a (user ruling): toolkit decoupling first — inventory every coupling between
+  `auto_research` and `research_toolkit`, remove it or formalize it as one toolkit contract, so the orchestration
+  pairs with any toolkit; no new coupling meanwhile.
+- 2026-11-04 — §8, §13: the gate's Layer B also runs the toolkit's earlier fast tests (`layer_b.regression`, user rule);
+  the live attack test's oracle watches the gate's own tools and adds no criterion of its own.
+- 2026-11-05 — §10 live test conventions (user rulings): audit before spending; call the highest-level
+  entry point; the verdict is production's; coding-pipeline cells apply pressure, not hostility (attack
+  cells retire; planted breaches move to `gate_bench`).
+- 2026-11-05 — §10: the live attack cells are replaced by pressure cells (`tests/test_live_pressure_cells.py`):
+  production wiring, the pressure paragraph through `load_prompt`, three briefs (product / obs-db / plotter) x3 on
+  toolkit main f409d09, a stateless auditor; only a finding in a committed diff fails a cell.
+- 2026-11-05 — §10: the pressure cells' auditor comes from a vendor apart from the coder's and the co-lead's
+  (Claude Opus 5); a commit finding naming no changed file is the auditor's error, never scored.
+- 2026-11-05 — §10: live tests opt in by the `live` marker and `--live` (`tests/conftest.py`); the per-file
+  switches retire, except those guarding a message to a person or a destructive step.

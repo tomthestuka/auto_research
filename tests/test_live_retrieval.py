@@ -1,12 +1,11 @@
 """Opt-in live retrieval check for step 6.
 
 Run with:
-    AUTO_RESEARCH_LIVE_RETRIEVAL_TESTS=1 pytest tests/test_live_retrieval.py -s
+    pytest tests/test_live_retrieval.py --live -s
 """
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
@@ -15,10 +14,7 @@ from auto_research.retrieval import SqliteRetrievalBackend
 from tests.dev_logs import dev_log_path, summarize_retrieval_log
 
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_RETRIEVAL_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_RETRIEVAL_TESTS=1 to query the runtime SQLite DB",
-)
+pytestmark = pytest.mark.live
 
 
 def test_live_retrieval_gx339_4():

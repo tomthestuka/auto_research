@@ -1,6 +1,6 @@
 """Opt-in live attack on the Telegram renderer: replay an adversarial Markdown corpus (E8, 2026-09-25).
 
-    AUTO_RESEARCH_LIVE_TELEGRAM_ATTACK=1 pytest tests/test_live_telegram_attack.py -s
+    AUTO_RESEARCH_LIVE_TELEGRAM_ATTACK=1 pytest tests/test_live_telegram_attack.py --live -s
 
 The corpus (``tests/fixtures/telegram_attack_payloads.json``) was written by an attack agent aimed
 at the renderer's known weak points: rich-message limits, chunk boundaries, escaping, math, table
@@ -26,10 +26,10 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
     os.getenv("AUTO_RESEARCH_LIVE_TELEGRAM_ATTACK") != "1",
-    reason="set AUTO_RESEARCH_LIVE_TELEGRAM_ATTACK=1 to send the attack corpus to Telegram",
-)
+    reason="set AUTO_RESEARCH_LIVE_TELEGRAM_ATTACK=1 with --live to send the attack corpus to Telegram",
+)]
 
 _CORPUS = Path(__file__).parent / "fixtures" / "telegram_attack_payloads.json"
 _PAUSE_S = 1.2  # stay under Telegram's ~1 message/second per chat

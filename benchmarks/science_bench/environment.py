@@ -154,8 +154,6 @@ def _member(seat: Seat, *, coder: bool = False) -> dict[str, Any]:
         "name": re.sub(r"[^a-z0-9]+", "_", seat.model.lower()).strip("_"),
         "provider": seat.provider,
         "model": seat.model,
-        "vision": seat.vision,
-        "documents": seat.documents,
     }
     price = seat.price()
     if price:
@@ -468,6 +466,8 @@ def materialize(
     # Byte for byte: the scan lists are part of the instrument, not part of the treatment, and the
     # batch stamps their hash so a report names the gate configuration it was measured under.
     shutil.copy2(source_config_dir / "code_gate.yaml", config_dir / "code_gate.yaml")
+    # What each model takes is a fact about the models, never a treatment: copied byte for byte.
+    shutil.copy2(source_config_dir / "model_capabilities.yaml", config_dir / "model_capabilities.yaml")
 
     return TrialEnvironment(
         run_id=run_id, root=root, config_dir=config_dir, toolkit_root=toolkit_root,

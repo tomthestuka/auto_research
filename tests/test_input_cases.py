@@ -28,6 +28,7 @@ from tests.test_sandbox import _FakeRegistry, _FakeSandbox
 
 TOOL = "research_toolkit.tk.call"
 MAKE = "research_toolkit.tk.make"
+WRITE = "research_toolkit.tk.write"
 ME, PEER = "analyst_worker_0", "analyst_worker_1"
 RUNS = None
 
@@ -46,6 +47,17 @@ RESULT = {"M2": {"ci_lo_rad": -0.3222161424653368, "chi2": 1.0035928731}, "bins"
                                                                                     {"q": -0.0230234694, "q_err": 0.0020757915}],
           "n_bins": 2, "file": "spec.pha"}
 OK = {"p": {"value": 1.0, "reason": "r"}}  # the required parameter, satisfied
+#: A writer: one output argument of each shape (B1), beside a setting.
+OUT_SCHEMA = {
+    "properties": {
+        "out_dir": {"kind": "output", "shape": "folder"},
+        "outfile": {"kind": "output", "shape": "file"},
+        "stem": {"kind": "output", "shape": "prefix"},
+        "log": {"kind": "output", "shape": "file", "default": "logs/fit.log"},  # its default names the file
+        "s": {"kind": "setting"},
+    },
+    "required": ["outfile"],
+}
 
 
 @pytest.fixture(autouse=True)
@@ -60,19 +72,28 @@ def _tool(tmp_path):
     made = []
 
     def run(module, fn, args):
-        if fn == "make":  # writes a file of its own and names it, as a reduction tool does
-            out = tmp_path / f"spec_{len(made)}.pha"
+        if fn == "make":  # writes a file into its output folder and declares it (opt-in product)
+            out = Path(args["outdir"]) / f"spec_{len(made)}.pha"
             out.write_text(f"PHA {len(made)}\n")
             made.append(out)
             payload = {**RESULT, "file": str(out)}
-            return {"exit_code": 0, "stdout": json.dumps(payload), **payload}
+            return {"exit_code": 0, "stdout": json.dumps(payload), **payload,
+                    "products": [{"path": str(out), "caption": "spectrum"}]}
+        if fn == "write":  # the folder exists when the tool runs: it writes there
+            Path(args["outfile"]).write_text("PHA grouped\n")
+            return {"exit_code": 0, "stdout": "wrote", "folder_existed": Path(args["out_dir"]).is_dir()}
         return {"exit_code": 0, "stdout": "ok", "seen": 1}
     return run
 
 
+#: The reducer: the shared arguments plus the folder it writes into.
+MAKE_SCHEMA = {**SCHEMA, "properties": {**SCHEMA["properties"], "outdir": {"kind": "output", "shape": "folder"}}}
+
+
 class _Registry(_FakeRegistry):
     def spec(self, k):
-        return {"module": "tk", "fn": k.rsplit(".", 1)[1], "args_schema": SCHEMA}
+        schema = {WRITE: OUT_SCHEMA, MAKE: MAKE_SCHEMA}.get(k, SCHEMA)
+        return {"module": "tk", "fn": k.rsplit(".", 1)[1], "args_schema": schema}
 
 
 @pytest.fixture
@@ -83,7 +104,7 @@ def run(tmp_path):
     tool = _tool(tmp_path)  # one counter: each worker's file has its own name
 
     def provider(source):
-        registry = _Registry(known={TOOL, MAKE}, mcp=set())
+        registry = _Registry(known={TOOL, MAKE, WRITE}, mcp=set())
         return SandboxToolProvider(registry, _FakeSandbox(tool_fn=tool), cwd=tmp_path / source,
                                    receipts=store, receipt_source=source)
 
@@ -102,16 +123,16 @@ def run(tmp_path):
     store.mint(source=ME, kind="figure", produced_by=MAKE, path=png, caption="PD", mime_type="image/png")  # f1
     calls_before = len(mine.sandbox.tool_calls)
 
-    def call(args):
-        out = asyncio.run(mine.execute(TOOL, args))
+    def call(args, tool=TOOL):
+        out = asyncio.run(mine.execute(tool, args))
         ran = len(mine.sandbox.tool_calls) > calls_before
         return out, ran, (mine.sandbox.tool_calls[-1][2] if ran else None), store
 
     return call
 
 
-def _check(run, args, expect):
-    out, ran, received, store = run(args)
+def _check(run, args, expect, tool=TOOL):
+    out, ran, received, store = run(args, tool)
     if expect is RUNS:
         assert not out.is_error and ran, out.text
         assert not refs_in(received), received
@@ -280,6 +301,52 @@ def test_every_reference_target(run, target, expect):
     _check(run, {"p": ref(target)}, expect)
 
 
+#: (id, arguments, expected): each output shape (B1) against what a model may write. ``RUNS`` cases
+#: name where the runtime placed each argument, relative to the call's own folder.
+OUTPUTS = [
+    ("output: every one left out", {}, {"out_dir": "", "outfile": "outfile", "stem": "write", "log": "fit.log"}),
+    ("output: the model's name beats the manifest's", {"log": "/x/mine.txt"}, {"log": "mine.txt"}),
+    ("output: a blank name takes the manifest's", {"log": " "}, {"log": "fit.log"}),
+    ("output: a file name", {"outfile": "grouped.pha"}, {"outfile": "grouped.pha"}),
+    ("output: a path keeps its file name only", {"outfile": "/data/obsdb/IXPE/x/grouped.pha"}, {"outfile": "grouped.pha"}),
+    ("output: a climb out of the folder", {"outfile": "../../x.pha"}, {"outfile": "x.pha"}),
+    ("output: '..' alone", {"outfile": ".."}, {"outfile": "outfile"}),
+    ("output: '.' alone", {"outfile": "."}, {"outfile": "outfile"}),
+    ("output: a trailing slash names no file", {"outfile": "/data/obsdb/"}, {"outfile": "outfile"}),
+    ("output: blank", {"outfile": "  "}, {"outfile": "outfile"}),
+    ("output: a number", {"outfile": 3}, {"outfile": "outfile"}),
+    ("output: a reference", {"outfile": ref(f"{ME}:d1")}, "argument outfile is an output the runtime places"),
+    ("output: a reference as a JSON string", {"outfile": json.dumps(ref(f"{ME}:r1#/a/b"))},
+     "argument outfile is an output the runtime places"),
+    ("output: a prefix keeps its file name only", {"stem": "/tmp/../pd_band"}, {"stem": "pd_band"}),
+    ("output: a folder the model names is the call's own", {"out_dir": "/data/obsdb/IXPE"}, {"out_dir": ""}),
+    ("output: a value with a reason", {"outfile": chosen("x.pha")}, "argument outfile is an output, which takes no reason"),
+    ("output: a folder with a reason", {"out_dir": chosen("/x")}, "argument out_dir is an output, which takes no reason"),
+]
+
+
+@pytest.mark.parametrize("args, expect", [c[1:] for c in OUTPUTS], ids=[c[0] for c in OUTPUTS])
+def test_every_output_shape(run, tmp_path, args, expect):
+    from auto_research.provenance.refs import call_arguments, returned_value
+
+    received, store = _check(run, args, None if isinstance(expect, dict) else expect, tool=WRITE)
+    if not isinstance(expect, dict):
+        assert not (tmp_path / ME / "products" / "write").exists()  # a refused call makes no folder
+        return
+    result = store.receipts(source=ME, kind="result")[-1]
+    # The call's own folder, under the unit's workdir and named by the call id its receipts carry,
+    # exists when the tool runs.
+    folder = tmp_path / ME / "products" / "write" / result.call_id
+    assert returned_value(store, result.handle)["folder_existed"] is True
+    for name, where in expect.items():
+        assert received[name] == str(folder / where if where else folder), (name, received)
+    # The record keeps what the call ran with, placed paths included, behind the call's handle.
+    assert {k: v for k, v in call_arguments(store, result.handle).items() if k in expect} == \
+        {k: received[k] for k in expect}
+    # Where a call writes is never one of its inputs.
+    assert not any(Path(i.path).resolve().is_relative_to(folder.resolve()) for i in result.inputs), result.inputs
+
+
 def test_what_the_tool_receives_and_what_the_call_records(run, tmp_path):
     """The plain values the tool gets, and the record that keeps the reason, the reference and the
     filled values behind the call's handle."""
@@ -288,7 +355,8 @@ def test_what_the_tool_receives_and_what_the_call_records(run, tmp_path):
     received, store = _check(run, {"d": ref(f"{ME}:r1#/bins/0"), "p": chosen([2.0, 8.0], "the band"),
                                    "path": ref(f"{ME}:d1"), "s": "soft"}, RUNS)
     assert received == {"d": RESULT["bins"][0], "p": [2.0, 8.0], "q": 0.99,
-                        "path": str(tmp_path / "spec_1.pha"), "s": "soft"}
+                        "path": str(store.get(f"{ME}:d1").path), "s": "soft"}
+    assert Path(received["path"]).name == "spec_1.pha" and Path(received["path"]).read_text() == "PHA 1\n"
     handle = store.receipts(source=ME, kind="result")[-1].handle
     assert call_arguments(store, handle) == {"d": ref(f"{ME}:r1#/bins/0"), "p": chosen([2.0, 8.0], "the band"),
                                              "q": 0.99, "path": ref(f"{ME}:d1"), "s": "soft"}

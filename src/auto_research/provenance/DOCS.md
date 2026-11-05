@@ -41,7 +41,8 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   manifest: `data` (a tool's output: references into what the caller's own tools returned, never
   a call's arguments), `parameter` (a reference to the caller's own result, or a typed
   `{"value": …, "reason": "…"}`, or left out for the declared `default`), `path` (typed, or a
-  reference to a file the caller's own tool wrote) and `setting` (typed). `check_arguments` judges
+  reference to a file the caller's own tool wrote), `setting` (typed) and `output` (where the tool
+  writes: the runtime fills it, below). `check_arguments` judges
   the arguments as the model wrote them, before the runtime fills mission folders and defaults
   (`calls.resolve_call_args`); an argument the manifest does not declare is refused, and so is a
   reason on any kind but a parameter. `tool_values` then gives the tool plain values. The call's
@@ -77,13 +78,48 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   back a number: a toolkit tool's return and its files/figures (producer `research_toolkit.*`), a
   `commit`, a paper (attributed), and the request (`input:`, `research_request`, cite-only).
   `_Resolved.entry` is the one gate: a cited non-evidence receipt is refused by name
-  (`NOT_EVIDENCE_NAMES`: "a file you read", "a web page", "shell output", "a task brief", …); in
+  (`NOT_EVIDENCE_NAMES`: "a file you read", "a web page", "shell output", "a task brief", "a tool brief", …); in
   scope it is skipped silently. This closes line-number grounding (`read_file`'s `cat -n`) and the
   existence-over-everything-read coincidence class, and makes the shell typed-number rule
   unnecessary (deleted).
 - **Flags propagate.** `failed` (the producing call failed) and `synthetic` (an input under a
   marked `synth<YYMMDD>-<sha>` directory, §9.5) pass to every descendant. A flagged receipt can be
   cited to describe what happened; it cannot ground a number.
+- **Output arguments are the runtime's** (user rulings 2026-11-04, plan item B1). An `output`
+  argument names where a tool writes its opt-in science artifacts, and its manifest entry names
+  its `shape`: a `folder` (`outdir`), a `file` (`save_path`, `log_path`, `outfile`) or a `prefix`
+  for file names (`save_path_prefix`). The runtime places each in the call's own folder,
+  `<unit workdir>/products/<fn>/<call id>/`, made before the call runs: a folder is that folder
+  whatever the model wrote; a file or prefix keeps only the model's file name (`.`, `..`, blank or
+  a non-text value give the default: the file name of the manifest's `default`, which so sets the
+  extension, else the argument's name, or `fn` for a prefix; a folder declares no default). The
+  call id is
+  allocated before the call and passed to `receipt_call`, so the folder's name and the receipts'
+  `call_id` agree. The placement is recorded in the call's context (`output_args`,
+  `products_dir`), so the ledger rebuilds the placed paths and `args_sha256` matches. An output is
+  never hashed as an input. A reason or a reference on one is refused. A tool that still
+  names a figure `save_path`/`save_path_prefix` with another kind keeps `FIGURE_PATH_ARGS`; a
+  declared `output` wins over the legacy name; figures land in the call's folder too (B2), so two
+  calls naming one file never collide (an unnamed one is `<fn>.png`; a ledger before 2026-11-04
+  rebuilds with its `figures_dir` and `<fn>_<stamp_ms>`).
+- **Only declared products are minted** (user ruling 2026-11-04, opt-in output; plan item B2). A
+  tool's return carries `"products": [{"path": …, "caption": …}]` (`capture.PRODUCT_KEYS`: the
+  figure keys a tool can know; the runtime computes `sha256` from the bytes, `produced_by`, the call
+  id and the time from the call, `mime_type` from the file name). `receipt_call` mints each as a
+  `data` receipt over the file's own bytes when it is a file inside the call's products folder
+  (and a returned figure the same way: ruling 2026-11-04, figures are opt-in artifacts),
+  reached through no link, in the allow-list, within `_MAX_PRODUCTS` (20); the folder is anchored
+  below the unit's working folder as the runtime made it (a folder the tool replaced by a link is
+  not followed), the declared path must resolve to exactly its place there (a `..` is read after
+  the link it follows, as the kernel does), and the receipt names that resolved file. Residual: a
+  link swapped in between that check and the hash (a process outliving its call) is not caught.
+  Every other product is named in a
+  `[provenance]` note the model reads (outside the folder, absent, through a link, malformed, past
+  the cap, or a tool with no output argument and so no folder). Nothing else a call writes is
+  minted: the earlier rule (`data_products`: a named-argument path the call changed, or an
+  absolute path printed in its output) is gone, so a parameter file, a cache or an obs-db write is
+  scratch or opt-out, never a receipt. A declared product passes to a later call as
+  `{"$ref": "<handle>"}` (`refs.resolve_one`, unchanged).
 - **Every number is its own citation** (user ruling 2026-11-03, one citing syntax, replacing the
   2026-09-24 *scoped grounding* under which a `[src:r12]` let any number its receipts held stand
   beside it). Citations are `{{src:r12}}` (a whole receipt), `{{src:r12#/p}}` (a returned value;
@@ -123,7 +159,8 @@ report prose ──► check_bindings / check_report_fields ──► problems (
 - `store.is_evidence(receipt) -> bool`; `TOOLKIT_PRODUCER_PREFIX = "research_toolkit."`,
   `REQUEST_PRODUCER = "research_request"`, `NOT_EVIDENCE_NAMES` (producer → how a refusal names it).
 - `calls.resolve_call_args(arguments, context) -> dict` — the arguments a worker's call runs with
-  (the model's, completed by the runtime's context); `calls.args_digest(args)` — the
+  (the model's, completed by the runtime's context; `output_args` + `products_dir` place every
+  output argument in the call's own folder); `calls.args_digest(args)` — the
   `Receipt.args_sha256` hash; `calls.ledger_calls(path) -> list[LedgerCall]` — every call in a
   ledger that minted receipts, with its rebuilt `ran_args` (what the receipts hash) and `sent_args`
   (what the tool received: without the runtime-only `env` / `shell_env`); a call answered without
@@ -135,7 +172,9 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   (live) plus admitted handles and their ancestors; `.admit(handles)`, `.handles()`.
 - `capture.inputs_before(store, args, *, cwd, skip_keys, observation_paths=None) -> CallInputs` and
   `capture.receipt_call(store, *, source, produced_by, args, text, failed, state, figures, cwd,
-  toolkit_root, kind, fields, parents=()) -> CallReceipts` — one tool call to receipts; `parents`
+  toolkit_root, kind, fields, parents=(), returned=None, call_id=None, products=(), products_dir=None)
+  -> CallReceipts` — one tool call to receipts (`products` minted as above, inside `products_dir`); `call_id` is the id the caller allocated before the call ran (it names the
+  call's products folder), a fresh one otherwise; `parents`
   (the call's `$ref` receipts) go on every receipt it mints; `.header()` is the line the model sees
   (`[receipt h] ← parents`). `capture.toolkit_commit(root)` reads HEAD (read-only).
 - `refs.resolve_refs(args, store, usable) -> (resolved_args, parents)` — every `{"$ref": …}` in an
@@ -171,8 +210,13 @@ report renderer.
   fields (`caption`, `mime_type`, `title`, `ids`, `source_sha256`, `parser`, `commit_sha`).
 - `ReceiptStore.hash_input(path) -> InputFile` — cached per (path, size, mtime); links `receipt`
   when the bytes match an in-run receipt.
-- `ReceiptStore.hash_obsdb_entry(mission_dir, obsid) -> InputFile | None` — an observation a tool
-  located from its ObsID (user ruling 2026-10-16: what it is and a hash, never a copy): basis
+- `ReceiptStore.hash_obsdb_entry(mission_dir, obsid, *, entries=None) -> InputFile | None` — an
+  observation a tool located from its ObsID (user ruling 2026-10-16: what it is and a hash, never
+  a copy), at the folder `observations.obsid_folder` finds (the catalog entry's record, then the
+  mission's HEASARC tree rule, mirroring the toolkit's `obsdb_catalog._domain.TREES`; an ObsID the
+  rule finds twice records nothing; `mission=` names the mission as configured, so a symlinked
+  mission folder keeps its tree rule; `index=` walks the tree once per call; a name with no digit
+  that the catalog does not list is looked up nowhere): basis
   `obsdb`, sha256 over the catalog entry (`catalog.json`) plus the folder listing; read fresh each
   call; an uncatalogued ObsID-like folder is its `listing`; `None` otherwise. `capture.inputs_before(observation_paths=)`
   records one per string any argument holds (through lists and dicts, e.g. `load_data`'s
@@ -191,8 +235,11 @@ report renderer.
 - `parse_bindings(prose, *, own_source) -> list[Binding]` — `self:` resolves to `own_source`.
 - `Binding(start, end, handle, quote)`; `BindingResult(problems, bindings)`, `.cited`.
 - `is_synthetic_path(path)`, `sha256_file(path)`.
-- `capture.data_products(state, text, *, failed, figure_paths, stat, is_file)` — the one statement
-  of the data-product rule, used by `receipt_call` and the gate.
+- `capture.parse_products(raw) -> (list[DeclaredProduct], notes)` — the one reading of a returned
+  `products` list (exactly `PRODUCT_KEYS`, each non-empty text), used by `receipt_call`'s caller
+  and the gate; `capture.DeclaredProduct(path, caption)`; `capture.PRODUCT_KEYS = ("path",
+  "caption")`. `CallInputs` holds `inputs` and `started_ns` (the pre-call stats it held for the
+  removed rule are gone).
 - `capture.call_started_ns()` — call start on `CLOCK_REALTIME_COARSE` so it compares with mtimes.
 - `store.checkable_text(raw)` — the decode rule behind `ReceiptStore.text`.
 - `bindings.number_sources(prose, usable, *, masked) -> list[NumberSource]` — every number the
@@ -211,10 +258,16 @@ report renderer.
   miss names the keys or the index bound that exist.
 - `refs.handles_named(text) -> list[str]` — every handle-shaped string a text names, bracketed or
   bare, once each (a message's handles).
-- `inputs.ARG_KINDS = ("data", "parameter", "path", "setting")`; `inputs.declared_kinds(schema)`,
+- `inputs.ARG_KINDS = ("data", "parameter", "path", "setting", "output")`;
+  `inputs.OUTPUT_SHAPE_KEY = "shape"`, `inputs.OUTPUT_SHAPES = ("folder", "file", "prefix")`;
+  `inputs.declared_outputs(schema) -> {argument: shape}` (what `_call_context` records as
+  `output_args`); `inputs.declared_output_names(schema) -> {argument: file name}` (a file or
+  prefix output's manifest `default`, recorded as `output_names`); `inputs.output_name(value) ->
+  str` (the file name an output keeps, `""` for none); `inputs.declared_kinds(schema)`,
   `inputs.declared_defaults(schema)` (parameters with a `default`, which `_call_context` records as
   `defaults`); `inputs.manifest_problems(tool, schema) -> list[str]` (no kind, an unknown kind, an
-  optional parameter without a default: refused at launch, at the gate and at the call).
+  optional parameter without a default, an output without a known shape: refused at launch, at the
+  gate and at the call).
 - `refs.VALUE_KEY, refs.REASON_KEY = "value", "reason"`; `refs.typed_parameter(value) -> (value,
   reason) | None` (exactly those two keys, a non-empty reason, no reference inside; a JSON string
   of one is read as the REPL would).
@@ -366,3 +419,45 @@ Compacted 2026-10-07 (the 2026-10-06/07 entries) and 2026-10-19 (every entry); d
   (`PD4.02`) is not scanned; a librarian gap's numbers stay exempt (a gap states what was not found).
 
 - 2026-11-03 — Live: argument kinds and the one citing syntax pass the lead, librarian, reviewer and worker cells and a coder chain through the kind gate (`logs/dev/live-20261103d/`); only the graph cell waits on the toolkit commit.
+- 2026-11-04 — **`output` argument kind** (user rulings 2026-11-04; plan item B1). `inputs.py`:
+  fifth kind `output` with a `shape` (`folder`/`file`/`prefix`, `OUTPUT_SHAPES`), refused at launch
+  without one (`manifest_problems`), `declared_outputs`. `calls.resolve_call_args` places output
+  arguments in `products_dir` (`<workdir>/products/<fn>/<call id>`) from the context's
+  `output_args`. `capture.receipt_call(call_id=)`: the call id allocated before the call. Tests:
+  `test_input_cases.py` (`OUTPUTS`), `test_input_validator.py`, `test_call_args_ledger.py`.
+  Stateless review (12 findings): fixed — a reference on an output refused (a JSON-string one had
+  become a file name), the products folder checked for a planted link before `mkdir` and a failed
+  `mkdir` an error result (`agents.react._made_products_dir`), a tuple `required` handled, tests
+  pin that a refused call makes no folder. Open for a ruling: the default file name and extension.
+- 2026-11-04 — Ruling on B1's default name (main session): a file or prefix output's manifest
+  `default` names its default file (`declared_output_names`, context `output_names`), and a folder
+  output declaring a `default`, or a default naming no file, is refused (`manifest_problems`).
+- 2026-11-04 — **Only declared products are minted** (plan item B2, user ruling 2026-11-04).
+  `capture.parse_products`, `DeclaredProduct`, `PRODUCT_KEYS`; `receipt_call(products=,
+  products_dir=)` mints each inside the call's folder and names every one it drops;
+  `data_products`, `_PATH_IN_TEXT` and `CallInputs.before` removed. `calls.resolve_call_args`
+  places figure arguments in `products_dir` (old ledgers keep `figures_dir`). Tests migrated from
+  the removed rule to declared products (`test_provenance`, `test_provenance_wiring`,
+  `test_input_validator`, `test_input_cases`, `test_call_args_ledger`, `test_report_html`,
+  `test_report_chosen_values`, `test_gate_returns`).
+- 2026-11-04 — Stateless review of B2 (16 findings): fixed — a `..` after a planted link and a call
+  folder replaced by a link no longer mint the file they reach (`_product_problem` anchors the
+  folder below the workdir and compares the resolved path), drop notes name the worker's action
+  (`tool_request`), figure arguments keep a file name by `output_name` (`..` names none; old ledgers
+  rebuild as they ran), the no-file default says what to write; tests for each and for a relative
+  product, a product that is also a figure, a figure-only tool's folder. Open for rulings: no
+  toolkit tool declares products yet and the prompts still teach the removed rule (B4/B5); the gate
+  does not yet check a product lies inside its output argument (B3); figures are still minted from
+  anywhere in the allow-list.
+- 2026-11-04 — Figures under the products rule (ruling, item B3): `receipt_call` mints a returned
+  figure only inside the call's folder, through no link (`_product_problem`), and names any other.
+- 2026-11-04 — `receipt_call` stamps each minted figure's `FigureRef.receipt` with its receipt's
+  handle, over any handle the tool declared.
+- 2026-11-04 — C3: `NOT_EVIDENCE_NAMES["toolspec"] = "a tool brief"`: a locked tool brief (the
+  lead's `BriefReport`) is minted as a `result` receipt produced by `toolspec`, viewable and never
+  evidence; a commit receipt names its brief (`toolspec`, also its parent) and the reviewed
+  version (`toolspec_sha256`).
+- 2026-11-04 — E1g: `capture.admit_artifacts(artifacts, reachable, ask=, ask_fewer=)` is the one statement of the opt-in minting decision (figures then products: `_product_problem`, de-duplication, the cap, a note per dropped one). `receipt_call` mints by it; the gate's return recorder runs its source in the test process, so a product the runtime would drop fails the gate.
+- 2026-11-04 — `_product_problem(anchor=)` / an artifact's optional sixth element: the folder's resolved place recorded before the call (the gate's recorder); the runtime computes it from the workdir as before.
+- 2026-11-04 — H2: `hash_obsdb_entry` finds the ObsID's folder through `observations.obsid_folder` (catalog record, then HEASARC's tree rule), so an obs-db laid out as HEASARC's archive is hashed at the folder the tool reads.
+- 2026-11-04 — H2 review: `inputs_before` passes each mission folder's configured name and a lazy tree index (`functools.cache` of `observations.obsid_index`) to `hash_obsdb_entry`, which returns before any lookup for an uncatalogued name with no digit.

@@ -140,24 +140,66 @@ runtime enforces before each call runs (the gate checks it):
 - `"parameter"` — a number that changes the science (a band, a grid, a confidence level, a prior).
   Callers pass it by reference or type it with a reason. Give an optional one a `"default"`: the
   runtime passes and records it when the caller leaves the argument out.
-- `"path"` — a file or folder path.
+- `"path"` — a file or folder the tool reads (an input file, a data root), or the observation
+  database it records generic data into (class 2 below).
 - `"setting"` — text, a flag, an option, an identifier, or an operational number (a timeout, an
   iteration count).
+- `"output"` — where the tool writes the artifacts it returns. Give it a `"shape"`: `"folder"` (the
+  tool writes its files inside), `"file"` (one file), or `"prefix"` (several files that start with
+  it). The runtime fills it with the call's own folder and keeps only a file name the caller gives,
+  so each call writes into a folder of its own, made before the call runs. Give every file or prefix
+  a `"default"` naming its file with its extension (`"fit.log"`, `"spectrum.png"`): that name is
+  used when the caller gives none. A folder takes no default.
 
 So a tool takes its inputs as other tools return them and does its own conversions (an absolute
 value, a projection, bin centres, a unit change), states the convention it assumes, and returns
 its values as JSON so the next call can take them by reference.
 
-## Data catalog — record acquired/produced data via `obsdb_catalog`
+## What a tool writes — three classes
 
-When your tool acquires or produces data for an ObsID (download, reduction, polarization
-cube, PHA, …), record it in the mission's data catalog so the rest of the system knows what
-is local and how it was produced. **Route every catalog read and write through `obsdb_catalog`**,
-the catalog's one trusted writer. Record every product through it (`obsdb_catalog.neutral.new` /
-`obsdb_catalog.neutral.advance`) at the point the product lands on disk. Read the real
-signature from the live toolkit source and follow the producer already wired to it
-(`heasarc_utils/lib/heasarc_help.py` calls `neutral.new` after a download). The mission
-`obs_db_path` is the data-path argument the runtime already auto-fills.
+Every file a tool writes is one of three kinds, and each has its own path:
+
+1. **A science artifact** — an output that depends on a `parameter`-kind argument, or on a setting
+   outside the mission team's defaults (a chosen band, grid, binning, model, selection or
+   weighting). The tool writes it under an `output` argument and
+   declares it in its return, `"products": [{"path": "<the file>", "caption": "<what it is>"}]` (a
+   PNG goes under `"figures"`, below). The runtime receipts exactly what the tool declares inside
+   the call's folder, so a report can cite it and a later call can take it by reference. Declare
+   every file the call writes inside its output argument.
+2. **An obs-db item** — generic data, the same for every analysis: raw archive data and the
+   standard reductions the mission team defines, made with their recommended settings only and
+   under the names they give them. The tool writes it
+   into the observation database it is given and records it through `obsdb_catalog`, the catalog's
+   one trusted writer (`obsdb_catalog.neutral.new` after an acquisition, `.advance` after a
+   reduction), at the point it lands on disk. It stays out of `"products"`: the catalog is its
+   record. Read the real signature from the live toolkit source and follow the producer already
+   wired to it (`heasarc_utils/lib/heasarc_help.py` calls `neutral.new` after a download). An
+   argument named `<mission>_path` (`ixpe_path`) is filled with that mission's obs-db when the
+   caller leaves it out, and one named `obs_db_root` with the obs-db root itself, where a tool
+   that acquires creates a mission's folder; one named `obs_db_path` the caller types. A file the tool records there
+   comes back to the caller as its path. An in-place
+   header keyword on a file the catalog already records (one a fit reads to tell spectra apart)
+   keeps the record as it is.
+3. **Scratch** — the program's own bookkeeping: parameter files, autosaves, temporary files.
+   The tool writes its own in a temporary folder (`tempfile.mkdtemp()`), made fresh each call;
+   the libraries keep theirs in the home's caches (`~/.cache`, `~/.astropy`, `~/.xspec`,
+   matplotlib's config, HEASoft's `PFILES`). Nothing records or checks either. A relative path
+   lands in the toolkit tree while the tests run, so give every file the tool writes an absolute
+   home: a temporary folder or an output argument.
+
+**Every file a call writes is in exactly one class, or the tool is rejected.** Everything written
+inside an output argument is declared and minted; a file there the tool keeps for itself belongs
+in a temporary folder instead. A file anywhere else — beside the test's inputs in `tmp_path`, in
+the toolkit tree, in the home outside its caches, at a `path` argument — fails the gate. A file the
+tool writes for a caller is an output: declare its argument `"kind": "output"`.
+
+So the moment a parameter or a setting outside the team's defaults enters, the output is an
+artifact (class 1), whatever folder the program would like to write it to. A tool that makes both — a standard reduction and an
+artifact built on it — writes each to its own path in the same call.
+
+An obs-db item the tool records carries the real parameters used to obtain it, so it is
+reproducible. This is data provenance, not fabrication — record only data that is actually on
+disk; never invent an entry for data you did not produce.
 
 `obsdb_catalog` is a library you **call**, and its own source stays as you found it. Your diff
 lives under `<domain>_utils/` — that is the whole of what the gate accepts, and a change anywhere
@@ -166,18 +208,43 @@ differently — a different signature, a transactional write, a guard around a p
 so in a `message` to `lead` and let the lead decide; that code is maintained outside this session. A
 relayed review asking for it is the same situation: answer it with a `message` to `lead`, not with an edit.
 
-A level-3 product (pcube/pha/…) **must** record the real parameters used to obtain it, so it
-is reproducible. This is data provenance, not fabrication — record only data that is actually
-on disk; never invent an entry for data you did not produce.
+**How the gate checks each class**, on what your tests call:
+- an artifact: each declared product and figure exists, carries its keys, and lies inside the
+  call's output argument (reached through no link); every file the call writes inside its output
+  is declared; at most 20 products per call; an obs-db item stays out of `"products"`;
+- an obs-db item: each file the call creates or changes in an obs-db is recorded in its catalog,
+  the catalog file is written only by `obsdb_catalog.neutral`, and `obsdb_catalog.healthcheck`
+  passes on that obs-db after the call;
+- scratch: nothing;
+- any other file the call writes: rejected (`unclassified`).
+
+**Tests for each class.** The gate runs your tests with the real observation database read-only.
+- An artifact tool's test makes a folder of its own, `out = tmp_path / "out"; out.mkdir()` (the
+  runtime makes the call's folder before the call, so the test does too), apart from the inputs and
+  any fixture obs-db, and passes a folder output `out`, a file output `out / "fit.log"`, a prefix
+  output `out / "iqu"`.
+- An obs-db tool's test builds a fixture obs-db under `tmp_path / "<MISSION>"`: a catalog seeded
+  through `obsdb_catalog.neutral` makes the folder an obs-db, and naming it after its mission (one
+  `obsdb_catalog` knows) lets `healthcheck` scan it for uncatalogued files too. It copies, at the same relative path, every input file the tool changes, and links the ones
+  it only reads. It seeds the catalog for them through `obsdb_catalog.neutral` at the level the
+  real catalog records them (`neutral.new` for archive files, `neutral.advance(level=…)` for
+  reduced ones), so the fixture is healthy before the call, and passes that folder as the obs-db
+  path.
+- A synthetic input, for either kind of tool, is a marked ObsID `synth<YYMMDD>-<hex>` (lowercase
+  hex) the test builds in a fixture obs-db: it writes the files the brief specifies at the mission
+  layout's paths under `tmp_path / "<MISSION>" / "synth<YYMMDD>-<hex>"` and records them through
+  `obsdb_catalog.neutral.new` (archive-level files) or `.advance(level=…)` (reduced ones). The
+  marked name is what provenance flags as synthetic.
 
 ## Figures — the FigureRef capture convention (a plotter tool)
 
 A plotter tool is a **separate** tool from the data/analysis tool that produced the numbers —
 never fold figure-writing into a data tool. It takes the data tool's product (or the live session
-state) and returns figures only. Mirror `xspec_utils/skills/session.py:plot_fit` (one PNG) and
-`plot_iqu` (one PNG per sub-unit) exactly — they are the template. Two conventions make the runtime
-**capture** each figure as a `FigureRef` and re-home it under the run's figures directory; a tool
-that misses either produces a file the harness never tracks and the reviewer never sees:
+state) and returns figures only. Mirror the figure dict of `xspec_utils/skills/session.py:plot_fit`
+(one PNG) and `plot_iqu` (one PNG per sub-unit); declare the PNG path argument by rule 2 below,
+whatever kind a template's manifest still gives it. A figure is an artifact (class 1 above),
+and two conventions make the runtime **capture** it as a `FigureRef` in the call's own folder, so the
+reviewer sees it:
 
 1. **Return a dict with a top-level `"figures"` key** — a list of plain dicts, one per PNG written.
    The runtime validates each dict into a `FigureRef`, so each must carry exactly these keys, or that
@@ -186,12 +253,10 @@ that misses either produces a file the harness never tracks and the reviewer nev
    `created_at` (an ISO-8601 UTC timestamp string), and `sha256` — the 64-char lowercase hex digest of
    the **file you actually wrote** (`hashlib.sha256(Path(save_path).read_bytes()).hexdigest()`), so the
    figure carries the identity of its own bytes. Return `{"figures": [...], "stdout": "...", "exit_code": 0}`.
-2. **Name the output-path argument `save_path`** (a single PNG) **or `save_path_prefix`** (several PNGs —
-   append `_<label>.png` per file). The runtime keys on these exact argument names to redirect the file
-   under the run's figures dir (it keeps the caller's basename, enforces the directory and extension).
-   An output-path argument by any other name is not redirected — the PNG lands in scratch and is never
-   tracked. Default it to `None` and auto-generate a timestamped path when it is absent (the runtime
-   overrides the directory regardless), and expose it in the `TOOL_MANIFEST` `args_schema`.
+2. **Take the PNG path as an `output` argument** — `save_path` with `"kind": "output", "shape":
+   "file", "default": "<name>.png"` for a single PNG, or `save_path_prefix` with `"shape": "prefix"`
+   for several (append `_<label>.png` per file). The runtime fills it with a path in the call's own
+   folder, keeping the caller's file name. Write each PNG at the path the argument gives.
 
 Write the PNG with a non-interactive backend (Agg) inside `skills/session.py` (the science-stack half),
 one figure per file, and close each figure after saving. A plotter is not a *science tool* in the
@@ -201,20 +266,21 @@ required keys (and, where it matters, that the figure reflects its input), not a
 ## Results the runtime can cite — the return contract every tool meets
 
 A report may state a number only when a **receipt** carries it: the runtime receipts each call's
-`stdout` and the data files the call writes, and a finding cites those. The gate runs your tests with
+`stdout` and the products and figures the call declares, and a finding cites those. The gate runs your tests with
 a recorder on every tool you add or change and applies these rules exactly as the runtime does, so
 write each tool to meet all five:
 
 1. **Return plain JSON types.** The tool REPL sends the returned dict with `json.dumps`. Convert
    numpy scalars with `float()`/`int()`, arrays with `.tolist()`, paths with `str()`.
-2. **Receipt every file the tool writes.** Take the output path as an argument (e.g. `out_path`),
-   or print the file's **absolute** path in `stdout`. A file written any other way is uncitable.
+2. **Declare every file a report may cite.** Write it under an `output` argument and return it under
+   `"products"` with its caption (a PNG under `"figures"`). A file the tool writes and declares
+   nowhere is its scratch.
 3. **Write tables as delimited text with a header.** A `.csv`/`.tsv` output has a header row and at
    least one data row, so the reviewer can typeset it straight from its receipt.
 4. **Return figures by the FigureRef convention above,** with each PNG on disk when the call returns.
 5. **Carry every returned number in a receipt.** Each number the tool returns under a key other than
-   `stdout`/`stderr`/`exit_code`/`figures` also appears in `stdout` — printed at the full precision
-   it is returned with — or in a file the call wrote and receipted. A tool that returns no `stdout` has its other
+   `stdout`/`stderr`/`exit_code`/`figures`/`products` also appears in `stdout` — printed at the full
+   precision it is returned with — or in a product the call declares. A tool that returns no `stdout` has its other
    keys shown as its result text, which meets this by construction.
 
 Call each tool you add from its tests with a real input, so the recorder sees what it returns.
@@ -248,12 +314,16 @@ Call each tool you add from its tests with a real input, so the recorder sees wh
 
 ## No fabrication — absolute
 
-- **Never write data-fabricating code into the toolkit, for any purpose.** No code that
-  invents, mocks, or stands in for real measurements. Synthetic validation data is *data*,
-  generated elsewhere and referenced by a marked ObsID — it is never toolkit code.
+- **Never write data-fabricating code into a tool's code (`lib/`, `skills/`), for any purpose.** No code that
+  invents, mocks, or stands in for real measurements. Synthetic validation data is an obs-db
+  item: a marked synthetic ObsID (`synth<YYMMDD>-<hex>`) your tests build in their fixture obs-db
+  and record through `obsdb_catalog.neutral`, so every result computed on it is flagged synthetic —
+  it lives in the tests, never in the tool's code (`lib/`, `skills/`).
 - Do not leave placeholder/marketing language in code, comments, or output:
   no "representative", "synthetic", "illustrative", "mock", "placeholder", "for now",
-  "in operational mode this would…". Write the real thing or raise an honest failure.
+  "in operational mode this would…". Write the real thing or raise an honest failure. A test names
+  its synthetic fixture by what it holds and its marked ObsID (*"a flat-spectrum fixture at ObsID
+  `synth261104-ab12cd`"*).
 - **Write comments and docstrings in positive terms — describe what the code *does*, never what
   it *isn't*.** State the thing's purpose plainly; do not add defensive disclaimers about what it
   is not. Write *"build a 2-HDU FITS carrying the EVENTS TSTART/TSTOP the time-parser reads"*, not
@@ -263,7 +333,7 @@ Call each tool you add from its tests with a real input, so the recorder sees wh
   positive action, not the prohibition.) When a test genuinely needs a minimal in-memory fixture
   to exercise control flow, name and describe it for what it is — *"a minimal FITS fixture with the
   header keywords the parser reads"* — and keep any real measurement data out of the toolkit
-  (reference a marked ObsID instead).
+  (a synthetic input is a marked synthetic ObsID in the test's fixture obs-db).
 - A tool that cannot do its job must **fail loudly** (raise), not return a plausible-looking
   fake. Outputs should carry their input identity (e.g. input hashes) so a downstream result
   can never be silently built on a failed or fake upstream step.
@@ -275,12 +345,16 @@ universal checklist — pick the verification patterns that actually pin down *t
 invent new ones if the tool is novel. The menu includes: known-input→known-output,
 differential agreement with a trusted primitive, metamorphic invariants (e.g. order/scaling
 independence), injection–recovery, cross-computation agreement, and declared sanity bounds.
-A check that references synthetic data references it by its marked ObsID (a data input) — the
-test never generates data itself. Run **only your own new test file(s)** — point `pytest` at your
+A check on synthetic input runs on a marked synthetic ObsID the test builds in its fixture obs-db
+(see *Tests for each class*). Run **only your own new test file(s)** — point `pytest` at your
 test path (e.g. `pytest <domain>_utils/tests/test_<your_tool>.py`), **not** a bare `pytest` over
 the worktree: that would collect and run the whole toolkit's existing suite, which is needlessly
-slow and can fill scratch with other tools' data. The gate itself only runs your changed tests, so
-your own file is the right target. Make it green **before** you declare done — your `Bash` runs in
+slow and can fill scratch with other tools' data. The gate runs your changed tests, then the
+toolkit's earlier fast (unmarked) tests once each, every package's in the environment that package
+names, so a change that breaks an earlier test fails the gate (`layer_b.regression`). While you
+work, your own file is the right target; when your change edits shared `lib/` code, also run that
+package's fast tests (`pytest <domain>_utils/tests -m "not slow and not live"`) before you declare
+done. Make your own file green **before** you declare done — your `Bash` runs in
 the analysis environment (or the candidate you activated, see *Your package's software
 environment*), so `python`/`pytest` carry the full science stack (the same interpreter
 that gates your tool), and import-time failures surface to you directly, well before the gate.
@@ -299,7 +373,8 @@ lead (`message` to `lead`) if the brief is silent on reproducibility for a scien
 test unmarked; mark one that runs on real observation data or a real model for minutes
 `@pytest.mark.slow`; mark one that reaches the network or an external service
 `@pytest.mark.live` — it runs only when asked for, and the gate's run has no network, so a tool
-also needs unmarked or `slow` tests that pass offline.
+also needs unmarked or `slow` tests that pass offline. Every unmarked test also runs at the gate of each
+later change to the toolkit, so keep the unmarked ones fast and offline.
 
 **Keep each test fast, and its verdict stable.** The gate runs your tests **twice** and compares
 the **per-test outcomes** (pass / fail / error / skip): a test whose verdict *flips* between the

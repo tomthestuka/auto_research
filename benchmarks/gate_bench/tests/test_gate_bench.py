@@ -3,7 +3,8 @@
 No science stack, no LLM, no toolkit checkout: the builders are exercised against throwaway
 git repos, the gate integration injects a fake Layer-B runner, and the scorer runs over
 hand-built records. The real-base builders need the configured toolkit, so their test skips
-when it is absent (this suite must pass on a fresh clone).
+when it is absent (this suite must pass on a fresh clone); so do the output-class entries, whose
+test runs the gate whole, with its real Layer-B runner, in this interpreter.
 
 Run from the repository root, so that ``benchmarks`` is importable:
 ``conda run -n auto_research python -m pytest benchmarks/gate_bench/tests`.
@@ -24,6 +25,7 @@ from auto_research.sandbox.gate import collect_targets, run_gate
 from auto_research.schemas import CheckResult
 
 from benchmarks.gate_bench import basepkg, harness, score
+from benchmarks.gate_bench.mutants_outputs import EXPECTED_CHECKS
 from benchmarks.gate_bench.mutants import (
     DETERMINISTIC_LAYERS,
     FAM_CONTROL,
@@ -91,9 +93,19 @@ def test_byte_compiled_output_is_not_part_of_a_changeset(repo):
 
 @pytest.mark.parametrize("mutant", [m for m in corpus() if m.base == "synthetic"], ids=lambda m: m.id)
 def test_synthetic_builders_write_a_changeset(mutant, tmp_path):
-    repo = basepkg.make_synthetic_repo(tmp_path / mutant.id)
-    mutant.build(repo)
+    repo = _built(mutant, tmp_path / mutant.id)
     assert collect_targets(repo), f"{mutant.id} planted no changeset"
+
+
+def _built(entry, dest):
+    """``entry``'s changeset on the base the harness prepares for it. A base carrying the toolkit's
+    catalog writer needs the pinned toolkit, so that case skips off-host."""
+    if entry.catalog_writer:
+        repo = harness.prepare_worktree(entry, dest, _pinned_toolkit_config())
+    else:
+        repo = basepkg.make_synthetic_repo(dest)
+    entry.build(repo)
+    return repo
 
 
 def test_patch_refuses_a_missed_anchor(tmp_path):
@@ -553,12 +565,11 @@ def test_the_corpus_declares_who_wrote_each_entry():
     One of the swap's reviewers shares a family with the author of the blind half, so an entry
     that does not say who wrote it makes that correlation invisible.
     """
-    from benchmarks.gate_bench.mutants import AUTHOR_BLIND, AUTHOR_CODEX, AUTHOR_LEDGER
+    from benchmarks.gate_bench.mutants import AUTHOR_BLIND, AUTHOR_CODEX, AUTHOR_LEDGER, AUTHOR_RULES
 
     entries = corpus()
     authors = {m.author for m in entries}
-    assert authors <= {AUTHOR_BLIND, AUTHOR_LEDGER, AUTHOR_CODEX}
-    assert {AUTHOR_BLIND, AUTHOR_LEDGER, AUTHOR_CODEX} <= authors
+    assert authors == {AUTHOR_BLIND, AUTHOR_LEDGER, AUTHOR_CODEX, AUTHOR_RULES}
 
 
 def test_every_ledger_entry_cites_the_record_it_was_observed_in():
@@ -791,10 +802,8 @@ def _matched_synthetic_pairs():
 def _honest_suite_verdict(mutant_id, tmp_path):
     """Run the control's committed tests against the defect's package; True when they pass."""
     entries = by_id()
-    defect = basepkg.make_synthetic_repo(tmp_path / "defect")
-    entries[mutant_id].build(defect)
-    control = basepkg.make_synthetic_repo(tmp_path / "control")
-    entries["ctl_" + mutant_id].build(control)
+    defect = _built(entries[mutant_id], tmp_path / "defect")
+    control = _built(entries["ctl_" + mutant_id], tmp_path / "control")
 
     tests = defect / basepkg.PKG_NAME / "tests"
     if tests.exists():
@@ -833,6 +842,12 @@ _NOT_BEHAVIOURAL = {
     "hole_g6_manifest_import": "an import in the manifest, which the gate resolves rather than runs",
     "hole_g7_review_truncation": "an oversized file, which changes what the reviewer is shown",
     "hole_structural_unfalsifiable": "a scratch path, not a computed result",
+    "out_product_through_a_link": "the declared link reads the same table; only the recorder sees the link",
+    "out_log_beside_its_input": "a log beside the input, which only the gate's recorder judges",
+    "out_cache_beside_its_source": "a cache beside the module, which only the gate's recorder judges",
+    "out_log_undeclared_in_its_output": "an undeclared log in the output, which only the recorder judges",
+    "out_obsdb_catalog_by_hand": "the hand-written catalog reads the same through the catalog writer",
+    "out_obsdb_unrecorded_log": "an unrecorded log beside a recorded event list; only the recorder sees it",
 }
 
 
@@ -869,8 +884,7 @@ def test_a_pair_shows_the_reviewer_identical_root_listings(mutant_id, tmp_path):
     entries = by_id()
     listing = {}
     for name, entry_id in (("defect", mutant_id), ("control", "ctl_" + mutant_id)):
-        repo = basepkg.make_synthetic_repo(tmp_path / name)
-        entries[entry_id].build(repo)
+        repo = _built(entries[entry_id], tmp_path / name)
         listing[name] = sorted(
             str(p.relative_to(repo)) for p in repo.rglob("*") if ".git" not in p.parts
         )
@@ -888,8 +902,7 @@ def test_a_non_behavioural_defect_still_changes_the_changeset(mutant_id, tmp_pat
         pytest.skip(f"{mutant_id} is not in the corpus")
     texts = {}
     for name, entry_id in (("defect", mutant_id), ("control", "ctl_" + mutant_id)):
-        repo = basepkg.make_synthetic_repo(tmp_path / name)
-        entries[entry_id].build(repo)
+        repo = _built(entries[entry_id], tmp_path / name)
         texts[name] = {
             str(f.relative_to(repo)): f.read_text(encoding="utf-8", errors="replace")
             for f in sorted(repo.rglob("*"))
@@ -1053,3 +1066,75 @@ def test_the_nondeterminism_marker_is_named_in_fiction():
     assert '"gate_bench_seen_"' not in mutants_src
     assert '"demo_summary_cache_"' in mutants_src
     assert 'glob("demo_summary_cache_*")' in harness_src
+
+
+# ── the output classes: the real gate and its real return recorder ──────────
+#
+# These entries predict a catch by the gate's return recorder (`sandbox/returns.py`), which only the
+# gate's own default Layer-B runner loads, so here the gate runs whole: `harness.run_mutant` →
+# `run_gate` with its default runner (two pytest subprocesses with the recorder). Two things are
+# swapped, as in `tests/test_gate_returns.py`: the analysis interpreter is this one (the scaffolds are
+# pure standard library plus the toolkit's catalog writer, committed in the base), and the OS jail
+# is off.
+
+
+@pytest.fixture
+def analysis_env(monkeypatch):
+    """This interpreter as the analysis env, the jail off; the gate otherwise untouched."""
+    from auto_research.sandbox import gate
+
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"analyze_env": sys.prefix})
+    monkeypatch.setattr(gate, "_jailed_pytest",
+                        lambda argv, *, junit_path, worktree=None, masked=None, extra_ro=(): argv)
+    monkeypatch.setattr(gate, "_gate_test_timeout", lambda worktree, targets: 120)
+
+
+#: A phrase of the gate's own message that names each entry's breach: a check name alone fires for
+#: several reasons (`.placed` for four, `.obsdb` for four), so the reason is pinned beside it.
+_REASONS = {
+    "out_product_beside_its_input": "lies outside this call's products folder",
+    "out_product_through_a_link": "is reached through a link",
+    "out_product_under_another_key": "under 'table' without declaring it",
+    "out_log_beside_its_input": "band_pa_summary.log, which is in none of the three classes",
+    "out_cache_beside_its_source": ".last_summary.csv, which is in none of the three classes",
+    "out_log_undeclared_in_its_output": "band_pa_summary.log inside its output argument and declares it nowhere",
+    "out_obsdb_write_unrecorded": "_det1_evt2_v01.fits into the obs-db",
+    "out_obsdb_catalog_by_hand": "catalog.json itself",
+    "out_obsdb_unrecorded_log": "staging.log into the obs-db",
+}
+
+
+def _scored(entry, cfg):
+    record = asyncio.run(harness.run_mutant(entry, cfg))
+    assert "error" not in record, record["error"]
+    return score.score_record(record)
+
+
+@pytest.mark.parametrize("mutant_id", sorted(EXPECTED_CHECKS))
+def test_an_output_class_breach_is_caught_by_its_return_check(mutant_id, analysis_env):
+    """The defect fails the gate on its expected return check, and on return checks only (its own
+    suite, restricted to what it passes, stays green); its matched control passes the gate."""
+    entries = by_id()
+    cfg = (_pinned_toolkit_config() if entries[mutant_id].catalog_writer
+           else harness.RunConfig(toolkit_root=Path("/nonexistent")))  # a synthetic base reads no toolkit
+    defect = _scored(entries[mutant_id], cfg)
+    failed_a, failed_b = score.failed_checks(defect)
+    assert (defect["caught_by"], failed_a) == (["layer_b"], []), (defect["caught_by"], failed_a, failed_b)
+    assert set(failed_b) == set(EXPECTED_CHECKS[mutant_id]), failed_b
+    reasons = [c["detail"] for c in defect["gate"]["layer_b"]
+               if c["name"] == EXPECTED_CHECKS[mutant_id][0] and not c["passed"]]
+    assert any(_REASONS[mutant_id] in r for r in reasons), reasons
+    assert defect["expectation"] == "met"
+
+    control = _scored(entries["ctl_" + mutant_id], cfg)
+    assert control["gate"]["passed"], control["gate"]["reason"]
+    assert control["outcome"] == "clean_pass"
+
+
+def test_every_return_check_of_an_output_class_has_a_seeded_breach():
+    assert {check for checks in EXPECTED_CHECKS.values() for check in checks} >= {
+        "layer_b.returns.placed", "layer_b.returns.unclassified", "layer_b.returns.obsdb"}
+    from benchmarks.gate_bench.mutants import AUTHOR_RULES
+
+    assert {m.id for m in corpus() if m.author == AUTHOR_RULES and not m.pairs_with} == set(EXPECTED_CHECKS)
+    assert set(_REASONS) == set(EXPECTED_CHECKS)

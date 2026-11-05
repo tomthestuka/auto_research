@@ -75,8 +75,9 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   files `submit_terminal_report` (§9.6). That report flows to the reviewer (sole I/O) which
   adjudicates finalize vs. bounded rework; never fabricated. A cycle that files **no** form and
   wrote **no** report raises rather than composing one ([F6]).
-- **A worker's provider failure is contained (D1, CLAUDE.md §9.3.8).** A worker whose turn a
-  provider error ended (`agents.roles.ProviderTurnFailed`) filed nothing, so it contributes no
+- **A worker's failed model call is contained (D1, A4, CLAUDE.md §9.3.8).** A worker whose turn a
+  failed model call ended (`agents.roles.ModelCallFailed`: a provider error, or any exception
+  `ModelHandle.call` raised, A4) filed nothing, so it contributes no
   report to that worker pass: the report list stays aligned with `workers` by index, `None` for
   the failed worker; the lead's `run_cycle` receives only the filed reports with their matching
   `sources`, and a peer's revision sees only filed peers. Before each cycle that follows a pass
@@ -84,14 +85,20 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   and who filed (delivered at its loop's first boundary; navigation, never a receipt). Each round
   is a new turn, so a failed worker is asked again in the next revision or rerun. With every
   worker failed the lead still runs, on no reports, and files its own report. Only
-  `ProviderTurnFailed` is contained: `ReactBudgetExhausted`, our own exceptions and a lead's
-  `ProviderTurnFailed` propagate (the lead is the one unit that files the analysis result).
+  `ModelCallFailed` is contained: `ReactBudgetExhausted`, any other exception and a lead's
+  `ModelCallFailed` propagate (the lead is the one unit that files the analysis result; the
+  graph's `analysis` node returns that pass to the reviewer, A4b). Before a lead's
+  `ModelCallFailed` leaves `run`, the author credits its cycle spent are charged
+  (`exc.cycle_outcome.author_budget`, C3b; per analysis, never refilled, N11), and a debate that
+  can author (`toolkit_root` set) reloads the
+  registry and restarts every worker backend (`_reload_toolkit`, the same step a committed chain
+  takes), since the cycle's commit count goes with the failure (A4b ruling (b)).
 - The round cap is hard, and it is enforced in **two** places that agree: consensus passes
   `rounds_left` into the cycle, and the `request_another_round` handler refuses the form once that
   reaches zero, naming the cap and pointing at `submit_adjudication`. So a lead at the cap files a
   report rather than asking for a round it cannot have.
 - Live consensus verification is opt-in:
-  `AUTO_RESEARCH_LIVE_CONSENSUS_TESTS=1 pytest tests/test_live_consensus.py -s`.
+  `pytest tests/test_live_consensus.py --live -s`.
   It writes JSONL plus Markdown logs under `logs/dev/step-9/`.
 
 ## Dependencies
@@ -116,8 +123,9 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `workers`, `None` for a failed worker (`phase="rerun"` after authoring);
   `_revision_round(workers, task, reports, round)` (one debate round, filed peers in view);
   `_run_worker(worker, index, task, round, *, peer_reports=None, phase)` → the report, or `None`
-  when `ProviderTurnFailed` ended the turn, recorded as `analyst.worker.failed` (level 2; the
-  unit's own `analyst_worker.<action>.provider_error` is the level-1 line);
+  when `ModelCallFailed` ended the turn, recorded as `analyst.worker.failed` (level 2, with
+  `error_type`; the
+  unit's own `analyst_worker.<action>.model_call_failed` is the level-1 line);
   `_notify_lead(lead, workers, reports)` — the inbox notice (`analyst.lead.notice` in the ledger),
   via `lead.run_control` (or `ensure_run_control()`); module-level `_filed(workers, reports)` →
   `(sources, reports)` of the workers that filed, `_peers_for(reports, index)` skips `None`; `_resume_after_authoring(workers, task, outcome,
@@ -158,4 +166,13 @@ git history.
 - 2026-11-03 — The same `analyst.toolkit.load_error` (level 2) also names every reloaded tool whose
   arguments the input validator cannot check (`ToolkitRegistry.manifest_errors`): such a tool
   refuses every call, so the reload says so.
-
+- 2026-11-04 — A4: a worker's turn ended by any exception its model call raised (not only a
+  provider error) is contained as D1's is; the lead's notice says "a failed model call ended its
+  turn" and `analyst.worker.failed` names the exception type.
+- 2026-11-04 — A4 cleanup: the contained exception is `agents.roles.ModelCallFailed` (was
+  `ProviderTurnFailed`); the unit's event is `analyst_worker.<action>.model_call_failed`.
+- 2026-11-04 — A4b: `_reload_toolkit(workers)` split out of `_resume_after_authoring`; `run` calls it
+  before re-raising a lead's `ModelCallFailed` when authoring can run.
+- 2026-11-04 — C3b: a lead's `ModelCallFailed` charges the credits its cycle spent
+  (`cycle_outcome`) before it leaves `run`.
+- 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire.

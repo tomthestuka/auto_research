@@ -23,11 +23,55 @@ receipts the turn produced, each marked by whether it can back a number.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from auto_research.models import ModelMessage, ModelResponse, ToolResultMessage
+
+#: Opens what code restates after a cut (C4: the exchange with the human, the lead's chain). The
+#: summariser's input stops at it, so a summary never paraphrases what code restates anyway.
+RESTATED_MARK = "[Restated by the runtime as it holds them, after every cut:]"
+#: Closes that block, so stripping it leaves whatever follows it in a longer text.
+RESTATED_END = "[End of what the runtime restates.]"
+
+
+def restated(state: str) -> str:
+    """``state`` between the marks, as every cut and pin carries it."""
+    return f"{RESTATED_MARK}\n{state}\n{RESTATED_END}"
+
+
+#: How a human's text opens in a seat's conversation (``run_control.InboxEntry.render``).
+HUMAN_HEADS = ("[Reply from the human]", "[Human steer]", "[Message from human]")
+#: What a summariser reads in its place (ruling C4b): the words are the runtime's to restate.
+HUMAN_PLACEHOLDER = "[A text from the human; the runtime restates it word for word after the summary.]"
+#: A human's text inside an earlier turns' transcript (``history.transcript``), up to the next entry.
+_NESTED_HUMAN = re.compile(
+    r"(--- to you ---\n)(?:\[Reply from the human\]|\[Human steer\]|\[Message from human\])"
+    # Through the guidance paragraph every rendered human text ends with, so a line of the
+    # human's own that looks like a transcript head stays inside the match.
+    r"[\s\S]*?\n\n\((?:From the human:|Answer the sender with message\(to=\"human\"\))[^\n]*\)"
+)
+
+
+def for_summariser(text: str) -> str:
+    """``text`` as a summariser reads it (C4, C4b): each restated block taken out, each human text
+    replaced by :data:`HUMAN_PLACEHOLDER` — code restates both after the summary."""
+    text = without_restated(text)
+    if text.startswith(HUMAN_HEADS):
+        return HUMAN_PLACEHOLDER
+    return _NESTED_HUMAN.sub(lambda m: m.group(1) + HUMAN_PLACEHOLDER, text)
+
+
+def without_restated(text: str) -> str:
+    """``text`` with each restated block taken out: what a summariser reads (ruling C, C4)."""
+    out, rest = [], str(text)
+    while RESTATED_MARK in rest:
+        head, _, tail = rest.partition(RESTATED_MARK)
+        out.append(head)
+        rest = tail.partition(RESTATED_END)[2] if RESTATED_END in tail else ""
+    return "".join(out + [rest])
 
 #: Assistant turns kept word for word at the end of a compacted turn.
 KEEP_RECENT_TURNS = 4
@@ -178,7 +222,7 @@ def render_middle(messages: Sequence[Any], indices: Sequence[int]) -> str:
                 handle = part.receipt
                 label = f"result of {part.name}" + (" (error)" if part.is_error else "")
                 label += f" [{handle}]" if handle else ""
-                text = part.content or ""
+                text = for_summariser(part.content or "")
                 if len(text) > RENDER_RESULT_CHARS:
                     text = text[:RENDER_RESULT_CHARS] + f"\n… [{len(text):,} characters in all]"
                 out.append(f"[{label}]\n{text}")
@@ -191,7 +235,7 @@ def render_middle(messages: Sequence[Any], indices: Sequence[int]) -> str:
                     args = args[:RENDER_RESULT_CHARS] + "…"
                 out.append(f"[agent calls {call.name}]\n{args}")
         elif isinstance(message, ModelMessage):
-            out.append(f"[{message.role}]\n{message.content}")
+            out.append(f"[{message.role}]\n{for_summariser(str(message.content))}")
     return "\n\n".join(out)
 
 
@@ -201,11 +245,14 @@ def pin_text(
     *,
     task: str | None = None,
     earlier_turns: bool = False,
+    state: str | None = None,
 ) -> str:
     """What code tells the agent after a compaction, outside any summary: its task (restated when
     the provider's summary replaced it) and where the record is, each receipt marked by whether it
     can back a number (``provenance.store.is_evidence``). ``earlier_turns``: the summary is of the
-    session's earlier turns (a turn-boundary seed), not of this turn."""
+    session's earlier turns (a turn-boundary seed), not of this turn. ``state`` is what the role's
+    code restates after every cut (C4): its exchange with the human word for word, and the lead's
+    chain; the summariser never writes it."""
     span = "Your earlier turns were" if earlier_turns else "The earlier part of this turn was"
     lines = [f"{span} condensed into a summary. The record stands in the receipts:"]
     if task:
@@ -222,17 +269,43 @@ def pin_text(
             lines.append(f"  {handle} ({tool}; {role})")
     lines.append("Open a receipt with view_receipt before you rely on a value in it; cite values "
                  "from the evidence receipts they came from.")
+    if state:
+        lines.append(restated(state))
+    return "\n".join(lines)
+
+
+def human_exchange_text(exchange: Sequence[tuple[str, str]]) -> str:
+    """The seat's exchange with the human, word for word, oldest first (C4): ``("to", text)`` for
+    what the seat sent, ``("from", text)`` for what the human sent it. The human's texts are
+    direction (CLAUDE.md §2b): rulings to follow, never receipts."""
+    lines = [
+        "Your exchange with the human, word for word, oldest first. The human's texts are "
+        "direction for your work: follow each as the ruling it is, and back every value you report "
+        "with your receipts."
+    ]
+    for direction, text in exchange:
+        who = "you, to the human" if direction == "to" else "the human, to you"
+        body = str(text).strip().replace("\n", "\n    ")
+        lines.append(f"- {who}: {body}")
     return "\n".join(lines)
 
 
 __all__ = [
     "CompactionPlan",
     "KEEP_RECENT_TURNS",
+    "HUMAN_HEADS",
+    "HUMAN_PLACEHOLDER",
+    "RESTATED_END",
+    "for_summariser",
+    "RESTATED_MARK",
+    "restated",
+    "without_restated",
     "MEDIA_BYTES_FRACTION",
     "MEDIA_IMAGES_FRACTION",
     "apply_compaction",
     "has_server_compaction",
     "is_discovery_turn",
+    "human_exchange_text",
     "pin_text",
     "plan_compaction",
     "render_middle",

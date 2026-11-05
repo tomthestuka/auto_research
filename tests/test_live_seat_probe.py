@@ -1,6 +1,6 @@
 """Opt-in LIVE probe: can each demonstration seat actually hold its seat?
 
-    AUTO_RESEARCH_LIVE_SEAT_PROBE=1 pytest tests/test_live_seat_probe.py -s
+    pytest tests/test_live_seat_probe.py --live -s
 
 **Why this exists.** The demonstration seats three members no configuration names — a
 ``gpt-5.6-terra`` lead, a ``qwen3.8-max`` reviewer and a ``qwen3.7-plus`` worker — and each is one
@@ -33,7 +33,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -46,10 +45,7 @@ from tests.chain_stub import stub_chain_driver
 from tests.dev_logs import dev_log_path
 from tests.seats import from_seat, seated
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_SEAT_PROBE") != "1",
-    reason="set AUTO_RESEARCH_LIVE_SEAT_PROBE=1 to spend provider tokens on the seat probe",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

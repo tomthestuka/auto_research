@@ -151,3 +151,56 @@ def test_model_facing_text_names_no_vendor_or_model_family():
         low = text.lower()
         for token in banned:
             assert token not in low, f"{where} names a model family: {token!r}"
+
+
+#: The output rules before the three classes (B2, 2026-11-04): a file the tool printed or named was
+#: receipted, and figures were re-homed into a shared folder. No prompt teaches them any more.
+_REMOVED_OUTPUT_RULES = ("absolute** path in `stdout`", "absolute path in stdout", "absolute path in `stdout`",
+                         "figures directory", "figures dir", "re-home", "auto-generate a timestamped path",
+                         # synthetic data: a marked ObsID the tests build in their fixture obs-db (ruling)
+                         "stored under the mission path", "by its marked ObsID", "referenced by a marked `synth",
+                         "folder whose name marks it", "synth_flat_spectrum",
+                         "generated beforehand in worker scratch")
+
+
+@pytest.mark.parametrize("role", PROMPT_FILENAMES)
+def test_no_prompt_teaches_the_removed_output_rules(role: str) -> None:
+    content = " ".join(load_prompt(role).lower().split())  # type: ignore[arg-type]  # a rule may wrap
+    for rule in _REMOVED_OUTPUT_RULES:
+        assert rule.lower() not in content, f"{role}: still teaches {rule!r}"
+
+
+def test_the_coder_is_taught_the_three_output_classes() -> None:
+    """What the runtime mints and the gate checks (B1-B3) is what the coder reads (B4)."""
+    from auto_research.provenance.capture import _MAX_PRODUCTS, PRODUCT_KEYS
+    from auto_research.provenance.inputs import OUTPUT_SHAPE_KEY, OUTPUT_SHAPES
+
+    coder = " ".join(load_prompt("coder").split())  # a phrase may wrap across lines
+    for taught in ('`"output"`', f'`"{OUTPUT_SHAPE_KEY}"`', *(f'`"{shape}"`' for shape in OUTPUT_SHAPES),
+                   '`"default"`', '"products": [{', *(f'"{key}": "<' for key in PRODUCT_KEYS),
+                   f"at most {_MAX_PRODUCTS} products", "depends on a `parameter`-kind argument",
+                   "outside the mission team's defaults", "recommended settings only", "`synth<YYMMDD>-<hex>`",
+                   "obsdb_catalog.neutral.new",
+                   "neutral.advance(level=", "obsdb_catalog.healthcheck", 'tmp_path / "<MISSION>"',
+                   "in exactly one class", "tempfile.mkdtemp()", "(`unclassified`)",
+                   'tmp_path / "out"', "in-place header keyword", "**Scratch**",
+                   f'"kind": "output", "{OUTPUT_SHAPE_KEY}":'):
+        assert taught in coder, f"coder.md no longer teaches {taught!r}"
+
+
+@pytest.mark.parametrize("role", ["analyst_worker", "analyst_lead", "analyst_colead"])
+def test_the_roles_around_the_coder_read_the_same_classes(role: str) -> None:
+    content = " ".join(load_prompt(role).split())  # type: ignore[arg-type]
+    if role != "analyst_worker":  # the Q1 rule, as the lead briefs and the co-lead reviews it
+        assert "depends on a `parameter`-kind argument" in content and "recommended settings only" in content, role
+        # Synthetic validation data is a marked ObsID the tests build in their fixture obs-db (user
+        # ruling 2026-11-04), in the form the runtime flags: a result built on it is synthetic.
+        from auto_research.provenance.store import is_synthetic_path
+
+        assert "`synth<YYMMDD>-<hex>`" in content and "fixture obs-db" in content, role
+        example = "synth<YYMMDD>-<hex>".replace("<YYMMDD>", "261104").replace("<hex>", "ab12cd")
+        assert is_synthetic_path(Path("IXPE") / example / "event_l2" / "x.fits")
+    assert "own folder" in content or role == "analyst_colead", f"{role}: says nothing of the call's own folder"
+    assert "output argument" in content or "`output` argument" in content, role
+    if role != "analyst_worker":
+        assert "obsdb_catalog" in content and "products" in content, role

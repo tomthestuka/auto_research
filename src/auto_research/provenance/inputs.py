@@ -10,7 +10,13 @@ Every argument of a toolkit tool declares a **kind** in its manifest (``args_sch
   this way: a brief is informal, never a source), or omitted, so the manifest's declared ``default``
   applies (the runtime passes it and records it with the call);
 * ``path`` — a file or folder path, typed or a reference to a file the caller's own tool wrote;
-* ``setting`` — typed: text, flags, options, identifiers, operational numbers.
+* ``setting`` — typed: text, flags, options, identifiers, operational numbers;
+* ``output`` — where the tool writes what it produces: the runtime fills it, in the caller's own
+  per-call folder (``provenance.calls.resolve_call_args``). Its manifest entry names its ``shape``
+  (:data:`OUTPUT_SHAPES`): a ``folder``, a ``file`` (the model's value keeps only its file name) or a
+  ``prefix`` for file names (the same). A folder ignores the model's value. A file or prefix may
+  declare a ``default``, whose file name is the one used when the model gives none (so the manifest
+  sets the extension); a folder has no name to default.
 
 :func:`check_arguments` judges the arguments as the model wrote them, before the runtime completes
 the call. :func:`tool_values` then turns the completed arguments into the plain values the tool
@@ -40,14 +46,45 @@ from auto_research.provenance.refs import (
 )
 from auto_research.provenance.store import ReceiptStore
 
-#: The kinds an argument declares, in the order the toolkit README lists them.
-ARG_KINDS: tuple[str, ...] = ("data", "parameter", "path", "setting")
+#: The kinds an argument declares (the toolkit README's four, then ``output``, 2026-11-04).
+ARG_KINDS: tuple[str, ...] = ("data", "parameter", "path", "setting", "output")
+
+#: The manifest key an ``output`` argument names its shape under, and the shapes it may name.
+OUTPUT_SHAPE_KEY = "shape"
+OUTPUT_SHAPES: tuple[str, ...] = ("folder", "file", "prefix")
 
 
 def declared_kinds(schema: Mapping[str, Any] | None) -> dict[str, Any]:
     """``{argument: kind}`` as an ``args_schema`` declares them (``None`` where a property has none)."""
     properties = (schema or {}).get("properties") or {}
     return {name: (prop.get("kind") if isinstance(prop, Mapping) else None) for name, prop in properties.items()}
+
+
+def declared_outputs(schema: Mapping[str, Any] | None) -> dict[str, str]:
+    """``{argument: shape}`` for every ``output`` argument an ``args_schema`` declares with a shape
+    (:data:`OUTPUT_SHAPES`): the arguments the runtime places in the call's own folder."""
+    properties = (schema or {}).get("properties") or {}
+    return {name: prop[OUTPUT_SHAPE_KEY] for name, prop in properties.items()
+            if isinstance(prop, Mapping) and prop.get("kind") == "output"
+            and prop.get(OUTPUT_SHAPE_KEY) in OUTPUT_SHAPES}
+
+
+def output_name(value: Any) -> str:
+    """The file name an output keeps from ``value``: its last part, or ``""`` when it names none
+    (not text, blank, ``.`` or ``..``, which would leave the call's folder)."""
+    import os
+
+    base = os.path.basename(value.strip()) if isinstance(value, str) else ""
+    return "" if base in (".", "..") else base
+
+
+def declared_output_names(schema: Mapping[str, Any] | None) -> dict[str, str]:
+    """``{argument: file name}`` for every file or prefix output whose manifest ``default`` names
+    one: the name the runtime uses when the model gives none."""
+    properties = (schema or {}).get("properties") or {}
+    return {name: output_name(properties[name]["default"])
+            for name, shape in declared_outputs(schema).items()
+            if shape != "folder" and output_name(properties[name].get("default"))}
 
 
 def declared_defaults(schema: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -60,7 +97,7 @@ def declared_defaults(schema: Mapping[str, Any] | None) -> dict[str, Any]:
 
 def manifest_problems(tool: str, schema: Mapping[str, Any] | None) -> list[str]:
     """Why a tool's ``args_schema`` cannot be validated: a property with no kind or an unknown
-    one, or an optional parameter with no ``default``. Empty when it can."""
+    one, an optional parameter with no ``default``, or an output with no shape. Empty when it can."""
     problems: list[str] = []
     if schema is not None and not isinstance(schema, Mapping):
         return [f"{tool}: args_schema is a {type(schema).__name__}, not an object"]
@@ -76,6 +113,15 @@ def manifest_problems(tool: str, schema: Mapping[str, Any] | None) -> list[str]:
             problems.append(f"{tool}: argument {name} declares kind {kind!r}, not one of {', '.join(ARG_KINDS)}")
         elif kind == "parameter" and name not in required and "default" not in prop:
             problems.append(f"{tool}: optional parameter {name} declares no default")
+        elif kind == "output" and prop.get(OUTPUT_SHAPE_KEY) not in OUTPUT_SHAPES:
+            problems.append(f"{tool}: output argument {name} declares no {OUTPUT_SHAPE_KEY} "
+                            f"(one of {', '.join(OUTPUT_SHAPES)})")
+        elif kind == "output" and "default" in prop and prop[OUTPUT_SHAPE_KEY] == "folder":
+            problems.append(f"{tool}: output folder {name} declares a default; the runtime gives "
+                            "each call its own folder, so declare none")
+        elif kind == "output" and "default" in prop and not output_name(prop["default"]):
+            problems.append(f"{tool}: output argument {name} declares a default that names no file; "
+                            "give a file name such as 'fit.log' (its file name is what is used), or none")
     return problems
 
 
@@ -139,9 +185,13 @@ def check_arguments(
                 f'{{"{VALUE_KEY}": <the value>, "{REASON_KEY}": "<why this value>"}} for a value you '
                 "choose, or leave it out for the default its description names"
             )
+        elif kind == "output" and refs_in(value):
+            lines.append(f"argument {name} is an output the runtime places: write a file name alone, "
+                         "or leave it out")
         elif kind != "parameter" and typed_parameter(value) is not None:
             lines.append(
-                f'argument {name} is a {kind}, which takes no reason: write its value alone'
+                f'argument {name} is {"an" if kind == "output" else "a"} {kind}, which takes no '
+                'reason: write its value alone'
             )
     if not lines:
         return None
@@ -180,6 +230,7 @@ def tool_values(
 
 
 __all__ = [
-    "ARG_KINDS", "REASON_KEY", "VALUE_KEY", "RefError", "ToolValues", "check_arguments",
-    "declared_defaults", "declared_kinds", "manifest_problems", "tool_values", "typed_parameter",
+    "ARG_KINDS", "OUTPUT_SHAPES", "OUTPUT_SHAPE_KEY", "REASON_KEY", "VALUE_KEY", "RefError", "ToolValues",
+    "check_arguments", "declared_defaults", "declared_kinds", "declared_output_names", "declared_outputs",
+    "manifest_problems", "output_name", "tool_values", "typed_parameter",
 ]

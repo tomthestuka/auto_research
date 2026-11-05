@@ -1,6 +1,6 @@
 """Opt-in live cell for ruling D8: `/status` and `/stop` through the real Telegram path.
 
-    AUTO_RESEARCH_LIVE_STOP_TELEGRAM=1 pytest tests/test_live_stop_telegram.py -s
+    AUTO_RESEARCH_LIVE_STOP_TELEGRAM=1 pytest tests/test_live_stop_telegram.py --live -s
 
 A real `run_research` on the configured roles, with the reviewer and the status monitor seated on
 `anthropic:claude-sonnet-5` (the config-dir seam, `tests/seats.py`), a real Telegram connector
@@ -26,10 +26,10 @@ import psutil
 import pytest
 from dotenv import load_dotenv
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
     os.getenv("AUTO_RESEARCH_LIVE_STOP_TELEGRAM") != "1",
-    reason="set AUTO_RESEARCH_LIVE_STOP_TELEGRAM=1 to send /status and /stop through Telegram",
-)
+    reason="set AUTO_RESEARCH_LIVE_STOP_TELEGRAM=1 with --live to send /status and /stop through Telegram",
+)]
 
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev"
 

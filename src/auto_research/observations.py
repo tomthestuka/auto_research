@@ -22,6 +22,8 @@ special cases in code.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import yaml
@@ -38,6 +40,79 @@ def default_observations_config_path() -> Path:
     return observations_yaml()
 
 CATALOG_FILENAME = "catalog.json"
+
+#: Where each mission keeps an ObsID's folder under its mission folder, as HEASARC's archive lays
+#: it out (``ixpe/data/obs/01/01002901``), or flat. A mirror of ``research_toolkit``'s
+#: ``obsdb_catalog._domain.TREES``, the rule the tools write by; the two change together. A mission
+#: it does not list keeps ``<obsid>``.
+OBSID_TREES: dict[str, tuple[str, ...]] = {
+    "ixpe": ("data/obs/*/{obsid}", "{obsid}"),
+    "nicer": ("data/obs/*/{obsid}", "{obsid}"),
+    "nustar": ("data/obs/*/*/{obsid}", "{obsid}"),
+    "chandra": ("data/byobsid/*/{obsid}",),
+}
+
+
+def obsid_index(mission_dir: Path, mission: str) -> dict[str, list[Path]]:
+    """Every folder under ``mission_dir`` where ``mission``'s :data:`OBSID_TREES` rule keeps an
+    ObsID, keyed by its name (the ObsID): one walk of the tree serves every name a call holds."""
+    import glob
+
+    found: dict[str, set[str]] = {}
+    for pattern in OBSID_TREES.get(mission.lower(), ("{obsid}",)):
+        for d in glob.glob(str(Path(mission_dir) / pattern.format(obsid="*"))):
+            if os.path.isdir(d):
+                found.setdefault(os.path.basename(d), set()).add(d)
+    return {name: [Path(d) for d in sorted(dirs)] for name, dirs in found.items()}
+
+
+def obsid_folder(
+    mission_dir: Path, obsid: str, entry: dict | None = None, *, mission: str | None = None,
+    index: Callable[[], Mapping[str, list[Path]]] | None = None,
+) -> Path:
+    """The folder holding ``obsid`` under ``mission_dir``, found as the toolkit's
+    ``obsdb_catalog.locate`` finds it: the catalog ``entry``'s record first (the folder a recorded
+    product lies in, up to the path part that is the ObsID; the newest level-2 event before other
+    kinds; a path leaving the mission folder is passed over), then ``mission``'s
+    :data:`OBSID_TREES` rule (default: the folder's own name). ``<mission_dir>/<obsid>`` when
+    neither finds a folder; :class:`LookupError` when the tree rule finds the ObsID twice.
+    ``index``: returns :func:`obsid_index` of the folder, for a caller looking up many names."""
+    folder = Path(mission_dir)
+    products = (entry or {}).get("products") if isinstance(entry, dict) else None
+    recorded = [p for p in products if isinstance(p, dict)] if isinstance(products, list) else []
+    level2 = sorted((p for p in recorded if p.get("kind") == "level2_evt"),
+                    key=lambda p: str(p.get("created_at") or ""), reverse=True)
+    for product in level2 + [p for p in recorded if p.get("kind") != "level2_evt"]:
+        path = product.get("path")
+        parts = Path(path).parts if isinstance(path, str) else ()
+        if obsid in parts and ".." not in parts and not os.path.isabs(path):
+            found = folder.joinpath(*parts[: parts.index(obsid) + 1])
+            if found.is_dir():
+                return found
+    tree = index() if index is not None else obsid_index(folder, mission or folder.name)
+    found = tree.get(obsid, [])
+    if len(found) > 1:
+        raise LookupError(f"ObsID {obsid} is in more than one folder under {folder}: {found}")
+    return found[0] if found else folder / obsid
+
+
+def obsid_mission(folder: Path) -> str:
+    """The mission folder's name for an ObsID ``folder`` that :func:`obsid_folder` returned: the
+    path part above the mission's :data:`OBSID_TREES` pattern, else the nearest folder above it
+    holding a ``catalog.json``, else the folder's parent."""
+    import fnmatch
+
+    parts = Path(folder).parts
+    for mission, patterns in OBSID_TREES.items():
+        for pattern in patterns:
+            tail = pattern.format(obsid=parts[-1] if parts else "").split("/")
+            if (len(parts) > len(tail) and parts[-len(tail) - 1].lower() == mission
+                    and all(fnmatch.fnmatchcase(p, t) for p, t in zip(parts[-len(tail):], tail))):
+                return parts[-len(tail) - 1]
+    for parent in Path(folder).parents:  # a folder a catalog record names outside the tree
+        if (parent / CATALOG_FILENAME).is_file():
+            return parent.name
+    return Path(folder).parent.name
 
 
 class MissionObservationConfig(BaseModel):
@@ -160,11 +235,26 @@ def check_catalog_health(
     report is aggregated so one launch surfaces everything wrong, then raised — this check
     **never repairs**. On drift the human runs ``obsdb_catalog.repair(obs_db_path)`` out of
     band and reruns. An absent catalog with no local data is healthy (``healthcheck`` returns
-    ``True``). Registered in ``auto_research.preflight``.
+    ``True``), and so is a root with no mission yet, provided the root exists and is writable
+    (H2). Registered in ``auto_research.preflight``.
     """
     tk_root = Path(toolkit_root).expanduser() if toolkit_root is not None else _toolkit_root()
     healthcheck = _import_healthcheck(tk_root)
     cfg_all = load_observations_config(config_path)
+    # An empty root is a healthy one (H2): `acquire` creates each mission's folder and catalog on
+    # its first observation, so the root itself must exist and take writes.
+    root = cfg_all.obs_db_root
+    if not root.is_dir():
+        raise RuntimeError(
+            f"obs_db_root {root} (config/observations.yaml) is not a directory. Create it "
+            "(an empty folder is a healthy observation database), or point obs_db_root at the "
+            "folder that holds the missions."
+        )
+    if not os.access(root, os.W_OK | os.X_OK):
+        raise RuntimeError(
+            f"obs_db_root {root} is not writable by this user. Grant write access to it: acquire "
+            "creates each mission's folder and catalog there on its first observation."
+        )
     problems: dict[str, object] = {}
     for mission, cfg in cfg_all.missions.items():
         result = healthcheck(str(cfg.obs_db_path))

@@ -221,10 +221,10 @@ def test_block0_differs_from_a_batched_run_of_the_same_arm_only_in_bookkeeping()
 # ── Capability declarations ─────────────────────────────────────────────────
 
 
-def test_every_figure_bearing_seat_is_vision_declared():
+def test_every_figure_bearing_seat_takes_images_as_its_adapter_declares():
     """The reviewer, the lead and the worker are all sent figures; the co-lead and coder are not."""
     figure_seats = [*LEADS, *REVIEWERS, *(m for p in WORKER_PAIRS for m in p.members)]
-    assert all(seat.vision for seat in figure_seats)
+    assert all(seat.capability().images for seat in figure_seats)
 
 
 def test_the_text_only_zai_flagship_is_in_no_figure_seat():
@@ -235,21 +235,12 @@ def test_the_text_only_zai_flagship_is_in_no_figure_seat():
     assert "glm-5.3-flash" in figure_models
 
 
-def test_every_reviewer_may_be_sent_documents_and_the_vendor_decides_the_route():
-    """Two different questions, and conflating them would kill four slots.
-
-    ``Seat.documents`` answers *may this seat be sent documents at all* -- and
-    ``ModelHandle.call`` RAISES on a mismatch rather than degrading, which is correct for a
-    genuinely mis-declared member and fatal for a reviewer, since it opens papers inside its own
-    loop and forwards them into the verdict call. Whether the *bytes* can travel is a separate
-    question the adapter answers per vendor, from that vendor's own reference.
-    """
-    from auto_research.models.providers.dashscope import DASHSCOPE_VENDOR
-
-    assert all(seat.documents for seat in REVIEWERS), (
-        "a reviewer that may not be sent documents raises when it opens a paper"
-    )
-    assert DASHSCOPE_VENDOR.accepts_inline_documents is False
+def test_the_vendor_decides_how_a_reviewer_reads_a_paper():
+    """A reviewer opens papers inside its own loop; whether the vendor reads the PDF itself or the
+    model-input sanitiser sends the local parse is the capability entry and the dialect (Z1d/A2)."""
+    assert {seat.model: seat.capability().native_documents for seat in REVIEWERS} == {
+        "claude-fable-5": True, "qwen3.8-max": False,
+    }
 
 
 def test_each_worker_pair_is_provider_decorrelated():
@@ -266,13 +257,19 @@ def test_every_axis_vendor_has_pinned_parameters():
 
 
 def test_prices_are_read_or_declared_unread_never_invented():
-    """Every non-litellm model on an axis is either priced from its vendor's page or named as
-    unread. A guessed rate is indistinguishable from a read one once it is in a cost table."""
-    litellm_priced = {"anthropic", "openai", "deepseek"}
+    """Every model on an axis is priced, by litellm or from its vendor's page, or named as unread.
+    A guessed rate is indistinguishable from a read one once it is in a cost table. Read through
+    the run's own pricer (`observability.costs.token_rates_for`), litellm first."""
+    from auto_research.models.types import RoleModelConfig
+    from auto_research.observability.costs import token_rates_for
+
     for seat in (*LEADS, *REVIEWERS, CODER, COLEAD, *(m for p in WORKER_PAIRS for m in p.members)):
-        if seat.provider in litellm_priced:
-            continue
-        assert seat.price() or seat.model in arms.PRICES_UNREAD, seat.model
+        rates = token_rates_for(RoleModelConfig(
+            name=seat.slug, provider=seat.provider, model=seat.model, priceMTk=seat.price()))
+        priced = rates.input > 0 and rates.output > 0
+        assert priced or seat.model in arms.PRICES_UNREAD, seat.model
+        assert not (priced and seat.model in arms.PRICES_UNREAD), f"{seat.model} is priced now: drop it"
+
 
 
 # ── The pinned seats ────────────────────────────────────────────────────────
@@ -493,13 +490,11 @@ def test_every_seat_carries_its_pinned_effort():
     assert colead["parameters"]["reasoning"] == {"effort": arms.PINNED_EFFORT}
 
 
-def test_capability_flags_reach_the_written_member():
-    """A declaration that does not survive into the config is a declaration that does nothing."""
+def test_the_written_member_carries_no_capability_flag():
+    """A1: capability is the adapter's, and the registry refuses a retired `vision`/`documents`."""
     roles = environment.models_config(arm("opus", "qwen", "w1"), _SOURCE_MODELS)["roles"]
-    # Documents are permitted for every reviewer; a vendor with no usable file channel gets
-    # locally-parsed text plus figure crops instead (see the reviewer-seat test above).
-    assert roles["reviewer"]["members"][0]["documents"] is True
-    assert roles["reviewer"]["members"][0]["vision"] is True
+    member = roles["reviewer"]["members"][0]
+    assert "documents" not in member and "vision" not in member
 
 
 def test_the_observation_configuration_is_one_private_root():
@@ -905,6 +900,13 @@ def test_the_preflight_refuses_a_shell_already_pointed_elsewhere(monkeypatch, tm
     monkeypatch.setenv("AUTO_RESEARCH_CONFIG_DIR", str(tmp_path))
     problems = cli.preflight([BLOCK0], workspace=tmp_path / "ws")
     assert any("AUTO_RESEARCH_CONFIG_DIR is set" in p for p in problems)
+
+
+def test_the_preflight_refuses_an_inherited_runtime_dir(monkeypatch, tmp_path):
+    """D4: the variable outranks a trial's own `runtime_dir`, so every trial would share it."""
+    monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
+    problems = cli.preflight([BLOCK0], workspace=tmp_path / "ws")
+    assert any("AUTO_RESEARCH_RUNTIME_DIR is set" in p for p in problems)
 
 
 def test_the_preflight_refuses_a_workspace_an_actor_could_read(monkeypatch, tmp_path):

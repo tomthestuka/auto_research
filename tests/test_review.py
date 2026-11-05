@@ -164,8 +164,12 @@ def test_review_hook_rejects_injected_colead_sharing_author_provider(tmp_path):
     colead.model = SimpleNamespace(config=SimpleNamespace(provider="anthropic"))
     hook = make_review_hook(colead=colead, author_provider="anthropic")
 
-    with pytest.raises(ValueError, match="provider-decorrelated"):
+    # Raised as the configuration fault it is (C3c), naming the trust boundary.
+    from auto_research.sandbox.review import ReviewSetupError
+
+    with pytest.raises(ReviewSetupError, match="provider-decorrelated") as raised:
         asyncio.run(hook(repo, _spec(), GateReport(passed=True)))
+    assert isinstance(raised.value.__cause__, ValueError)
 
 
 def test_review_hook_allows_a_correlated_colead_only_when_measurement_asks(tmp_path):

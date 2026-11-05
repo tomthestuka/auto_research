@@ -19,7 +19,6 @@ def _models_config(**role_overrides):
                     "name": f"{role}_member",
                     "provider": "openai",
                     "model": f"{role}-model",
-                    "vision": role in {"reviewer", "analyst_lead", "analyst_worker"},
                     "parameters": {"temperature": 0},
                 }
             ],
@@ -54,14 +53,12 @@ def test_registry_resolves_role_to_group_handle(tmp_path):
                         "name": "opus",
                         "provider": "anthropic",
                         "model": "reviewer-configured-model",
-                        "vision": True,
                         "parameters": {"max_tokens": 1024},
                     },
                     {
                         "name": "gpt",
                         "provider": "openai",
                         "model": "reviewer-second-model",
-                        "vision": True,
                         "parameters": {"reasoning": {"effort": "high"}},
                     },
                 ]
@@ -127,7 +124,6 @@ def test_registry_rejects_empty_group(tmp_path):
 # fail a valid config instead of the invalid one it is meant to catch.
 _VALID_PROVIDERS = set(get_args(ProviderName))
 _VISION_ROLES = {"reviewer", "analyst_lead", "analyst_worker"}  # must see figures (§6/§7)
-_DOCUMENT_ROLES = {"reviewer", "librarian_io"}  # ingest PDFs (open_paper / literature)
 
 
 def test_project_config_satisfies_role_contract():
@@ -149,15 +145,13 @@ def test_project_config_satisfies_role_contract():
             assert handle.config.model
             assert handle.config.provider in _VALID_PROVIDERS
 
-    # Capability contracts (model-independent): vision for the figure-seeing roles, document
-    # input for the PDF-reading roles.
+    # The shipped seats of the figure-seeing roles take images, as each adapter declares (A1). A
+    # text-only seat is legal (A2: it receives notes); this pins the configured team.
+    from auto_research.models.providers import media_capability
+
     for role in _VISION_ROLES:
-        assert all(handle.config.vision for handle in registry.resolve(role).handles), (
+        assert all(media_capability(h.config).images for h in registry.resolve(role).handles), (
             f"every {role} member must be vision-capable (§6/§7)"
-        )
-    for role in _DOCUMENT_ROLES:
-        assert all(handle.config.documents for handle in registry.resolve(role).handles), (
-            f"every {role} member must accept document (PDF) inputs"
         )
 
 
@@ -180,7 +174,7 @@ def test_model_handle_normalizes_messages_and_delegates(tmp_path, monkeypatch):
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     handle = ModelHandle(
         role="reviewer",
-        config=RoleModelConfig(name="fake", provider="openai", model="fake-model", vision=True),
+        config=RoleModelConfig(name="fake", provider="openai", model="fake-model"),
         provider=FakeProvider(),
     )
 
@@ -191,28 +185,36 @@ def test_model_handle_normalizes_messages_and_delegates(tmp_path, monkeypatch):
     assert response.usage.output_tokens == 2
 
 
-def test_model_handle_rejects_images_for_non_vision_role(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
-    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
-    handle = ModelHandle(
-        role="librarian_searcher",
-        config=RoleModelConfig(name="fake", provider="openai", model="fake-model", vision=False),
-        provider=FakeProvider(),
-    )
+def test_a_retired_media_flag_is_refused_where_the_config_loads(tmp_path):
+    data = _models_config()
+    data["roles"]["reviewer"]["members"][0]["vision"] = True
+    with pytest.raises(ValueError, match="vision"):
+        load_registry(_write_models_yaml(tmp_path, data))
 
-    with pytest.raises(ValueError, match="not configured for vision"):
-        asyncio.run(
-            handle.call(
-                [ModelMessage(role="user", content="look")],
-                images=[
-                    {
-                        "path": "/tmp/figure.png",
-                        "caption": "Figure",
-                        "mime_type": "image/png",
-                        "produced_by": "test",
-                        "created_at": "2026-05-27T00:00:00Z",
-                        "sha256": "a" * 64,
-                    }
-                ],
-            )
-        )
+
+@pytest.mark.parametrize(("provider", "needs_parser"), [("dashscope", True), ("openai", False)])
+def test_the_document_parser_check_reads_the_adapters_parsed_route(
+    tmp_path, monkeypatch, provider, needs_parser,
+):
+    """A1: preflight's `document_parser_ready` reads the same capability as the handle: a member
+    whose adapter routes documents through the local parse needs docling, any other does not."""
+    import sys
+
+    from auto_research.models.providers._doc_parse import check_document_parser_ready
+
+    data = _models_config()
+    data["roles"]["librarian_io"]["members"][0]["provider"] = provider
+    for group in data["roles"].values():  # every member a model the capability table describes
+        for member in group["members"]:
+            member["model"] = "fake-model"
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    _write_models_yaml(config_dir, data)
+    monkeypatch.setenv("AUTO_RESEARCH_CONFIG_DIR", str(config_dir))
+    monkeypatch.setitem(sys.modules, "docling", None)  # docling absent: `import docling` raises
+
+    if needs_parser:
+        with pytest.raises(ValueError, match="docling"):
+            check_document_parser_ready()
+    else:
+        assert check_document_parser_ready() is None

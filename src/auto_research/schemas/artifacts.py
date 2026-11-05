@@ -46,7 +46,8 @@ class InputFile(MessageModel):
         default="content",
         description="'content' hashes the bytes; 'listing' hashes a directory's (name, size, mtime) listing; "
         "'obsdb' is an observation the tool located itself from its ObsID: `path` is "
-        "<mission folder>/<obsid>, hashed over its catalog entry plus its folder's listing.",
+        "the ObsID's folder under its mission folder (flat or HEASARC's tree), hashed over its "
+        "catalog entry plus its folder's listing.",
     )
     receipt: Handle | None = Field(
         default=None, description="The in-run receipt whose bytes these are, when one exists."
@@ -134,6 +135,7 @@ class Receipt(MessageModel):
         return FigureRef(
             path=self.path, caption=self.caption or "", mime_type=self.mime_type or "",
             produced_by=self.produced_by, created_at=self.created_at, sha256=self.sha256,
+            receipt=self.handle,
         )
 
 

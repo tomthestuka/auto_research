@@ -1,6 +1,6 @@
 """Opt-in live check of the Telegram rich-message path and its HTML fallback (E8, 2026-09-25).
 
-    AUTO_RESEARCH_LIVE_TELEGRAM=1 pytest tests/test_live_telegram_render.py -s
+    AUTO_RESEARCH_LIVE_TELEGRAM=1 pytest tests/test_live_telegram_render.py --live -s
 
 Sends one Markdown-rich question to the configured chat twice: once through ``sendRichMessage``
 (native headings, table, math, details) and once through the forced HTML fallback (aligned
@@ -29,10 +29,10 @@ from dotenv import load_dotenv
 
 from auto_research.schemas import HumanQuery
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
     os.getenv("AUTO_RESEARCH_LIVE_TELEGRAM") != "1",
-    reason="set AUTO_RESEARCH_LIVE_TELEGRAM=1 to send real Telegram messages",
-)
+    reason="set AUTO_RESEARCH_LIVE_TELEGRAM=1 with --live to send real Telegram messages",
+)]
 
 _MD = """\
 # Render check · rich message

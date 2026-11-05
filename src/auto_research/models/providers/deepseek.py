@@ -12,10 +12,11 @@ function tool with ``tool_choice="auto"``, and the terminal-compose shape of too
 ``tool_choice="none"``. The strict-schema reply carried exactly the declared keys, bare, with no
 fence, so the constraint is real rather than advisory.
 
-The Responses endpoint is text-only. Its API reference lists ``deepseek-v4-flash`` as the only
-accepted model and states that image/file inputs are replaced with placeholder text. The adapter
-therefore withholds images with a model-visible note; this provider is eligible for text-only chat
-roles and the coder harness, rather than figure-reviewing analyst/reviewer roles.
+Which DeepSeek model takes images is its entry in ``config/model_capabilities.yaml``: V4.1-Flash
+(``deepseek-flash``) does — "The Responses API accepts images with the `deepseek-flash` model",
+carried as ``input_image`` parts — and ``deepseek-v4-pro`` does not (its pricing table's Vision row
+reads "Not supported").
+File input is not supported on this dialect, so a document reaches every model as the local parse.
 """
 
 from auto_research.models.providers._media import MediaLimits
@@ -26,12 +27,23 @@ from auto_research.models.providers._responses import (
 )
 
 
-# DeepSeek's Responses reference explicitly says image and file inputs are unsupported and image
-# parts are replaced with placeholder text. Withhold them here so the model sees an honest note
-# instead of silently reasoning over pixels it never received.
+# DeepSeek's documented image limits (api-docs.deepseek.com/guides/vision, "Limits", read 2026-11-04;
+# the Responses guide: "The same shared image limits as Chat Completions apply"):
+# - "Supported formats | JPEG, PNG, GIF, WebP";
+# - "Max images per request | 600";
+# - "Max single image size (base64 / external URL) | 32 MiB" — held on the base64 size, the
+#   stricter reading;
+# - "Request body size | 48 MiB";
+# - "Max image dimension | 8192 px per side; drops to 4096 px per side when a request contains 15
+#   or more images" (the stricter edge applies from the first send, as for Anthropic).
 _LIMITS = MediaLimits(
     image_mimes=frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"}),
-    images_accepted=False,
+    max_images=600,
+    strict_block_threshold=14,
+    strict_max_edge=4096,
+    max_edge=8192,
+    max_image_encoded_bytes=32 * 1024 * 1024,
+    max_request_bytes=48 * 1024 * 1024,
 )
 
 DEEPSEEK_VENDOR = ResponsesVendor(
@@ -40,6 +52,10 @@ DEEPSEEK_VENDOR = ResponsesVendor(
     # The endpoint the vendor documents for this dialect; the same host the Codex harness uses.
     base_url="https://api.deepseek.com/",
     key_env="DEEPSEEK_API_KEY",
+    # "content supports strings and `input_text` / `output_text` / `input_image` content parts …
+    # File inputs are not supported" (guides/responses_api), so a document reaches it as the local
+    # parse: its text, and its figure crops for a model that takes images.
+    accepts_inline_documents=False,
     # "prompt_cache_key / prompt_cache_retention: Not supported". Prefix caching is automatic on
     # this API, so withholding the parameter costs the routing hint and nothing else. Also
     # unsupported and never sent by the shared layer: `context_management`, `service_tier`,
@@ -67,11 +83,11 @@ DEEPSEEK_VENDOR = ResponsesVendor(
     # The vendor documents `anyOf` and `$ref` as supported and says nothing about the
     # combination, so this is measured, not read.
     resolve_refs_in=frozenset({"anyOf"}),
-    # "tools: Partially supported", and the Responses compatibility table (api-docs.deepseek.com/
-    # guides/responses_api/, read 2026-09-11) lists "web_search / file_search / code_interpreter /
-    # computer_use / mcp / other built-in tools | Ignored" — every built-in type, not just some.
-    # `tools[].type` accepts `function` alone. The server-side tool-search tool is one of the
-    # ignored types, so deferred loading would leave the model unable to resolve a deferred
+    # The Responses compatibility table (api-docs.deepseek.com/guides/responses_api, re-read
+    # 2026-11-04): "`function` supported; `web_search` supported with `deepseek-v4-pro`; other types
+    # ignored", and "`file_search` / `code_interpreter` / `computer_use` / `mcp` / other built-in
+    # tools | Ignored". This project declares only function tools. The server-side tool-search
+    # tool is one of the ignored types, so deferred loading would leave the model unable to resolve a deferred
     # reference. Every tool is therefore declared resident.
     #
     # (An earlier version of this comment read "function / web_search supported", which said the

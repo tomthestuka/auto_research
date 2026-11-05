@@ -37,7 +37,8 @@ def _no_data_roots(monkeypatch):
 
 def _provider(tmp_path, store, tool_fn, schema=None):
     reg = _FakeRegistry(known={"research_toolkit.tk.fit"}, mcp=set(), schema=schema or {"properties": {
-        "out_path": {"kind": "path"}, "csv_path": {"kind": "path"}}})
+        "out_path": {"kind": "output", "shape": "file"}, "out_dir": {"kind": "output", "shape": "folder"},
+        "csv_path": {"kind": "path"}}})
     return SandboxToolProvider(
         reg, _FakeSandbox(tool_fn=tool_fn), cwd=tmp_path,
         receipts=store, receipt_source="analyst_worker_0",
@@ -58,39 +59,140 @@ def test_a_toolkit_call_is_receipted_and_the_model_sees_its_handle(tmp_path):
 
 def test_figure_hash_is_the_files_not_the_tools_and_a_missing_figure_is_dropped(tmp_path):
     store = ReceiptStore(tmp_path / "receipts")
-    png = tmp_path / "plot.png"
-    png.write_bytes(b"\x89PNG real bytes")
     now = datetime.now(timezone.utc).isoformat()
-    figs = [
-        {"path": str(png), "caption": "PD vs E", "mime_type": "image/png", "produced_by": "research_toolkit.tk.plot",
-         "created_at": now, "sha256": "a" * 64},
-        {"path": str(tmp_path / "never.png"), "caption": "ghost", "mime_type": "image/png",
-         "produced_by": "research_toolkit.tk.plot", "created_at": now, "sha256": "b" * 64},
-    ]
-    prov = _provider(tmp_path, store, lambda m, f, a: {"exit_code": 0, "stdout": "ok", "figures": figs})
+    outside = tmp_path / "elsewhere.png"
+    outside.write_bytes(b"\x89PNG elsewhere")
+
+    def plot(m, f, a):
+        png = Path(a["out_dir"]) / "plot.png"
+        png.write_bytes(b"\x89PNG real bytes")
+        return {"exit_code": 0, "stdout": "ok", "figures": [
+            {"path": str(png), "caption": "PD vs E", "mime_type": "image/png", "produced_by": "research_toolkit.tk.plot",
+             "created_at": now, "sha256": "a" * 64, "receipt": "analyst_worker_1:f9"},  # a false handle
+            {"path": str(Path(a["out_dir"]) / "never.png"), "caption": "ghost", "mime_type": "image/png",
+             "produced_by": "research_toolkit.tk.plot", "created_at": now, "sha256": "b" * 64},
+            # A figure is an opt-in artifact (ruling 2026-11-04): one outside the call's folder is not minted.
+            {"path": str(outside), "caption": "stray", "mime_type": "image/png",
+             "produced_by": "research_toolkit.tk.plot", "created_at": now, "sha256": "c" * 64},
+        ]}
+
+    prov = _provider(tmp_path, store, plot)
     out = asyncio.run(prov.execute("research_toolkit.tk.fit", {}))
     assert [f.caption for f in out.figures] == ["PD vs E"]
-    assert out.figures[0].sha256 == hashlib.sha256(png.read_bytes()).hexdigest()
+    assert out.figures[0].sha256 == hashlib.sha256(b"\x89PNG real bytes").hexdigest()
+    # The figure carries its receipt's handle, the runtime's, never the one the tool declared.
+    assert out.figures[0].receipt == "analyst_worker_0:f1" == store.receipts(kind="figure")[0].handle
     assert "does not match the file" in out.text and "ghost" in out.text
+    assert "figure 'stray' not receipted" in out.text and "lies outside this call's products folder" in out.text
     assert "[analyst_worker_0:f1] PD vs E" in out.text  # the runtime's header, a display form
 
 
-def test_a_written_file_is_a_data_receipt_and_links_the_next_call_as_its_child(tmp_path):
+def test_a_declared_product_is_a_data_receipt_and_links_the_next_call_as_its_child(tmp_path):
     store = ReceiptStore(tmp_path / "receipts")
-    out_csv = tmp_path / "slices.csv"
 
     def write(m, f, a):
         Path(a["out_path"]).write_text("t,pd\n0,3.4\n")
-        return {"exit_code": 0, "stdout": f"wrote {a['out_path']}"}
+        return {"exit_code": 0, "stdout": f"wrote {a['out_path']}",
+                "products": [{"path": a["out_path"], "caption": "PD per slice"}]}
 
     prov = _provider(tmp_path, store, write)
-    first = asyncio.run(prov.execute("research_toolkit.tk.fit", {"out_path": str(out_csv)}))
+    first = asyncio.run(prov.execute("research_toolkit.tk.fit", {"out_path": "slices.csv"}))
     assert "[analyst_worker_0:d1] slices.csv" in first.text
+    product = store.get("analyst_worker_0:d1")
+    assert (product.kind, product.caption, product.mime_type) == ("data", "PD per slice", "text/csv")
+    assert product.sha256 == hashlib.sha256(b"t,pd\n0,3.4\n").hexdigest()
 
     prov2 = _provider(tmp_path, store, lambda m, f, a: {"exit_code": 0, "stdout": "mean 3.4"})
-    asyncio.run(prov2.execute("research_toolkit.tk.fit", {"csv_path": str(out_csv)}))
+    asyncio.run(prov2.execute("research_toolkit.tk.fit", {"csv_path": str(product.path)}))
     child = store.get("analyst_worker_0:r2")
     assert child.parents == ["analyst_worker_0:d1"]
+
+
+# -- B2: only declared products are minted (user ruling 2026-11-04, opt-in output) ----------------
+
+
+def _declaring(tmp_path, entries, *, cwd=None):
+    """A tool that writes the files ``entries`` name into its output folder (or where an entry's
+    ``at`` says) and returns them as declared products; ``(outcome, store)``."""
+    store = ReceiptStore(tmp_path / "receipts")
+
+    def tool(m, f, a):
+        declared = []
+        for entry in entries:
+            where = Path(entry["at"]) if "at" in entry else Path(a["out_dir"]) / entry["name"]
+            if entry.get("write", True):
+                where.parent.mkdir(parents=True, exist_ok=True)
+                where.write_text(entry.get("body", "x\n"))
+            declared.append(entry.get("declare", {"path": str(where), "caption": entry["name"]}))
+        return {"exit_code": 0, "stdout": "done", "products": declared}
+
+    prov = _provider(tmp_path, store, tool)
+    return asyncio.run(prov.execute("research_toolkit.tk.fit", {})), store
+
+
+def test_only_a_declared_file_inside_the_calls_folder_is_minted_and_each_other_is_named(tmp_path):
+    outside = tmp_path / "elsewhere" / "table.csv"
+    outcome, store = _declaring(tmp_path, [
+        {"name": "kept.csv", "body": "a,b\n1,2\n"},
+        {"name": "outside.csv", "at": str(outside)},
+        {"name": "absent.csv", "write": False},
+        {"name": "bad", "declare": {"path": "x", "caption": "c", "sha256": "0" * 64}},
+    ])
+    minted = store.receipts(source="analyst_worker_0", kind="data")
+    assert [Path(r.path).name for r in minted] == ["kept.csv"]
+    assert "lies outside this call's products folder" in outcome.text and "outside.csv" in outcome.text
+    assert "absent.csv" in outcome.text and "is not a file when the call returns" in outcome.text
+    assert "product[3] dropped: give exactly path, caption" in outcome.text
+    assert minted[0].parents == [] and minted[0].call_id == store.get("analyst_worker_0:r1").call_id
+
+
+def test_a_written_file_the_tool_does_not_declare_is_its_scratch_never_minted(tmp_path):
+    """The heuristic is gone: a file named in the arguments, or printed as a path, is not minted."""
+    store = ReceiptStore(tmp_path / "receipts")
+    scratch = tmp_path / "params.par"
+
+    def tool(m, f, a):
+        scratch.write_text("p=1\n")
+        Path(a["out_path"]).write_text("t,pd\n")
+        return {"exit_code": 0, "stdout": f"wrote {scratch} and {a['out_path']}"}
+
+    prov = _provider(tmp_path, store, tool)
+    asyncio.run(prov.execute("research_toolkit.tk.fit", {"out_path": "s.csv"}))
+    assert store.receipts(kind="data") == []
+
+
+def test_a_product_reached_through_a_link_is_dropped_with_a_note(tmp_path):
+    real = tmp_path / "real.csv"
+    real.write_text("a\n")
+
+    def tool(m, f, a):
+        link = Path(a["out_dir"]) / "link.csv"
+        link.symlink_to(real)
+        return {"exit_code": 0, "stdout": "done", "products": [{"path": str(link), "caption": "c"}]}
+
+    store = ReceiptStore(tmp_path / "receipts")
+    out = asyncio.run(_provider(tmp_path, store, tool).execute("research_toolkit.tk.fit", {}))
+    assert store.receipts(kind="data") == [] and "is reached through a link" in out.text
+
+
+def test_products_past_the_cap_are_named_in_a_note(tmp_path):
+    from auto_research.provenance.capture import _MAX_PRODUCTS
+
+    outcome, store = _declaring(tmp_path, [{"name": f"p{i}.txt"} for i in range(_MAX_PRODUCTS + 3)])
+    assert len(store.receipts(kind="data")) == _MAX_PRODUCTS
+    assert "3 more products not receipted" in outcome.text
+
+
+def test_a_tool_with_no_output_argument_has_no_folder_for_products(tmp_path):
+    store = ReceiptStore(tmp_path / "receipts")
+
+    def tool(m, f, a):
+        (tmp_path / "t.csv").write_text("a\n")
+        return {"exit_code": 0, "stdout": "done", "products": [{"path": str(tmp_path / "t.csv"), "caption": "t"}]}
+
+    prov = _provider(tmp_path, store, tool, schema={"properties": {"x": {"kind": "setting"}}})
+    out = asyncio.run(prov.execute("research_toolkit.tk.fit", {}))
+    assert store.receipts(kind="data") == [] and "has no output argument" in out.text and "tool_request" in out.text
 
 
 def _workspace(tmp_path, lookup, source="analyst_worker_0"):
@@ -182,3 +284,73 @@ def test_the_leads_in_process_data_catalog_is_receipted_as_the_toolkit_tool(tmp_
     asyncio.run(prov.execute(DATA_CATALOG_TOOL, {}))
     (r,) = store.receipts()
     assert r.produced_by == "research_toolkit.catalog_utils.data_catalog" and is_evidence(r)
+
+
+def test_a_dotdot_after_a_planted_link_never_mints_the_file_it_reaches(tmp_path):
+    """Review of B2: `sub/../x` reads `..` after the link `sub` (as the kernel does), so the file
+    reached is the link target's sibling, not `<folder>/x`; it is refused, never minted."""
+    peer = tmp_path / "peer"
+    (peer / "inner").mkdir(parents=True)
+    (peer / "peer.csv").write_text("PEER,1.23\n")
+
+    def tool(m, f, a):
+        own = Path(a["out_dir"])
+        (own / "sub").symlink_to(peer / "inner")
+        (own / "peer.csv").write_text("decoy\n")
+        return {"exit_code": 0, "stdout": "done", "products": [
+            {"path": str(own / "sub" / ".." / "peer.csv"), "caption": "absolute"},
+            {"path": str((own / "sub" / ".." / "peer.csv").relative_to(tmp_path)), "caption": "relative"}]}
+
+    store = ReceiptStore(tmp_path / "receipts")
+    out = asyncio.run(_provider(tmp_path, store, tool).execute("research_toolkit.tk.fit", {}))
+    assert store.receipts(kind="data") == [] and out.text.count("is reached through a link") == 2
+
+
+def test_a_calls_folder_replaced_by_a_link_is_not_followed(tmp_path):
+    peer = tmp_path / "peer"
+    peer.mkdir()
+    (peer / "peer.csv").write_text("PEER,1.23\n")
+
+    def tool(m, f, a):
+        own = Path(a["out_dir"])
+        own.rmdir()
+        own.symlink_to(peer)
+        return {"exit_code": 0, "stdout": "done", "products": [{"path": str(own / "peer.csv"), "caption": "c"}]}
+
+    store = ReceiptStore(tmp_path / "receipts")
+    out = asyncio.run(_provider(tmp_path, store, tool).execute("research_toolkit.tk.fit", {}))
+    assert store.receipts(kind="data") == [] and "is reached through a link" in out.text
+
+
+def test_a_relative_product_resolves_in_the_workdir_and_a_figure_is_not_minted_twice(tmp_path):
+    from datetime import datetime, timezone
+
+    def tool(m, f, a):
+        own = Path(a["out_dir"])
+        (own / "t.csv").write_text("a\n1\n")
+        (own / "f.png").write_bytes(b"\x89PNG")
+        fig = {"path": str(own / "f.png"), "caption": "F", "mime_type": "image/png", "produced_by": "t",
+               "created_at": datetime.now(timezone.utc).isoformat(), "sha256": "0" * 64}
+        return {"exit_code": 0, "stdout": "done", "figures": [fig], "products": [
+            {"path": str((own / "t.csv").relative_to(tmp_path)), "caption": "table"},
+            {"path": str(own / "f.png"), "caption": "the figure again"}]}
+
+    store = ReceiptStore(tmp_path / "receipts")
+    out = asyncio.run(_provider(tmp_path, store, tool).execute("research_toolkit.tk.fit", {}))
+    [product] = store.receipts(kind="data")
+    assert Path(product.path).name == "t.csv" and len(store.receipts(kind="figure")) == 1
+    assert out.figures[0].receipt == store.receipts(kind="figure")[0].handle  # stamped, none declared
+    assert "is already receipted by this call" in out.text
+
+
+def test_a_tool_with_only_a_figure_argument_has_a_folder_for_its_products(tmp_path):
+    def tool(m, f, a):
+        table = Path(a["save_path"]).with_suffix(".csv")
+        table.write_text("a\n1\n")
+        return {"exit_code": 0, "stdout": "done", "products": [{"path": str(table), "caption": "table"}]}
+
+    store = ReceiptStore(tmp_path / "receipts")
+    prov = _provider(tmp_path, store, tool, schema={"properties": {"save_path": {"kind": "path"}}})
+    asyncio.run(prov.execute("research_toolkit.tk.fit", {"save_path": "pd"}))
+    [product] = store.receipts(kind="data")
+    assert Path(product.path).parent.parent.name == "fn" and Path(product.path).name == "pd.csv"

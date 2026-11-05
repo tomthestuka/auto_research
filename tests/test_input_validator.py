@@ -31,6 +31,7 @@ SCHEMA = {
         "grid": {"kind": "parameter", "type": "array", "items": {"type": "number"}},
         "infile": {"kind": "path", "type": "string"},
         "label": {"kind": "setting", "type": "string"},
+        "outdir": {"kind": "output", "shape": "folder", "type": "string"},  # where the reducer writes
     },
     "required": ["grid"],
 }
@@ -46,11 +47,12 @@ def _pinned(monkeypatch, tmp_path):
 
 def _tool(tmp_path):
     def run(module, fn, args):
-        if "grid" not in args:  # the reducer: writes a file and returns its numbers
-            out = tmp_path / "spec.pha"
+        if "grid" not in args:  # the reducer: writes a file, declares it, and returns its numbers
+            out = Path(args["outdir"]) / "spec.pha"
             out.write_text("PHA 1 2 3\n")
             payload = {"bins": [{"q": 0.0215103980}], "file": str(out)}
-            return {"exit_code": 0, "stdout": json.dumps(payload), **payload}
+            return {"exit_code": 0, "stdout": json.dumps(payload), **payload,
+                    "products": [{"path": str(out), "caption": "spectrum"}]}
         payload = {"received": args}
         return {"exit_code": 0, "stdout": json.dumps(payload, default=str), **payload}
     return run
@@ -95,6 +97,11 @@ def test_the_real_toolkit_declares_every_kind():
     ({"x": {"type": "number"}}, (), "argument x declares no kind"),
     ({"x": {"kind": "number"}}, (), "declares kind 'number'"),
     ({"x": {"kind": "parameter"}}, (), "optional parameter x declares no default"),
+    ({"x": {"kind": "output"}}, (), "output argument x declares no shape (one of folder, file, prefix)"),
+    ({"x": {"kind": "output", "shape": "dir"}}, (), "output argument x declares no shape"),
+    ({"x": {"kind": "output", "shape": "folder", "default": "out"}}, (), "output folder x declares a default"),
+    ({"x": {"kind": "output", "shape": "file", "default": ".."}}, (), "declares a default that names no file"),
+    ({"x": {"kind": "output", "shape": "prefix", "default": 3}}, (), "declares a default that names no file"),
 ])
 def test_launch_refuses_a_manifest_the_validator_cannot_check(tmp_path, prop, required, said, _fresh_demo_modules):
     root = _toolkit(tmp_path / "tk", prop, required)
@@ -103,6 +110,71 @@ def test_launch_refuses_a_manifest_the_validator_cannot_check(tmp_path, prop, re
     assert any(said in e for e in registry.manifest_errors), registry.manifest_errors
     with pytest.raises(RuntimeError, match="input validator cannot check"):
         check_toolkit_manifests(root)
+
+
+def test_the_provider_schema_says_the_runtime_places_each_output(tmp_path, _fresh_demo_modules):
+    """B1: an output argument reaches the model with no runtime key, never required, its
+    description naming where the runtime puts it."""
+    outputs = {"out_dir": {"kind": "output", "shape": "folder", "type": "string"},
+               "outfile": {"kind": "output", "shape": "file", "type": "string", "description": "Grouped PHA."},
+               "stem": {"kind": "output", "shape": "prefix", "type": "string", "default": "x"}}
+    root = _toolkit(tmp_path / "tk", {**outputs, "label": {"kind": "setting", "type": "string"}},
+                    ["outfile", "label"])
+    [definition] = ToolkitRegistry(root).tool_definitions()
+    schema = definition["input_schema"]
+    props = schema["properties"]
+    assert all({"kind", "shape", "default"}.isdisjoint(props[name]) for name in outputs)
+    assert schema["required"] == ["label"]
+    assert provider_schema({"properties": outputs, "required": ("outfile",)})["required"] == []
+    assert props["out_dir"]["description"] == "The runtime gives this call its own folder here; leave it out."
+    assert props["outfile"]["description"].startswith("Grouped PHA. A file name: the runtime places it in this call's own folder")
+    assert props["stem"]["description"].endswith('keeping the name alone (leave it out for "x").')
+    assert props["outfile"]["description"].endswith("(leave it out for the argument's name).")
+    assert all(props[name]["type"] == "string" for name in outputs)
+
+
+def test_a_declared_output_wins_over_the_legacy_figure_name(tmp_path):
+    """`save_path` declared as an output keeps the model's file name; one declared as a path keeps
+    the figure rule (FIGURE_PATH_ARGS: a `.png`). Both land in the call's own folder (B2)."""
+    store = ReceiptStore(tmp_path / "receipts")
+    for kind, expected in (
+        ({"kind": "output", "shape": "file"}, lambda r: tmp_path / "w" / "products" / "fn" / r.call_id / "pd.pdf"),
+        ({"kind": "path"}, lambda r: tmp_path / "w" / "products" / "fn" / r.call_id / "pd.png"),
+    ):
+        registry = _FakeRegistry(known={FIT}, mcp=set(), schema={"properties": {"save_path": kind}})
+        tools = SandboxToolProvider(registry, _FakeSandbox(), cwd=tmp_path / "w", receipts=store,
+                                    receipt_source="analyst_worker_0")
+        out = _run(tools, FIT, {"save_path": "/tmp/pd.pdf"})
+        assert not out.is_error, out.text
+        result = store.receipts(source="analyst_worker_0", kind="result")[-1]
+        assert tools.sandbox.tool_calls[-1][2]["save_path"] == str(expected(result))
+
+
+@pytest.mark.parametrize("plant", ["a file", "a link out", "a link loop"])
+def test_a_products_folder_that_cannot_be_made_is_an_error_result_and_makes_nothing_outside(tmp_path, plant):
+    """Review of B1: the unit's shell writes its working folder; what it leaves at `products` turns
+    the call into an error result the model reads, never a dead turn or a folder made elsewhere."""
+    work, outside = tmp_path / "w", tmp_path / "outside"
+    work.mkdir()
+    outside.mkdir()
+    if plant == "a file":
+        (work / "products").write_text("x")
+    elif plant == "a link out":
+        (work / "products").symlink_to(outside)
+    else:
+        (work / "products").symlink_to(work / "products")
+    registry = _FakeRegistry(known={FIT}, mcp=set(), schema={"properties": {"o": {"kind": "output", "shape": "folder"}}})
+    tools = SandboxToolProvider(registry, _FakeSandbox(), cwd=work)
+    out = _run(tools, FIT, {})
+    assert out.is_error and "products folder could not be made" in out.text, out.text
+    assert tools.sandbox.tool_calls == [] and list(outside.iterdir()) == []
+
+
+def test_an_output_with_no_working_folder_to_place_it_in_is_never_run(tmp_path):
+    registry = _FakeRegistry(known={FIT}, mcp=set(), schema={"properties": {"o": {"kind": "output", "shape": "folder"}}})
+    tools = SandboxToolProvider(registry, _FakeSandbox(), cwd=None)
+    out = _run(tools, FIT, {})
+    assert out.is_error and "folder the runtime places" in out.text and tools.sandbox.tool_calls == []
 
 
 def test_a_required_parameter_needs_no_default(tmp_path, _fresh_demo_modules):
@@ -119,7 +191,7 @@ def test_the_provider_schema_states_each_kind_and_carries_no_runtime_key(tmp_pat
     assert props["cl"]["properties"]["value"] == {"type": "number"}
     assert "leave it out for the default, 0.68" in props["cl"]["description"]
     assert "leave it out" not in props["grid"]["description"]
-    assert "type" not in props["infile"] and "a file a tool of yours wrote" in props["infile"]["description"]
+    assert "type" not in props["infile"] and "a file a tool of yours returned" in props["infile"]["description"]
     assert props["label"] == {"type": "string"}
     assert '"reason": "<why this value>"' in definition["description"]
     assert provider_schema(None) == {"type": "object", "properties": {}}
@@ -181,8 +253,9 @@ def test_each_kind_arrives_its_way_and_the_tool_receives_plain_values(tmp_path):
                             "infile": {"$ref": "analyst_worker_0:d1"}, "label": "soft"})
     assert not out.is_error, out.text
     received = tools.sandbox.tool_calls[-1][2]
+    assert received.pop("outdir").startswith(str(tmp_path / "analyst_worker_0" / "products" / "fn"))
     assert received == {"bins": [{"q": 0.0215103980}], "grid": [2.0, 4.0, 8.0], "cl": 0.68,
-                        "infile": str(tmp_path / "spec.pha"), "label": "soft"}
+                        "infile": str(store.get("analyst_worker_0:d1").path), "label": "soft"}
     fit = store.get("analyst_worker_0:r2")
     assert fit.parents == ["analyst_worker_0:r1", "analyst_worker_0:d1"]
     # The call's record keeps the reason, the references and the default the runtime passed.
@@ -228,11 +301,12 @@ def test_a_file_passes_as_its_path_only_while_it_matches_and_only_its_writers(tm
     assert out.is_error and "a file analyst_worker_0's tool wrote" in out.text and "reproduce" in out.text
     out = _run(tools, FIT, {"infile": {"$ref": "analyst_worker_0:d1#/x"}, "grid": {"value": [2.0], "reason": "r"}})
     assert out.is_error and "passes as its path" in out.text
-    (tmp_path / "spec.pha").write_text("PHA rewritten by a later call\n")
+    spec = store.get("analyst_worker_0:d1").path
+    Path(spec).write_text("PHA rewritten by a later call\n")
     out = _run(tools, FIT, {"infile": {"$ref": "analyst_worker_0:d1"}, "grid": {"value": [2.0], "reason": "r"}})
     assert out.is_error and "no longer matches its receipt" in out.text
     # A typed path runs (ruling 4: paths stay typeable).
-    out = _run(tools, FIT, {"infile": str(tmp_path / "spec.pha"), "grid": {"value": [2.0], "reason": "r"}})
+    out = _run(tools, FIT, {"infile": str(spec), "grid": {"value": [2.0], "reason": "r"}})
     assert not out.is_error, out.text
 
 
@@ -342,7 +416,7 @@ def test_a_file_referenced_twice_is_read_once_while_it_stays_as_it_was(tmp_path,
     def call():
         out = _run(tools, FIT, {"infile": {"$ref": "analyst_worker_0:d1"}, "grid": {"value": [2.0], "reason": "r"}})
         assert not out.is_error, out.text
-        return [p for p in reads if Path(p) == tmp_path / "spec.pha"]
+        return [p for p in reads if Path(p) == Path(store.get("analyst_worker_0:d1").path)]
 
     first = len(call())
     call(), call()

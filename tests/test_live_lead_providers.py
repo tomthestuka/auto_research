@@ -1,6 +1,6 @@
 """Opt-in LIVE probe: can every vendor hold the **analyst lead** seat, on the rewritten lead?
 
-    AUTO_RESEARCH_LIVE_FORM_SHAPES=1 pytest tests/test_live_lead_providers.py -s
+    pytest tests/test_live_lead_providers.py --live -s
 
 **What this is now.** It began as a single-call check that each vendor could fill `author_chain`'s
 nested argument. The 2026-09-12 refactor replaced the lead's five decision forms with **one loop
@@ -42,17 +42,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_FORM_SHAPES") != "1",
-    reason="set AUTO_RESEARCH_LIVE_FORM_SHAPES=1 to spend provider tokens on the form shapes",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

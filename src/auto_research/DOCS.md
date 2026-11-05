@@ -15,10 +15,10 @@ and the active Phase 2 build order in
 
 | Submodule | Step | Role |
 |---|---|---|
-| `config_paths.py` | — | Where the four config files are, resolved when asked for. `config_dir()` answers with the repository's own `config/` unless `AUTO_RESEARCH_CONFIG_DIR` names another, so a process can be run against a different configuration and every reader agrees. Before it, eleven modules each computed the location relative to their own source file. |
+| `config_paths.py` | — | Where the five config files are, resolved when asked for. `config_dir()` answers with the repository's own `config/` unless `AUTO_RESEARCH_CONFIG_DIR` names another, so a process can be run against a different configuration and every reader agrees. Before it, eleven modules each computed the location relative to their own source file. |
 | `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`, whose model-key requirements are **derived from `config/models.yaml`**: one group per provider a role is configured with, or the exact variable a member names with `key_env`); small `orchestration.yaml` accessors (`runtime_data_dir`, `papers_dir`, `sandbox_call_timeout_default`, `provider_retry_policy`). |
 | `setup.py` | — | The install-script Python stage (`python -m auto_research.setup`, run by `install.sh`): discovers defaults, prompts (interactive `questionary`) or reads `--answers` (headless), then writes the gitignored `config/orchestration.yaml` + `observations.yaml` from their `*.example` templates (deriving `agent_fs_allow` from the answered paths) and runs the preflight smoke test. |
-| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition, and carries a warning tier (`PreflightWarning`) for a precondition that is satisfiable but never proven live — the launch continues and the caution is recorded (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
+| `preflight.py` | — | Launch-time **checklist** (`Preflight` / async `run_preflight()`): runs every launch precondition (all no-LLM but the last, `member_media`, one tiny image and PDF per chat member, Z1e), and carries a warning tier (`PreflightWarning`) for a precondition that is satisfiable but never proven live — the launch continues and the caution is recorded (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
 | `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
@@ -45,8 +45,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - Each submodule documents its own interface in its `DOCS.md`. Cross-module
   contracts go through `auto_research.schemas`.
 - `auto_research.config_paths.config_dir()` / `orchestration_yaml()` / `models_yaml()` /
-  `observations_yaml()` / `code_gate_yaml()` — the configuration directory and the four files in
-  it, resolved **per call**. Unset, they are the repository's own `config/`, which is every
+  `observations_yaml()` / `code_gate_yaml()` / `model_capabilities_yaml()` — the configuration
+  directory and the five files in it, resolved **per call** (the capability table, Z1d, describes
+  models and is copied unchanged into any other config dir). Unset, they are the repository's own `config/`, which is every
   ordinary run. `AUTO_RESEARCH_CONFIG_DIR` overrides them, and being an environment variable is
   the point: the sandbox REPL, the author harness and the gate's test runner are subprocesses that
   inherit it, and two of the three are not Python, so nothing process-local could reach them.
@@ -72,6 +73,11 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `models.keys.check_api_key_fallbacks` (an optional `<PROVIDER>_API_KEY_FALLBACK` is usable —
   not blank, not identical to the primary, not set without one; runs right after
   `check_required_env`, which is what loads `.env`),
+  `models.capabilities.check_member_capabilities` (every configured member's model has an entry in
+  `config/model_capabilities.yaml`, Z1d),
+  `models.media_probe.check_member_media` (registered last: every distinct configured chat
+  member answers one tiny image and one tiny PDF through the real call; paid, its cost on the
+  ledger; Z1e),
   `storage.check_database_health` (the runtime SQLite DB exists with its full schema,
   created if absent — so a fresh run's first `text_search` can't hit `no such table: papers`),
   `sandbox.review.check_author_reviewer_decorrelation`,
@@ -99,7 +105,20 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `check_catalog_health()` is the launch-time preflight check: it runs `research_toolkit`'s
   detect-only `obsdb_catalog.healthcheck` (pure stdlib, never writes) over every configured
   mission and raises on any drift (malformed/missing/regressed/level-inconsistent/uncatalogued),
-  aggregating all missions; the human repairs via `obsdb_catalog.repair` out of band.
+  aggregating all missions; the human repairs via `obsdb_catalog.repair` out of band. The root
+  itself must be a directory this user can write; an empty one is healthy (H2: `acquire` creates
+  a mission's folder on its first observation).
+- `observations.obsid_folder(mission_dir, obsid, entry=None, *, mission=None, index=None) -> Path` —
+  where an ObsID's folder is under its mission folder, as the toolkit's `obsdb_catalog.locate`
+  finds it: the catalog entry's record first (a product path up to the ObsID part, the newest
+  level-2 event first; relative, no `..`, an existing folder), then `mission`'s `OBSID_TREES` rule
+  (default the folder's name; a unique match, two raise `LookupError`), else `<mission_dir>/<obsid>`.
+  `observations.obsid_index(mission_dir, mission) -> {obsid: [folders]}` walks the tree once;
+  `index` takes a callable returning it, so a call naming many strings walks it at most once. `OBSID_TREES` mirrors
+  `research_toolkit`'s `obsdb_catalog._domain.TREES` (HEASARC's tree per mission, or flat); the two
+  change together. `observations.obsid_mission(folder) -> str` names the mission folder of an
+  ObsID folder under either layout, or the nearest folder above it holding a `catalog.json` (the
+  HTML report's `observation <mission> <obsid>`).
 
 ## Dependencies
 - External: `pydantic`, `langgraph`, `langsmith`, provider SDKs (`anthropic`,
@@ -116,6 +135,8 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   Raises `run_control.UserInterruptionError` when a human stops the run (`/stop`, or SIGINT/SIGTERM
   when `install_signal_handlers`); only a process that owns its signals may pass that flag.
 - `run_control.RunControl` — run-wide control shared by the agents and the HITL command channel.
+  `authoring_session` is the live coding session; `unclosed_sessions` holds sessions whose close
+  raised, closed again by the run's teardown (C2c).
   Steer is cooperative (queued, delivered at the target's next ReAct turn); **stop is an
   interrupt**: `interrupt(reason, by)` flags the run and cancels the registered run task, so it
   needs no cooperation from the pipeline.
@@ -149,7 +170,12 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `check_required_env()` — loads `.env` without overriding existing process
   environment variables, then raises a clear error if any required key group is absent.
 - `runtime_data_dir() -> Path` — resolves `runtime_dir` from `orchestration.yaml`
-  (default `~/.auto_research`).
+  (default `~/.auto_research`); `AUTO_RESEARCH_RUNTIME_DIR` (`RUNTIME_DIR_ENV`), when set, names
+  it instead, per call, so children inherit it. The test suite sets it for every deterministic
+  test (`tests/conftest.py`, D4) so none writes the configured runtime dir; a live test keeps the
+  configured one. It moves `runtime_dir` only: an explicit `papers_dir` key stays where it is, and
+  `agent_fs_allow` (which names the configured `runs` root) does not follow it, so a process that
+  wants a private runtime outside the suite uses its own `AUTO_RESEARCH_CONFIG_DIR`.
 - `papers_dir() -> Path` — resolves `papers_dir` from `orchestration.yaml`
   (default `<runtime_dir>/papers`); re-exported through `auto_research.sources`.
 - `sandbox_call_timeout_default() -> int` — resolves `sandbox_call_timeout_s` from
@@ -223,3 +249,19 @@ detail in git history.
 - 2026-10-27 — Preflight gains `toolkit_manifests` (`sandbox.registry.check_toolkit_manifests`).
   `run_control.InboxEntry.render` names the sender, the receipts a text names, and the address that
   answers it (a human steer and reply included).
+- 2026-11-04 — A1: `document_parser_ready` reads each member's adapter-declared capability
+  (`models.providers.media_capability`, documents `"parsed"`), not a config flag.
+- 2026-11-04 — C2c: `RunControl.unclosed_sessions` (coding sessions whose close raised, closed
+  again by the run's teardown).
+- 2026-11-04 — D4: `env.runtime_data_dir` honours `AUTO_RESEARCH_RUNTIME_DIR` (`RUNTIME_DIR_ENV`),
+  which tests already set but nothing read; the suite's conftest sets it for every deterministic
+  test (live tests keep the configured dir). `sandbox.jail.check_os_jail_probe` takes its HOME from
+  `jail_home("probe")` (it read `runtime_dir` from config directly); `benchmarks/science_bench`'s
+  preflight refuses an inherited variable.
+- 2026-11-04 — Z1d: `config_paths.model_capabilities_yaml()`; preflight `member_capabilities`
+  (`models.capabilities.check_member_capabilities`).
+- 2026-11-04 — Z1e: preflight `member_media` (`models.media_probe.check_member_media`).
+- 2026-11-04 — H2: `check_catalog_health` names a root that is missing or unwritable and passes an empty one; `observations.OBSID_TREES` (mirror of the toolkit's `obsdb_catalog._domain.TREES`), `obsid_folder`, `obsid_mission`.
+- 2026-11-04 — Z1f: `setup.page_preflight` meters its preflight like a run (own run id, ledger under the runtime dir, cost meter, spend printed with the ledger path).
+- 2026-11-04 — H2 review: `obsid_folder` orders level-2 records newest first (toolkit 148b9bd), takes `mission=` and a lazy `index=` (`obsid_index`, one tree walk per call); `obsid_mission` walks up to the catalog for a folder recorded outside the tree; a parity test pins `OBSID_TREES == obsdb_catalog._domain.TREES` and `obsid_folder == locate`.
+- 2026-11-04 — Z1g: `setup.page_preflight` reports a setup ledger it cannot write (`[setup_ledger]`) with the checklist, counting the spend in memory.

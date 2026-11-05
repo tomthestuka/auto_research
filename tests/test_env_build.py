@@ -43,7 +43,7 @@ def _fake_conda(calls, *, pkgs_dirs=None, pip_installs=None):
         if "--" in argv:  # a jail prefix wraps the real command
             argv = argv[argv.index("--") + 1:]
         if "config" in argv:
-            shown = pkgs_dirs if pkgs_dirs is not None else [env["CONDA_PKGS_DIRS"]]
+            shown = pkgs_dirs if pkgs_dirs is not None else env["CONDA_PKGS_DIRS"].split(",")
             kw["stdout"].write(json.dumps({"pkgs_dirs": shown}).encode())  # the build's output file
             return subprocess.CompletedProcess(argv, 0)
         if "create" in argv:
@@ -376,19 +376,29 @@ def test_a_rebuild_drops_the_old_record_before_touching_the_prefix(tmp_path, mon
     _build(tmp_path, two, [])  # taints: the next jailed call rebuilds one
     inner = _fake_conda([])
 
+    record_while_building: list = []
+
     def killed(argv, env=None, **kw):
         if "create" in argv:
+            # What a hard kill here would leave: no record, so nothing reuses this prefix.
+            record_while_building.append(B.build_record(tmp_path / "conda", _prefix(tmp_path, one)))
             inner(argv, env=env, **kw)  # conda wrote its records, then the process died
             raise KeyboardInterrupt
         return inner(argv, env=env, **kw)
 
+    before = B.build_record(tmp_path / "conda", _prefix(tmp_path, one))
     with pytest.raises(KeyboardInterrupt):
         B.build(B.read_definition(one), conda_dir=tmp_path / "conda", conda_exe=conda_exe,
                 base_envs={}, externals={}, jailed=True, runner=killed)
-    assert B.build_record(tmp_path / "conda", _prefix(tmp_path, one)) is None
+    assert record_while_building == [None]
+    # D1c: the interrupted rebuild's half-written prefix is gone; the working build it replaced is
+    # back under its own record (never the half-written one under it).
+    assert B.build_record(tmp_path / "conda", _prefix(tmp_path, one)) == before
+    assert not list((tmp_path / "conda" / "envs").glob("ar-one.prev-*"))
     calls = []
-    _build(tmp_path, one, calls)  # never reused: rebuilt
-    assert any("create" in argv for argv, _ in calls)
+    B.build(B.read_definition(one), conda_dir=tmp_path / "conda", conda_exe=conda_exe,
+            base_envs={}, externals={}, jailed=True, runner=_fake_conda(calls))
+    assert any("create" in argv for argv, _ in calls)  # still tainted: a jailed caller rebuilds
 
 
 def test_a_yaml_alias_bomb_is_refused_before_it_expands(tmp_path):
@@ -729,7 +739,7 @@ def test_a_derived_environment_layers_on_a_human_base_read_only(tmp_path):
     assert env.externals == (heasoft,) and env.name == "ar-xspec"
 
 
-@pytest.mark.skipif(not os.environ.get("AR_LIVE_ENV_BUILD"), reason="live: set AR_LIVE_ENV_BUILD=1 (network, ~1 GB)")
+@pytest.mark.live  # network, ~1 GB
 def test_live_a_lock_exported_by_conda_rebuilds_exactly(tmp_path):
     """Real conda: solve a tiny env, export its explicit lock, rebuild from the lock, verify."""
     conda = os.environ["CONDA_EXE"]
@@ -787,8 +797,11 @@ def test_a_crash_while_clearing_an_older_build_keeps_the_current_one(tmp_path, m
     with pytest.raises(KeyboardInterrupt):
         _build(tmp_path, folder, [])
     envs = tmp_path / "conda" / "envs"
-    # the finished build was moved aside intact before anything was deleted
-    assert removed and len(list(envs.glob("ar-tiny.prev-*"))) == 2
+    # the finished build was moved aside intact before anything was deleted, and (D1c) put back
+    # under its record when the rebuild was killed; the older build was not deleted either
+    assert removed and len(list(envs.glob("ar-tiny.prev-*"))) == 1
+    assert (envs / "ar-tiny" / "conda-meta").is_dir()
+    assert B.build_record(tmp_path / "conda", envs / "ar-tiny") is not None
     assert all((p / "conda-meta").is_dir() for p in envs.glob("ar-tiny.prev-*"))
 
 
@@ -989,3 +1002,63 @@ def test_a_package_with_a_large_file_list_verifies(tmp_path):
     record.write_text(json.dumps(data))
     assert record.stat().st_size > 6 * 1024 * 1024
     B.verify(B.read_definition(folder), env.prefix)
+
+
+def test_a_fresh_build_reports_why_it_did_not_reuse_the_prefix(tmp_path, monkeypatch):
+    """D1b: `build` tells its caller when it builds rather than reuses, and why, so the launch
+    reconcile reports a real rebuild as one (the jail cases are where the reconcile's own reading
+    says "intact")."""
+    from auto_research.sandbox import jail
+
+    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
+    conda_exe = str(_conda_install(tmp_path / "opt" / "conda"))
+    one = _definition(tmp_path / "a", name="one")
+    reasons: list[str] = []
+
+    def build(folder, *, jailed):
+        return B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe=conda_exe,
+                       base_envs={}, externals={}, jailed=jailed, runner=_fake_conda([]),
+                       on_build=reasons.append)
+
+    build(one, jailed=False)
+    build(one, jailed=False)              # intact and as strong as asked: reused, nothing said
+    build(one, jailed=True)               # a jailed caller, a record built unjailed
+    assert reasons == ["missing", "unjailed"]
+    (one / "env.lock").write_text((one / "env.lock").read_text() + "\n")
+    build(one, jailed=True)
+    assert reasons[-1] == "stale"
+    two = _definition(tmp_path / "b", name="two")
+    build(two, jailed=True)
+    build(two, jailed=True)               # this conda dir saw an unjailed build: nothing reused
+    assert reasons[-2:] == ["missing", "tainted"]
+
+
+def test_a_failed_rebuild_over_a_working_build_puts_it_back(tmp_path, monkeypatch):
+    """D1c: a jailed caller rebuilds a prefix built unjailed; the rebuild fails, and the working
+    build and its record come back, so the environment stays in the catalogue."""
+    from auto_research.sandbox import jail
+
+    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
+    conda_exe = str(_conda_install(tmp_path / "opt" / "conda"))
+    one = _definition(tmp_path / "a", name="one")
+    conda_dir = tmp_path / "conda"
+    B.build(B.read_definition(one), conda_dir=conda_dir, conda_exe=conda_exe,
+            base_envs={}, externals={}, jailed=False, runner=_fake_conda([]))
+    prefix = conda_dir / "envs" / "ar-one"
+    record = B.build_record(conda_dir, prefix)
+    marker = prefix / "conda-meta" / "history"
+    working = marker.read_bytes()
+
+    fake = _fake_conda([])
+
+    def fails_on_create(argv, env=None, **kw):
+        if "create" in argv:
+            raise RuntimeError("conda create failed")
+        return fake(argv, env=env, **kw)
+
+    with pytest.raises(RuntimeError, match="conda create failed"):
+        B.build(B.read_definition(one), conda_dir=conda_dir, conda_exe=conda_exe,
+                base_envs={}, externals={}, jailed=True, runner=fails_on_create)
+    assert prefix.is_dir() and marker.read_bytes() == working
+    assert B.build_record(conda_dir, prefix) == record
+    assert not list((conda_dir / "envs").glob("ar-one.prev-*"))

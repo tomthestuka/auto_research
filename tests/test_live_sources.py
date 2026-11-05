@@ -1,12 +1,11 @@
 """Opt-in live source checks for step 5.
 
 Run with:
-    AUTO_RESEARCH_LIVE_SOURCE_TESTS=1 pytest tests/test_live_sources.py -s
+    pytest tests/test_live_sources.py --live -s
 """
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
@@ -17,10 +16,7 @@ from auto_research.storage import Storage, database_path
 from tests.dev_logs import dev_log_path, summarize_source_log
 
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_SOURCE_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_SOURCE_TESTS=1 to query external literature sources",
-)
+pytestmark = pytest.mark.live
 
 
 def test_live_sources_black_hole_binary():

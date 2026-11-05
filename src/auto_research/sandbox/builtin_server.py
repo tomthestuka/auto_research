@@ -68,11 +68,35 @@ def _bash_exec_description() -> str:
     )
 
 
+def private_param_dir():
+    """A fresh, empty HEASoft parameter folder for one call or command: ``(folder, PFILES value)``
+    with the system half of ``PFILES`` kept, or ``(None, None)`` when ``PFILES`` names no user half.
+
+    ``headas-init`` puts the user's ``$HOME/pfiles`` first and tasks write their learned values
+    back there, so a folder shared by calls lets one call's parameters reach the next (and HEASARC
+    warns that concurrent tasks sharing one corrupt it; G4, 2026-11-04). The one statement, also run
+    by the REPL's call loop and the gate's return recorder (``runner.builtin_function_source``).
+    Standard library only."""
+    import os, tempfile
+    value = os.environ.get("PFILES", "")
+    if ";" not in value:
+        return None, None
+    # Inside the process's own user half (private to it since F23), never a shared /tmp folder.
+    base = value.split(";", 1)[0].split(":")[0]
+    os.makedirs(base, exist_ok=True)
+    folder = tempfile.mkdtemp(prefix="call-", dir=base)
+    return folder, folder + ";" + value.split(";", 1)[1]
+
+
 @mcp.tool(description=_bash_exec_description())
 def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict:
     """Run a shell command for read-only inspection; returns stdout, stderr, and exit_code."""
+    import shutil
+
     proc: subprocess.Popen | None = None
+    params = pfiles = None
     try:
+        params, pfiles = private_param_dir()  # this command's own, empty parameter folder
         # start_new_session isolates the command (and any children it forks) into
         # its own process group, so a timeout can kill the whole group; stdin is
         # DEVNULL so a prompting tool gets EOF and cannot read this server's MCP
@@ -86,6 +110,7 @@ def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict
             text=True,
             cwd=cwd,
             start_new_session=True,
+            env={**os.environ, "PFILES": pfiles} if pfiles else None,
         )
         _RUNNING.add(proc)
         try:
@@ -108,6 +133,8 @@ def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict
     finally:
         if proc is not None:
             _RUNNING.discard(proc)
+        if params:
+            shutil.rmtree(params, ignore_errors=True)
 
 
 @mcp.tool()

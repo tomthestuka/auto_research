@@ -179,7 +179,9 @@ def _input_html(item: InputFile, produced: Mapping[str, int]) -> str:
         return (f'<span class="node">{escape(Path(item.path).name)} '
                 f'<span class="muted">[{escape(item.receipt)}, step {produced[item.receipt]}]</span></span>')
     if item.basis == "obsdb":
-        mission, obsid = Path(item.path).parent.name, Path(item.path).name
+        from auto_research.observations import obsid_mission
+
+        mission, obsid = obsid_mission(Path(item.path)), Path(item.path).name
         return (f'<details class="node"><summary>observation {escape(mission)} {escape(obsid)}</summary>'
                 f'<div>catalog entry + folder listing of <code>{escape(str(item.path))}</code><br>'
                 f'sha256 <code>{escape(item.sha256)}</code></div></details>')
@@ -312,7 +314,9 @@ def reproduce_code(
 
     Arguments passed by ``$ref`` (``provenance.refs``) stay references in the JSON; the lines add a
     resolver that reads each named result from the run's receipt store, so the rerun receives the
-    same values the call did.
+    same values the call did. Each argument the runtime placed in the call's own folder (an output,
+    a figure path: ``provenance.calls.resolve_call_args``) is pointed at a fresh folder instead,
+    keeping its file name, so a rerun leaves the run's receipted products as they are.
     """
     from auto_research.provenance.refs import refs_in, split_ref, typed_parameter
 
@@ -356,8 +360,8 @@ def reproduce_code(
         lines.append("# its REPL boot file runs first (recorded in the environment's lock)")
     if call.context.get("workdir"):
         lines.append(f"# the call ran in {one_line(call.context['workdir'])}; relative paths resolve there")
-    lines.append("# arguments naming output files point into the run's folders: change them to a scratch "
-                 "folder so the run's receipted files stay as they are")
+    lines.append("# other arguments naming output files point into the run's folders: change them to a "
+                 "scratch folder so the run's receipted files stay as they are")
     lines.append("# a fresh interpreter: a tool relying on an earlier call's session needs that call first")
     lines.append("import json, sys")
     if receipt.toolkit_commit and receipt.toolkit_root:
@@ -432,6 +436,16 @@ def reproduce_code(
         ]
     else:
         lines.append(f"args = json.loads({args_json!r})")
+    placed = {name: shape for name, shape in (call.context.get("output_args") or {}).items()}
+    placed.update({name: "file" for name in call.context.get("figure_args") or ()})
+    placed = {name: shape for name, shape in placed.items() if name in sent}
+    if placed:
+        lines += [
+            "import os, tempfile",
+            "_out = tempfile.mkdtemp(prefix='reproduce-')  # a fresh folder for what this call writes",
+            f"for _name, _shape in {placed!r}.items():",
+            "    args[_name] = _out if _shape == 'folder' else os.path.join(_out, os.path.basename(args[_name]))",
+        ]
     lines.append(f"out = {fn}(**args)")
     return "\n".join(lines), args_json
 

@@ -1,6 +1,6 @@
 """Opt-in LIVE probe: how many concurrent DeepSeek/Codex author sessions actually hold?
 
-    AUTO_RESEARCH_LIVE_CODER_CONCURRENCY=1 pytest tests/test_live_coder_concurrency.py -q -s
+    pytest tests/test_live_coder_concurrency.py --live -q -s
 
 **Why the coder is the seat this question is really about.** Every other seat in a trial is one
 HTTP call on a shared client, and a trial's pipeline is sequential — workers run serially, then the
@@ -46,10 +46,7 @@ from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_CODER_CONCURRENCY") != "1",
-    reason="set AUTO_RESEARCH_LIVE_CODER_CONCURRENCY=1 to spend tokens on concurrent authors",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

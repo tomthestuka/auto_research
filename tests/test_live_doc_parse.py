@@ -1,6 +1,6 @@
 """Opt-in check that Docling actually recovers a real scientific paper's figures.
 
-    AUTO_RESEARCH_LIVE_DOC_PARSE=1 pytest tests/test_live_doc_parse.py -s
+    pytest tests/test_live_doc_parse.py --live -s
 
 Costs no provider tokens — it is gated because it needs the Docling dependency, ~400 MB of cached
 weights, and about 90 seconds of CPU, none of which belong in the default suite.
@@ -21,7 +21,6 @@ printed for a human to compare against, which is what makes a silent regression 
 from __future__ import annotations
 
 import hashlib
-import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,10 +30,7 @@ import pytest
 from auto_research.models.providers import _doc_parse
 from auto_research.schemas import DocumentRef
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_DOC_PARSE") != "1",
-    reason="set AUTO_RESEARCH_LIVE_DOC_PARSE=1 to spend ~90s of CPU on a real Docling parse",
-)
+pytestmark = pytest.mark.live
 
 #: A real paper with vector figures. Any scientific PDF exercises the same property; this one is
 #: the science sweep's own target, so a regression here is a regression in the thing being measured.

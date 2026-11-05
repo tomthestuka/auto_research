@@ -1,6 +1,6 @@
 """Opt-in LIVE check of the analyst lead's **cycle** — one ReAct loop that ends by filing a form.
 
-    AUTO_RESEARCH_LIVE_LEAD_CYCLE=1 pytest tests/test_live_lead_cycle.py -s
+    pytest tests/test_live_lead_cycle.py --live -s
 
 **Why this exists.** Block 0's third launch died at $19.43 because the lead answered the authoring
 question with ``should_author=true`` and an empty ``tool_specs`` — schema-VALID output that a
@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -53,10 +52,7 @@ from dotenv import load_dotenv
 from tests.chain_stub import stub_chain_driver
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_LEAD_CYCLE") != "1",
-    reason="set AUTO_RESEARCH_LIVE_LEAD_CYCLE=1 to spend provider tokens on the lead's cycle",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

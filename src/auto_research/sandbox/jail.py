@@ -472,8 +472,7 @@ def check_os_jail_probe() -> None:
     if toolkit:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = toolkit + (":" + existing if existing else "")
-    home = Path(str(config.get("runtime_dir") or "/tmp")).expanduser() / "jail-home"
-    home.mkdir(parents=True, exist_ok=True)
+    home = jail_home("probe")  # under `runtime_data_dir()`, as every jailed process's (D4)
     env["HOME"] = str(home)
 
     policy = policy_from_config(network=True, label="probe")

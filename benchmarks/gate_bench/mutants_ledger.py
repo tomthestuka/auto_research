@@ -374,11 +374,14 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "csv_path": {
+                    "kind": "path",
                     "type": "string",
                     "description": "Path of the reduced product CSV to summarize.",
                 },
                 "min_total_counts": {
+                    "kind": "parameter",
                     "type": "number",
+                    "default": 0.0,
                     "description": "Exclude rows whose two bands sum below this count.",
                 },
             },
@@ -396,14 +399,18 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "csv_dir": {
+                    "kind": "path",
                     "type": "string",
                     "description": "Directory holding the run's reduced product CSVs.",
                 },
                 "min_total_counts": {
+                    "kind": "parameter",
                     "type": "number",
+                    "default": 0.0,
                     "description": "Exclude rows whose two bands sum below this count.",
                 },
                 "require_complete": {
+                    "kind": "setting",
                     "type": "boolean",
                     "description": (
                         "Summarize only products the producer certified complete. Leave true "
@@ -1144,10 +1151,12 @@ def _neighbour_schema_overwritten(pkg: Path) -> None:
     patch(
         pkg / "skills" / "__init__.py",
         '                "csv_path": {\n'
+        '                    "kind": "path",\n'
         '                    "type": "string",\n'
         '                    "description": "Path of the reduced product CSV to summarize.",\n'
         "                },",
         '                "csv_path": {\n'
+        '                    "kind": "path",\n'
         '                    "type": "string",\n'
         '                    "description": (\n'
         '                        "Directory holding the run\'s reduced product CSVs, summarized "\n'

@@ -1,6 +1,6 @@
 """Opt-in LIVE check that an injected turn never lands where the provider forbids it (A2/L1).
 
-    AUTO_RESEARCH_LIVE_INJECTION_RACE=1 pytest tests/test_live_injection_race.py -s
+    pytest tests/test_live_injection_race.py --live -s
 
 **Why this exists.** On 2026-09-10 a run died after 3h34m and $42.11 — four tools already
 committed — on a 400 naming a server-tool call with no result block. Anthropic documents the rule
@@ -43,17 +43,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_INJECTION_RACE") != "1",
-    reason="set AUTO_RESEARCH_LIVE_INJECTION_RACE=1 to spend provider tokens on the race",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

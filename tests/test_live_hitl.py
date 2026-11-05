@@ -1,6 +1,6 @@
 """Opt-in live HITL render/emit across every wired channel (CLAUDE.md §9.8 / §10 live stub).
 
-    AUTO_RESEARCH_LIVE_HITL=1 pytest tests/test_live_hitl.py -s
+    AUTO_RESEARCH_LIVE_HITL=1 pytest tests/test_live_hitl.py --live -s
 
 Emits ONE Markdown-rich ``HumanQuery`` through each wired channel so a human can eyeball how
 the per-channel renderers handle Markdown:
@@ -31,10 +31,10 @@ from dotenv import load_dotenv
 
 from auto_research.schemas import HumanQuery
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
     os.getenv("AUTO_RESEARCH_LIVE_HITL") != "1",
-    reason="set AUTO_RESEARCH_LIVE_HITL=1 to emit a real Markdown clarification to every channel",
-)
+    reason="set AUTO_RESEARCH_LIVE_HITL=1 with --live to emit a real Markdown clarification to every channel",
+)]
 
 
 # A deliberately broad Markdown sample so each renderer is exercised across as much syntax as

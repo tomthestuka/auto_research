@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from langgraph.graph import END, START, StateGraph
 
+from auto_research.agents.roles import ModelCallFailed
 from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLike, WorkerLike
 from auto_research.graph.state import ResearchState
 from auto_research.monitor import RunMonitor
@@ -61,8 +62,11 @@ class ReviewerLike(Protocol):
         budgets: Mapping[str, int] | None = None,
         human_attended: bool = False,
         render: Any | None = None,
+        failure: str | None = None,
     ) -> ReviewerReport:
-        """Run one reviewer turn and return the report it filed through ``turn_end``."""
+        """Run one reviewer turn and return the report it filed through ``turn_end``.
+
+        ``failure`` is passed only on a ``*_failed`` arrival (A4b): the runtime's notice."""
 
 
 def _build_task(
@@ -86,6 +90,12 @@ def _build_task(
         for mission, cfg in obs_config.missions.items():
             obs_lines.append(f"  {mission}: {cfg.obs_db_path}")
         instructions_parts.append("\n".join(obs_lines))
+    elif obs_config is not None:
+        # An empty root (H2): the analysts learn where data will go and how it gets there.
+        instructions_parts.append(
+            f"Local observation database: {obs_config.obs_db_root}, which holds no mission yet. "
+            "acquire creates a mission's folder, with its catalog, on its first observation."
+        )
     if tool_catalogue:
         instructions_parts.append(f"Available sandbox tools:\n{tool_catalogue}")
     instructions_parts.extend(extra_instructions)
@@ -188,6 +198,8 @@ def build_graph(
             budgets=budgets,
             human_attended=human_handler is not None,
             render=render,
+            # A pass that filed no report reaches the reviewer as the runtime's notice (A4b).
+            **({"failure": state.get("pass_failure")} if arrived.endswith("_failed") else {}),
         )
         await _record(
             monitor,
@@ -252,7 +264,15 @@ def build_graph(
             },
         )
         prior = _latest_verdict(state)
-        report = await io_agent.research(state["request"], follow_up=prior.follow_up if prior else None)
+        try:
+            report = await io_agent.research(
+                state["request"], follow_up=prior.follow_up if prior else None
+            )
+        except ModelCallFailed as exc:
+            return await _failed_pass(
+                monitor, exc, team="librarian",
+                counter="lit_iterations", passes=state.get("lit_iterations", 0),
+            )
         await _record(
             monitor,
             "librarian.literature.report",
@@ -270,6 +290,7 @@ def build_graph(
             "literature_receipts": _literature_cited(report, io_agent),
             "lit_iterations": state.get("lit_iterations", 0) + 1,
             "arrived": "librarian",
+            "pass_failure": None,
         }
 
     async def analysis_node(state: ResearchState) -> dict[str, Any]:
@@ -288,7 +309,15 @@ def build_graph(
                 "task": task,
             },
         )
-        report = await consensus_strategy.run(workers, lead, task)
+        try:
+            report = await consensus_strategy.run(workers, lead, task)
+        except ModelCallFailed as exc:
+            # A worker's failure is contained inside the debate (D1); what reaches here is the
+            # lead's, the one unit that files the analysis.
+            return await _failed_pass(
+                monitor, exc, team="analysts",
+                counter="analysis_iterations", passes=state.get("analysis_iterations", 0),
+            )
         await _record(
             monitor,
             "analyst.analysis.report",
@@ -300,6 +329,7 @@ def build_graph(
             "report": report,
             "analysis_iterations": state.get("analysis_iterations", 0) + 1,
             "arrived": "analysts",
+            "pass_failure": None,
         }
 
     async def finalize_run_node(state: ResearchState) -> dict[str, Any]:
@@ -314,12 +344,17 @@ def build_graph(
         report = state.get("report")
         verdict = _latest_verdict(state)
         if report is None:
+            passes = state.get("analysis_iterations", 0)
             await _record(
                 monitor,
                 "run.report_without_analysis",
                 level=2,
-                summary="The reviewer reported to the human before any analysis ran",
-                data={"verdict": verdict},
+                summary=(
+                    f"The reviewer reported to the human with no analysis report: {passes} "
+                    "analysis pass(es) ran and filed none (A4b)"
+                    if passes else "The reviewer reported to the human before any analysis ran"
+                ),
+                data={"verdict": verdict, "analysis_passes": passes},
             )
         elif getattr(report, "status", "failed") != "succeeded":
             # An absent status is not a success (F9): the harness never infers a terminal state.
@@ -583,6 +618,72 @@ def _literature_cited(report: Any, io_agent: Any) -> dict[str, Any]:
         if receipt is not None:
             out[handle] = receipt
     return out
+
+
+#: Characters of the exception's message the reviewer's notice carries.
+_FAILURE_MESSAGE_CHARS = 300
+
+
+async def _failed_pass(
+    monitor: RunMonitor | None, exc: ModelCallFailed, *, team: str, counter: str, passes: int,
+) -> dict[str, Any]:
+    """The state a pass whose unit's model call failed returns: no report (§2b), the pass counted
+    against the team's cap, and the runtime's notice for the reviewer (A4b, ruled option 1).
+
+    An account-wide provider error (401/403, every key spent) is re-raised and ends the run, as it
+    did before A4b (ruling (c); its own ruling is pending, CLAUDE.md §13).
+    """
+    if _account_wide(exc):
+        raise exc
+    cause = exc.cause
+    message = str(cause)[:_FAILURE_MESSAGE_CHARS]
+    kind, reading = _failure_kind(exc)
+    notice = (f"{exc.agent}'s model call raised {type(cause).__name__} ({message}), so its pass "
+              f"filed no report. {reading}")
+    await _record(
+        monitor, f"{'analyst' if team == 'analysts' else team}.failed", level=1,
+        summary=f"A {team} pass ended without a report: {exc.agent}'s model call failed",
+        actor=exc.agent,
+        data={"unit": exc.agent, "action": exc.action, "error_type": type(cause).__name__,
+              "error": repr(cause), "status_code": exc.status_code, "kind": kind,
+              "passes_used": passes + 1},
+    )
+    return {counter: passes + 1, "arrived": f"{team}_failed", "pass_failure": notice}
+
+
+def _failure_kind(exc: ModelCallFailed) -> tuple[str, str]:
+    """``(kind, what the reviewer reads)`` for a failed model call (A4c).
+
+    ``vendor``: the provider answered with an error status. ``network``: the provider could not be
+    reached. ``runtime``: no provider answered, so the exception came from the runtime's own code
+    and recurs on the same input — a defect for the human, not a reason to reassign.
+    """
+    from auto_research.models.retry import is_transient_provider_error
+
+    transient = is_transient_provider_error(exc.cause, exc.provider)
+    if exc.status_code is not None:
+        if transient:
+            return "vendor", (f"The vendor answered with HTTP {exc.status_code}: a vendor error "
+                              "(capacity or rate), which a later pass may clear.")
+        # A refusal of the request the runtime built ("prompt is too long", a medium) recurs on
+        # the same input, like a runtime defect (A4c review).
+        return "vendor", (f"The vendor refused this request with HTTP {exc.status_code}: the same "
+                          "request is likely to be refused again. Report it to the human as a "
+                          "defect of the system.")
+    if transient:
+        return "network", ("The vendor could not be reached after the retries: a network "
+                           "failure, which a later pass may clear.")
+    return "runtime", ("The exception was raised in the runtime's own code (it carries no vendor "
+                       "status), so the same pass is likely to fail the same way. Report it to "
+                       "the human as a defect of the system.")
+
+
+def _account_wide(exc: ModelCallFailed) -> bool:
+    """A failure of the account rather than of this pass: an auth refusal, or every key spent —
+    read in the vocabulary of the seat that failed (``exc.provider``), which may be the co-lead's
+    inside the lead's pass (``ModelCallFailed.account_wide``, shared with the lead's
+    ``submit_for_review``, C3b)."""
+    return exc.account_wide
 
 
 def _latest_verdict(state: ResearchState) -> ReviewerReport | None:

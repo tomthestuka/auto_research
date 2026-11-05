@@ -34,6 +34,22 @@ START ─► review ─assign_to─┬─ librarian ─► literature ─► rev
   the first).
 - **`analysis`** runs `DebateToConverge` on an `AnalysisTask` carrying the reviewer's `follow_up`,
   and returns to review — an honest `failed`/`needs_human` outcome included (§9.6, no bypass).
+- **A pass whose unit's model call failed returns to review with no report** (A4b, ruled option
+  1). `literature`/`analysis` catch the librarian's or the lead's `ModelCallFailed` (a worker's
+  stays inside the debate, D1) through `_failed_pass`: `librarian.failed` / `analyst.failed`
+  (level 1: unit, action, `error_type`, `error`, `status_code`, `passes_used`), the team's counter
+  +1 (the pass counts against its cap, so failures can spend it and leave the reviewer the
+  librarian or the human), `arrived` = `librarian_failed` / `analysts_failed`, and `pass_failure`
+  = the runtime's notice ("<unit>'s model call raised <Type> (<message, 300 chars>), so its pass
+  filed no report." plus its kind, A4c: `_failure_kind` reads `vendor` (an HTTP status: a
+  transient one — capacity or rate — a later pass may clear; any other is a refusal of the request
+  the runtime built, likely to recur — report it to the human), `network` (unreachable after the
+  retries: a later pass may clear it) or `runtime` (no vendor status: our own code, likely to
+  recur — report it to the human); the kind is also in the event's `kind`), which `review` hands the reviewer as `failure=` only on that arrival.
+  `literature` and `report` stay as they were: nothing is composed (§2b). An account-wide error
+  (`_account_wide`, which reads `ModelCallFailed.account_wide`, shared with the lead's
+  `submit_for_review` (C3b): status 401/403, or `models.retry.is_exhausted_key_error` in the failing seat's
+  vendor vocabulary, `ModelCallFailed.provider` — the co-lead's inside the lead's pass) is re-raised and ends the run through `run.error` (pending ruling, CLAUDE.md §13).
 - **`finalize_run`** records the outcome (`run.honest_failure` for a failed analysis,
   `run.report_without_analysis` when none ran) and forwards the report; **`compose_report`** runs
   no model: `report.publish_report` mints `rev:dN` receipts for the files and writes the JSONL
@@ -59,7 +75,8 @@ when sandbox + registry are attached, continues its session from the run ledger
 truncated cross-worker summary into `task.instructions` for the next round.
 
 `ResearchState` carries: the request, the literature reports and their receipts, the latest analyst
-report, the reviewer's reports (`verdicts`, the latest in `verdict`), `arrived`, the human's nudges
+report, the reviewer's reports (`verdicts`, the latest in `verdict`), `arrived`, `pass_failure` (the
+notice of a pass that filed no report, A4b), the human's nudges
 (`human_nudges`) and file handles (`human_thread`), `human_rounds`, two pass counters, the cap, and
 the published artifact paths and handles (`report_artifacts`).
 
@@ -85,8 +102,8 @@ the published artifact paths and handles (`report_artifacts`).
   `human_handler` → `human_channel` → auto-detect TTY/library), builds the `RunMonitor`, then
   `await run_preflight(human_handler=…, monitor=…)` (the launch-time checklist: `.env` +
   required keys, the author↔reviewer decorrelation, and — when a channel is resolved — a
-  **channel ping** that must reply), so a misconfigured/unreachable-human run crashes before
-  any LLM is constructed. The monitor is built **before** the preflight (it was after) so each
+  **channel ping** that must reply, and last the one paid check, `member_media`, Z1e), so a
+  misconfigured/unreachable-human run crashes before any role's model call. The monitor is built **before** the preflight (it was after) so each
   check lands in the run ledger as `preflight.<name>` — otherwise the launch state existed only
   as terminal scrollback that a detached or notebook run never sees, and a preflight failure
   produced no run artifact at all ([J1]a).
@@ -117,12 +134,35 @@ the published artifact paths and handles (`report_artifacts`).
   reset before the sandboxes are killed). Once the run ends — by an error, a stop or a finish — the
   run task is unregistered, so a late `/stop` cannot cancel the teardown, and the `finally` does
   not repeat a cleanup that ran. The run's normal `finally` cancels
-  resumed seats too, on a finish or a crash (D5). A
+  resumed seats too, on a finish or a crash (D5), then shuts the sandboxes down, then closes every
+  coding session still open (`run_control.authoring_session` and `run_control.unclosed_sessions`,
+  sessions whose close raised; each bounded, a failure recorded as `run.teardown.session_error`),
+  then the MCP client (C2c). The stop's cleanup closes the unclosed sessions in its toolkit step,
+  after the live one, each its own reported step ("unclosed coding session i closed"); a reset
+  whose patch could not be saved is ✓ "reset; saving its patch failed". A live session whose
+  coder disconnect raised after its reset is two lines: the reset (✓, with its patch) and
+  "coder disconnected ✗" with the error (C2d). The reset line is read from the ledger only when
+  the close ran through (it returned, or it raised that recorded disconnect error itself); a close
+  that timed out or was cancelled keeps the step's own failure. `run.resume.heal` carries the heal's `note`. A
   `run_control.fatal` (a resumed seat's `ReactBudgetExhausted`, ruling D6) cancels the run task;
   `run_research` then runs `_interrupt_cleanup(..., fatal=)` in the run task itself (kill, the
   authoring-branch repair, close; recorded as `run.error`, not `run.interrupted`) and raises it.
   Once `graph.ainvoke` returns, the run task is unregistered (nothing may cancel the teardown) and
   `fatal` is checked once more. A human stop that came first wins over a later failure.
+  A setup step after the preflight that fails (or a stop landing mid-setup) closes what the
+  setup opened, leaf to root, on one `contextlib.AsyncExitStack` (D1d): first the run task is
+  unregistered and the signal handlers restored (a stop during the closes then cuts none short
+  and keeps the setup's error), then the checkpointer, each sandbox (a half-started one too),
+  the MCP client (a half-started one too), then the connector; once the graph is built the
+  stack lets go and the teardown above owns them. A setup failure after `run.start` records
+  `run.error` and `run.summary` before the closes, as a failure inside the graph does; a stop
+  landing mid-setup takes a stop's path (`_interrupt_cleanup` in the run task, the checkpointer
+  closed first; a tools server not yet made is a skipped step; the signal handlers restored after
+  it, as for a stop during the graph; `UserInterruptionError`), D1e. A `run.error` that cannot be
+  written leaves the setup's error standing and the closes still run.
+  Every close in the setup teardown and the run's `finally` (sandboxes, MCP client,
+  checkpointer; the connector already was) goes through `_closed`: a close that raises is
+  recorded as `run.teardown.<what>_error` and never replaces the run's own outcome.
   Missing dependencies are constructed from `config/models.yaml`. Reads
   `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
   `config/orchestration.yaml`.  Creates per-run workspace
@@ -179,10 +219,10 @@ the published artifact paths and handles (`report_artifacts`).
   sent. `max_iterations` caps librarian and analysis passes per run; a human reply changes no
   budget (the human nudges, the reviewer assigns).
 - Live graph verification is opt-in:
-  `AUTO_RESEARCH_LIVE_GRAPH_TESTS=1 pytest tests/test_live_graph.py -s`. Writes
+  `pytest tests/test_live_graph.py --live -s`. Writes
   JSONL plus Markdown logs under `logs/dev/step-10/`.
 - Live sandbox verification is opt-in:
-  `AUTO_RESEARCH_LIVE_SANDBOX_TESTS=1 pytest tests/test_live_sandbox.py -s`.
+  `pytest tests/test_live_sandbox.py --live -s`.
   Writes logs under `logs/dev/step-11/`.
 - LangGraph Studio: run `langgraph dev` from the repo root (requires
   `langgraph-cli[inmem]`). Server binds to `localhost:2024` on the remote
@@ -318,4 +358,40 @@ and 2026-10-19 (every entry); detail in git history.
   store keeps only this pass's cited documents; a checkpoint written before the change keeps every
   document it merged. A paper the reviewer opens itself by path stays its own reading (it reuses
   the paper's handle by hash).
-
+- 2026-11-04 — C2c: the run's normal teardown and the stop's cleanup close the coding sessions
+  whose close raised (`run_control.unclosed_sessions`), leaf to root (D8).
+- 2026-11-04 — C2d: the stop checklist reports a session's reset and its coder disconnect as
+  separate facts; `run.resume.heal` records the heal's note.
+- 2026-11-04 — A4b: a failed lead/librarian pass returns to the reviewer with no report
+  (`_failed_pass`, `_account_wide`; `ResearchState.pass_failure`; `arrived` gains
+  `librarian_failed` / `analysts_failed`). Tests: `tests/test_failed_pass.py`.
+- 2026-11-04 — A4c: the failed-pass notice names its kind (`_failure_kind`: vendor, network,
+  runtime), so the reviewer reports a recurring runtime defect to the human rather than reassigning.
+- 2026-11-04 — C3b: `_account_wide` reads `ModelCallFailed.account_wide`.
+- 2026-11-04 — D1: `_reconcile_environments` records `env.build.start` per build (from the
+  reconcile's thread, `run_coroutine_threadsafe`) and `env.build.progress` every
+  `_RECONCILE_HEARTBEAT_S` (60 s) while it runs (`sandbox/DOCS.md`, launch reconcile).
+- 2026-11-04 — D1b: `_reconcile_environments` runs through `merge_flow.run_builds` (heartbeat
+  every 5 min, `BUILD_HEARTBEAT_S`); `_RECONCILE_HEARTBEAT_S` is gone.
+- 2026-11-04 — D1c: `run_research` closes the human-channel connector (`_close_connector`: its
+  `aclose`/`shutdown`/`close`; a raise is `run.teardown.connector_error`) at a run's end, last in
+  the teardown after the MCP client (leaf to root, as a stop's cleanup), and when the launch
+  preflight fails. Test: `tests/test_connector_close.py`.
+- 2026-11-04 — D1d: `run_research`'s setup after the preflight runs under one
+  `contextlib.AsyncExitStack`; a failing step unregisters the run task and restores the signal
+  handlers, then closes the checkpointer, sandboxes, MCP client and connector leaf to root (each
+  registered before it starts, so a half-started one closes too); the success path is unchanged
+  (`pop_all` once the graph is built). Test: `tests/test_setup_teardown.py`.
+- 2026-11-04 — D1e (rulings): a stop mid-setup goes through `_interrupt_cleanup` (`mcp_client=None`
+  is a skipped step) and raises `UserInterruptionError` (`_user_interruption`, shared with a stop
+  during the graph); a setup failure after `run.start` records `run.error` + `run.summary`; every
+  close in the setup teardown and the run's `finally` is guarded by `_closed`
+  (`run.teardown.sandbox_error` / `mcp_error` / `checkpointer_error`); the checkpointer closes in an
+  outer `finally` (was `async with held`). Tests: `tests/test_setup_teardown.py` (8).
+- 2026-11-04 — D1e review: a stop mid-setup restores the signal handlers after its cleanup (a
+  second signal is a no-op, as during the graph); the setup failure's `run.error` record is
+  guarded and the closes run in a `finally`. Tests: a checkpointer close that raises leaves a
+  finished run finished; a ledger that cannot record `run.error` still closes everything.
+- 2026-11-04 — Z1e: the launch preflight ends with the paid `member_media` probe (models DOCS).
+- 2026-11-04 — H2: `_build_task` names an obs-db root that holds no mission yet and that `acquire` creates a mission's folder on its first observation.
+- 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire.

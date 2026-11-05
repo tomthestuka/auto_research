@@ -30,20 +30,18 @@ import re
 import typing
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel
 
 from auto_research.env import ToolSearchConfig, tool_search_config
 from auto_research.models.keys import resolve_key
-from auto_research.models.providers._doc_parse import ParsedDocument, parse_document
 from auto_research.models.providers._json import loads_first_json_object
 from auto_research.models.providers._media import (
     MediaLimits,
     MediaPlan,
     caption_with_note,
-    hoist_documents,
     nonmedia_weight,
     plan_for_call,
 )
@@ -441,23 +439,10 @@ class ResponsesVendor:
     both probed and reject the same shape, so this is the vendor's rule rather than an endpoint
     artifact."""
 
-    vision_models: frozenset[str] = field(default_factory=frozenset)
-    """Models that accept image input, when the vendor serves vision on only some of them. Empty
-    means every model does, which is the OpenAI case."""
-
     def endpoint_for(self, config: RoleModelConfig) -> str | None:
         """This call's base URL: the member's own if it names one, else the vendor default."""
         return config.base_url or self.base_url
 
-    def limits_for(self, model: str) -> MediaLimits:
-        """This vendor's media limits, narrowed to what ``model`` actually accepts.
-
-        Volume limits are the vendor's; image capability can be per model, so a text-only model
-        gets limits that withhold every image with a note rather than sending one into a 400.
-        """
-        if not self.vision_models or model in self.vision_models:
-            return self.limits
-        return replace(self.limits, images_accepted=False)
 
 
 class ResponsesProvider:
@@ -507,37 +492,13 @@ class ResponsesProvider:
 
         vendor = self.vendor
         # One media plan for the WHOLE request (§stateless: this is the only point that sees
-        # every image in the conversation plus this call's attachments at once).
-        # A vendor with no usable file channel gets the document assembled locally instead: text
-        # plus cropped figures. This happens BEFORE planning, deliberately — those crops are
-        # images, and an image that skips the media plan is uncounted and unbudgeted, which is the
-        # class of defect that killed run `8c75990e`. Substituted figures therefore ride the
-        # ordinary `images` walk and are evicted oldest-first like any other block.
-        substitutions: list[tuple[DocumentRef, ParsedDocument | None]] = []
-        planned_images: list[FigureRef] = list(images)
-        if not vendor.accepts_inline_documents:
-            # Its substitution runs on call-time documents, so a nested one moves there (R2
-            # residual: on this vendor a document is still re-sent at the end of every call).
-            messages, nested = hoist_documents(messages)
-            documents = [*nested, *documents]
-        planned_documents: Sequence[DocumentRef] = documents
-        if documents and not vendor.accepts_inline_documents:
-            for document in documents:
-                parsed = parse_document(document)
-                substitutions.append((document, parsed))
-                if parsed is not None:
-                    planned_images.extend(parsed.figures)
-            planned_documents = ()
-
-        # Substituted text is ordinary request text the plan cannot see, so it is added to the
-        # reserve explicitly. Leaving it out would let media fill a ceiling the text has already
-        # eaten into — the same under-reserving that produced a live 413 with 42 KB of headroom.
-        reserved = nonmedia_weight(messages, tools=tools) + sum(
-            len(parsed.text.encode("utf-8")) for _, parsed in substitutions if parsed is not None
-        )
+        # every image in the conversation plus this call's attachments at once). What the member
+        # can take was settled before this call by the model-input sanitiser (`models.sanitise`):
+        # a document reaches here only for a vendor that reads it natively, and a parsed
+        # document's text and crops are ordinary message text and figures the plan sees.
         plan = plan_for_call(
-            messages, planned_images, planned_documents, vendor.limits_for(config.model),
-            reserved_bytes=reserved,
+            messages, images, documents, vendor.limits,
+            reserved_bytes=nonmedia_weight(messages, tools=tools),
         )
         input_items = _to_responses_input(messages, plan)
         cache_kwargs = (
@@ -546,16 +507,7 @@ class ResponsesProvider:
             else {}
         )
         attachment_content = []
-        for document, parsed in substitutions:
-            # Announced, never silent: the note names the file, says the text was extracted here
-            # rather than read by the model, and says which figures came with it. A model that
-            # quietly receives less than it expected invents the difference.
-            attachment_content.append(
-                {"type": "input_text", "text": _substituted_document_text(document, parsed)}
-            )
-            for figure in parsed.figures if parsed is not None else ():
-                attachment_content.extend(_figure_items(figure, plan))
-        for document in planned_documents:
+        for document in documents:
             resolved = plan.resolve(document)
             if resolved.dropped:
                 # Withheld, never silent — the model is told which document it lost and why.
@@ -849,35 +801,6 @@ class ResponsesProvider:
             raw=response,
             vendor=vendor,
         )
-
-
-def _substituted_document_text(document: DocumentRef, parsed: ParsedDocument | None) -> str:
-    """The text block introducing a locally-assembled document.
-
-    Says three things the model cannot otherwise know: that the text was extracted here rather
-    than read by the model, how many figures came with it, and — when parsing failed — that the
-    document is unread rather than empty. "I received nothing" and "I received an empty paper"
-    invite different and equally wrong inferences, so they are never allowed to look alike.
-    """
-    name = document.path.name
-    if parsed is None:
-        return (
-            f"[unavailable] {name} ({document.title}): this model accepts no document "
-            f"attachment, and the file could not be parsed here. Treat it as UNREAD — not as "
-            f"empty — and cite it from its text_search metadata rather than from its contents."
-        )
-    figures = (
-        f"Its {len(parsed.figures)} figure(s) are attached as images below, in document order."
-        if parsed.figures
-        else "No figures could be recovered from it, so any statement about its figures is "
-        "unsupported by what you were given."
-    )
-    truncation = " The text was truncated; a marker names where." if parsed.truncated else ""
-    return (
-        f"[extracted document] {name} ({document.title}). This model accepts no document "
-        f"attachment, so the file's text was extracted locally and is reproduced below. "
-        f"{figures}{truncation}\n\n{parsed.text}"
-    )
 
 
 def _document_items(document: DocumentRef, plan: MediaPlan | None) -> list[dict]:

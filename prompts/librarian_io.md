@@ -34,8 +34,8 @@ their context. A later pass builds on what earlier passes found, so its question
    established a quantity is cited by later papers, find and read that original paper. For
    documentation, code, data-product notes and community discussions, search the `web` source
    and read the pages with `web_fetch`.
-3. **Read in full.** Open the most relevant hits with `read_paper(hit=N)`; it attaches the paper's
-   PDF, so you read it as printed — text, tables, equations and figures — and it stays with you for
+3. **Read in full.** Open the most relevant hits with `read_paper(hit=N)`; the paper follows as your
+   model reads it (the PDF, or its text with a note) — text, tables, equations and figures — and it stays with you for
    the rest of the task. Read past the introduction into the results, tables and discussion, where
    the measurements are. Use `web_fetch` to read web pages — documentation, code, discussions, a
    page that names the paper behind a value (it shows a page a time; each page names the offset

@@ -1,6 +1,6 @@
 """Opt-in live Telegram round-trip (CLAUDE.md §9.8 / §10 live-API stub).
 
-    AUTO_RESEARCH_LIVE_TELEGRAM=1 pytest tests/test_live_telegram.py -s
+    AUTO_RESEARCH_LIVE_TELEGRAM=1 pytest tests/test_live_telegram.py --live -s
 
 Sends a real Markdown ``HumanQuery`` to your Telegram chat over long polling and **blocks for
 your reply**, then records the exchange under ``logs/dev/``. Requires the Telegram env keys
@@ -24,10 +24,10 @@ from dotenv import load_dotenv
 
 from auto_research.schemas import HumanQuery
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
     os.getenv("AUTO_RESEARCH_LIVE_TELEGRAM") != "1",
-    reason="set AUTO_RESEARCH_LIVE_TELEGRAM=1 to send a real Telegram clarification",
-)
+    reason="set AUTO_RESEARCH_LIVE_TELEGRAM=1 with --live to send a real Telegram clarification",
+)]
 
 
 _ROUND_TRIP_MD = """\

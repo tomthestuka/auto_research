@@ -230,7 +230,7 @@ class LibrarianToolProvider:
         if name in (EDIT_REPORT_TOOL, WRITE_REPORT_TOOL):
             return self._edit_report(arguments, name)
         if name == TURN_END_TOOL:
-            return await execute_turn_end(self.turn_problems, arguments, self._warnings)
+            return await execute_turn_end(self.turn_problems, arguments, self._warnings, self._lock)
         return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
 
     # ------------------------------------------------------------------ search
@@ -406,11 +406,20 @@ class LibrarianToolProvider:
 
     # ------------------------------------------------------------------ report
 
+    def _lock(self) -> None:
+        """``turn_end`` accepted: the pass's report is locked (ruling Q3, every unit)."""
+        self._locked = True
+
     def _edit_report(self, arguments: Mapping[str, Any], tool: str = EDIT_REPORT_TOOL) -> ToolOutcome:
         """Apply one edit_report (Edit) or write_report (Write) to the draft document (A7).
 
         Only what the librarian writes; `attributed_values` is the runtime's, set at filing.
         """
+        if getattr(self, "_locked", False):
+            return ToolOutcome(
+                text=f"{tool}: your report is filed and locked by turn_end; it stands as filed.",
+                is_error=True,
+            )
         result = change(self._values(self.written_report), LIBRARIAN_BLOCKS, tool, arguments)
         problems = list(result.problems)
         report = None

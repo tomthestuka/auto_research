@@ -4,19 +4,38 @@ Live probes on 2026-08-24 established structured answers through a function-tool
 Responses documentation includes custom function tools and ``allowed_tools`` tool choice. It
 recommends workspace-specific regional endpoints while retaining the legacy DashScope endpoints.
 
-Alibaba's current model page lists ``qwen3.8-max`` with image, text, and video input and native
-visual understanding, so figures remain enabled. Media-volume limits stay unset until the vendor
-publishes limits for this exact model/API combination.
+Which Qwen model takes images is its entry in ``config/model_capabilities.yaml``; the media-volume
+limits below are the vendor's published ones (its vision page, Z1f).
 """
 
 from auto_research.models.providers._media import MediaLimits
 from auto_research.models.providers._responses import ResponsesProvider, ResponsesVendor
 
 
-# The current qwen3.8-max model page lists image input. This descriptor enforces only published
-# Responses limits; none specific to this model/API combination are currently listed.
+# Alibaba's documented image limits (alibabacloud.com/help/en/model-studio/vision, read 2026-11-04),
+# held vendor-wide at their strictest reading so every model this adapter serves is inside them:
+# - "DashScope domains limit the request body to 16 MiB" (this adapter's `base_url` is one; the
+#   workspace domain allows "64 MB");
+# - per image as Base64, "the original image file before encoding cannot exceed 20 MB" for the
+#   Qwen3.8, 3.7, 3.6, 3.5 and Qwen3-VL series and "10 MB" for other models, and "The resulting Data
+#   URI string cannot exceed 20 MB on the OpenAI-compatible API": 10 MB raw is the binding one, held
+#   as its base64 size (10,000,000 bytes, the decimal reading, encoded);
+# - "When passed as Base64-encoded strings: Up to 250 images" (every image here travels that way);
+# - "The width and height of the image must both be greater than 10 pixels";
+# - "The ratio of the long side to the short side for both original and scaled images must not
+#   exceed 200:1" (a downscale keeps the ratio);
+# - "For resolutions between 4K (3840x2160) and 8K (7680x4320), only the JPEG, JPG, and PNG formats
+#   are supported": a WebP that does not fit 3840x2160 in either orientation is re-encoded as PNG
+#   (the strictest reading: any side past the 4K box).
 _LIMITS = MediaLimits(
     image_mimes=frozenset({"image/jpeg", "image/png", "image/webp"}),
+    max_images=250,
+    max_image_encoded_bytes=4 * ((10_000_000 + 2) // 3),
+    max_request_bytes=16 * 1024 * 1024,
+    min_side=11,
+    max_aspect=200,
+    large_box=(3840, 2160),
+    large_image_mimes=frozenset({"image/jpeg", "image/png"}),
 )
 
 DASHSCOPE_VENDOR = ResponsesVendor(

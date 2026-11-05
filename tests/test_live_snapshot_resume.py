@@ -1,7 +1,7 @@
-"""Env-gated LIVE test of the submission-snapshot checkpoint (§9.9, built 2026-08-31).
+"""Opt-in LIVE test of the submission-snapshot checkpoint (§9.9, built 2026-08-31).
 
 Activate with:
-    AUTO_RESEARCH_LIVE_SNAPSHOT_RESUME=1 pytest tests/test_live_snapshot_resume.py -q -s
+    pytest tests/test_live_snapshot_resume.py --live -q -s
 
 The scenario the checkpoint exists for, end to end, through PRODUCTION functions only —
 `build_authoring_session`, the session primitives the lead's authoring tools call
@@ -37,7 +37,6 @@ review fragment. Requires the analyst env (the gate's Layer-B pytest), like othe
 
 import asyncio
 import json
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -52,10 +51,7 @@ from auto_research.sandbox.merge_flow import (
     heal_toolkit_branch_if_dirty,
 )
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_SNAPSHOT_RESUME") != "1",
-    reason="set AUTO_RESEARCH_LIVE_SNAPSHOT_RESUME=1 to run the live snapshot-resume test",
-)
+pytestmark = pytest.mark.live
 
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "live-snapshot-resume"
 GATE_REWORK_CAP = 3   # per phase, mirroring the production default

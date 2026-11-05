@@ -2,7 +2,7 @@
 coding pipeline gives the tool's package its own environment, the runtime builds it on commit, the
 workers' calls run in it; a second run reuses it.
 
-Opt-in (spends on every seat): ``AR_LIVE_B5=1``. Drives the detached entry point
+Opt-in (spends on every seat): ``pytest tests/test_live_env_pipeline.py --live``. Drives the detached entry point
 (``run_research_nohup``: the backend survives this process, re-running the test reconnects, a dead
 backend resumes from its checkpoint), against a throwaway workspace this test creates:
 
@@ -31,7 +31,7 @@ from auto_research.graph.detached import run_research_nohup
 from auto_research.sandbox.workspace import ledger_dir
 from auto_research.schemas import ResearchRequest
 
-pytestmark = pytest.mark.skipif(not os.environ.get("AR_LIVE_B5"), reason="live: set AR_LIVE_B5=1 (spends)")
+pytestmark = pytest.mark.live
 
 REPO = Path(__file__).resolve().parents[1]
 SHERPANA = Path("/data/fzhou/sherpana")

@@ -167,12 +167,30 @@ class _Sandbox:
 class _Session:
     """An authoring session whose close resets the branch and saves a patch, as `aclose` does."""
 
-    def __init__(self, order, monitor, *, fails: bool = False):
-        self.order, self.monitor, self.fails = order, monitor, fails
+    def __init__(self, order, monitor, *, fails: bool = False, unsaved: bool = False,
+                 drops: bool = False, stalls: bool = False):
+        self.order, self.monitor, self.fails, self.unsaved = order, monitor, fails, unsaved
+        self.drops, self.stalls = drops, stalls
 
     async def aclose(self):
         self.order.append("reset")
-        if self.fails:
+        if self.drops or self.stalls:
+            # What `aclose` records when the disconnect raises: the error first (it is held),
+            # then the reset, then the held error is raised. A stalled close never gets that far.
+            error = RuntimeError("gone")
+            await self.monitor.record("coder", "coder.disconnect.error", level=3,
+                                      summary="coder disconnect failed: RuntimeError: gone",
+                                      data={"error": repr(error)})
+            if self.stalls:
+                await asyncio.sleep(30)
+            await self.monitor.record("coder", "coder.tree_reset", level=4, summary="reset",
+                                      data={"patch": "/runs/x/tool_author_failed_t1.patch"})
+            raise error
+        if self.unsaved:  # the event `_reset_direct_tree` writes when only the patch save failed
+            await self.monitor.record("coder", "coder.tree_reset", level=3,
+                                      summary="reset; saving its patch failed",
+                                      data={"patch": None, "save_error": "OSError('disk full')"})
+        elif self.fails:
             await self.monitor.record("coder", "coder.tree_reset.error", level=3,
                                       summary="working-tree reset failed: git lock", data={})
         else:
@@ -200,7 +218,8 @@ class _Handler:
         self.order.append("connector")
 
 
-def _cleanup(tmp_path, *, session_fails=False, sandbox_hang=0.0, cancel_after=None):
+def _cleanup(tmp_path, *, session_fails=False, sandbox_hang=0.0, cancel_after=None, unclosed=0,
+             unsaved=False, drops=False, stalls=False):
     from auto_research.graph.runtime import _interrupt_cleanup
     from auto_research.monitor import RunMonitor
     from auto_research.run_control import RunControl
@@ -209,7 +228,9 @@ def _cleanup(tmp_path, *, session_fails=False, sandbox_hang=0.0, cancel_after=No
     order: list[str] = []
     control = RunControl()
     control.request_stop("human /stop")
-    control.authoring_session = _Session(order, monitor, fails=session_fails)
+    control.authoring_session = _Session(order, monitor, fails=session_fails, unsaved=unsaved,
+                                         drops=drops, stalls=stalls)
+    control.unclosed_sessions = [_Session(order, monitor) for _ in range(unclosed)]
     handler = _Handler(order)
 
     async def _main():
@@ -295,7 +316,7 @@ def test_an_open_authoring_link_is_left_to_the_stop_cleanup():
     control.request_stop("human /stop")
     driver = _ChainDriver.__new__(_ChainDriver)
     driver.lead = type("Lead", (), {"run_control": control, "_segment_cut": None})()
-    driver.session, driver.spec, driver.pending_cuts = session, object(), []
+    driver.session, driver.spec, driver.pending_cuts, driver.brief = session, object(), [], None
     driver.provider = type("Provider", (), {"authoring_session": session})()
     driver.cycle = type("Cycle", (), {"session_open": True})()
     asyncio.run(driver.close())
@@ -342,4 +363,120 @@ def test_a_command_still_running_is_listed_as_cancelled_by_the_stop(tmp_path, mo
         ), timeout=30))
     checklist = next(m["text"] for m in handler.app.bot.sent if "/stop landed" in m["text"])
     assert "/status answer – cancelled by /stop" in checklist
+
+
+# ── C2c: a coding session whose close raised is closed at the run's end ──────
+
+
+def test_the_stop_cleanup_closes_the_unclosed_sessions_after_the_live_one(tmp_path):
+    """Sessions whose close raised earlier are closed in the toolkit step, after the sandboxes
+    and before the tools server (leaf to root), each its own reported step."""
+    order, sent, _, _ = _cleanup(tmp_path, unclosed=2)
+    assert order == ["sandbox", "reset", "reset", "reset", "mcp", "checklist", "connector"]
+    assert "unclosed coding session 0 closed" in sent[0]
+    assert "unclosed coding session 1 closed" in sent[0]
+
+
+def test_a_finished_run_closes_the_sessions_left_open(tmp_path, monkeypatch):
+    """Through `run_research`, ending normally: a session whose close raised, and one still
+    published, are closed by the run's own teardown; one whose close raises again is recorded
+    and the teardown goes on."""
+    from auto_research import run_research
+    from auto_research.schemas import ResearchRequest, ReviewerReport
+    from tests.test_react_ceiling import _hermetic_run
+
+    _hermetic_run(tmp_path, monkeypatch)
+    closed: list[str] = []
+
+    class Session:
+        def __init__(self, name, fails=False):
+            self.name, self.fails = name, fails
+
+        async def aclose(self):
+            closed.append(self.name)
+            if self.fails:
+                raise RuntimeError("the author process is gone")
+
+    class Reviewer:
+        async def review(self, request, **_):
+            self.run_control.unclosed_sessions += [Session("left"), Session("stuck", fails=True)]
+            self.run_control.authoring_session = Session("published")
+            return ReviewerReport(rationale="r", assign_to="human", title="T", abstract="A")
+
+    class Consensus:
+        async def run(self, workers, lead, task):
+            raise AssertionError("never routed to")
+
+    asyncio.run(asyncio.wait_for(run_research(
+        ResearchRequest(question="q"), reviewer=Reviewer(), io_agent=_Librarian(),
+        retrieval=None, workers=[], lead=object(), consensus=Consensus(), max_iterations=1,
+        chatter=10, monitor_jsonl=tmp_path / "monitor.jsonl", report_formats=[],
+    ), timeout=30))
+    assert closed == ["published", "left", "stuck"]
+    rows = [json.loads(line) for line in (tmp_path / "monitor.jsonl").read_text().splitlines()]
+    (error,) = [r for r in rows if r["event"] == "run.teardown.session_error"]
+    assert "the author process is gone" in error["data"]["error"]
+
+
+def test_a_reset_whose_patch_was_not_saved_is_reported_as_a_reset(tmp_path):
+    """C2c: the tree was reset and only its patch is missing; the checklist says both, and the
+    step is not marked failed."""
+    order, sent, _, _ = _cleanup(tmp_path, unsaved=True)
+    assert "authoring branch reset" in sent[0] and "reset; saving its patch failed" in sent[0]
+    assert "cleanup complete" in sent[0]
+
+
+def test_a_disconnect_that_fails_after_the_reset_is_its_own_fact(tmp_path):
+    """C2d: the branch was reset (patch kept on the checklist) and the coder's disconnect failed;
+    the checklist says both, as two lines."""
+    order, sent, _, _ = _cleanup(tmp_path, drops=True)
+    assert ("authoring branch reset ✓ (patch saved: `/runs/x/tool_author_failed_t1.patch`) → "
+            "coder disconnected ✗ (coder disconnect failed: RuntimeError: gone)") in sent[0]
+    assert sent[0].endswith("cleanup finished with failures")
+
+
+def test_a_close_that_times_out_after_a_failed_disconnect_keeps_its_failure(tmp_path, monkeypatch):
+    """The close stalls after recording the disconnect error, before any reset: the reset line
+    keeps the step's own failure (the bound), never a reset that did not run."""
+    monkeypatch.setattr("auto_research.graph.runtime._INTERRUPT_RESET_TIMEOUT_S", 0.2)
+    order, sent, _, _ = _cleanup(tmp_path, stalls=True)
+    assert "authoring branch reset ✗ (" in sent[0] and "nothing to reset" not in sent[0]
+    assert "coder disconnected ✗ (coder disconnect failed: RuntimeError: gone)" in sent[0]
+
+
+def test_a_cancel_during_connect_leaves_the_session_to_the_bounded_teardown():
+    """A /stop lands while a link's coder connects: `_open` hands the session to the run's
+    unclosed sessions without awaiting its close, so the bounded cleanup closes it (C2d)."""
+    from auto_research.agents.roles import _ChainDriver
+    from auto_research.run_control import RunControl
+
+    control = RunControl()
+
+    class Session:
+        closes = 0
+
+        async def connect(self):
+            await asyncio.sleep(30)
+
+        async def aclose(self):
+            Session.closes += 1
+
+    session = Session()
+    driver = _ChainDriver.__new__(_ChainDriver)
+    driver.lead = type("Lead", (), {"run_control": control})()
+
+    async def build(spec):
+        return session
+
+    driver._build_session = build
+
+    async def main():
+        task = asyncio.create_task(driver._open(object()))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(main())
+    assert control.unclosed_sessions == [session] and Session.closes == 0
 

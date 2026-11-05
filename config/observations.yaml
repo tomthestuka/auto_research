@@ -8,4 +8,4 @@
 # mission name (research_toolkit derives it the same way); each mission's catalog.json stays
 # under its own subdir. research_toolkit tools (xspec_utils.load_data, heasarc_utils.acquire)
 # already take a per-mission directory and need no change.
-obs_db_root: /data/fzhou/XSPEC/Cyg_X-1
+obs_db_root: /xray02/fzhou_obsdb   # fresh root (H2); missions appear on their first acquire

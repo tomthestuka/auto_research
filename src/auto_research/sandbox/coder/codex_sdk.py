@@ -488,10 +488,13 @@ class CodexBackend:
     async def disconnect(self) -> None:
         import asyncio
 
-        client, self._client = self._client, None
+        client = self._client
         try:
             if client is not None:
                 await asyncio.to_thread(client.close)
+            # Dropped only once closed (C2c): a close that raised keeps the client, so the run's
+            # teardown retries it rather than finding nothing to close.
+            self._client = None
         finally:
             escalation, self._escalation = self._escalation, None
             if escalation is not None:

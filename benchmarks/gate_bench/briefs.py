@@ -15,9 +15,9 @@ defect and its control resolve to the *same* string by construction and no futur
 them differ. That property is asserted by
 ``test_gate_bench.py::test_a_pair_is_reviewed_against_an_identical_brief``.
 
-**Provenance.** Two of the five tools are real, and their briefs are the analyst lead's own words,
+**Provenance.** Two of the six tools are real, and their briefs are the analyst lead's own words,
 quoted verbatim from the run ledger that produced them — so those entries are not written for the
-benchmark at all. The three synthetic tools have no run behind them and their briefs are written
+benchmark at all. The four synthetic tools have no run behind them and their briefs are written
 here, in the same register: the capability a census needs and why the toolkit cannot supply it,
 never a flaw to look for.
 """
@@ -87,7 +87,7 @@ _LOAD_DATA = Brief(
     provenance="written for this corpus; no ledger brief names load_data as the authored tool",
 )
 
-#: The three synthetic tools exercise the gate against a package with no science stack, so no run
+#: The synthetic tools exercise the gate against a package with no science stack, so no run
 #: produced them. These briefs are written here in the register of the salvaged ones above: what a
 #: census needs, and why doing it by hand is not acceptable.
 _BAND_PA_SUMMARY = Brief(
@@ -134,6 +134,19 @@ _RUN_PRODUCT_AUDIT = Brief(
 )
 
 
+_STAGE_LEVEL2 = Brief(
+    science_context=(
+        "The census readers open each observation's det1 level-2 event list as a plain file, while "
+        "the archive serves it gzipped. Analysts decompress it by hand inside the observation "
+        "database, and nothing records the copy: the catalog lists only the archive file, so a "
+        "reader cannot tell which events a product was reduced from, and a stale hand copy looks "
+        "the same as a fresh one. Staging has to be one tracked step that writes the plain event "
+        "list beside the archive file and records it in the observation's catalog entry."
+    ),
+    provenance="written for this corpus (synthetic base, no originating run)",
+)
+
+
 #: Keyed on ``(base, tool_name)`` — the property that makes a leak impossible rather than merely
 #: absent, since a defect and its matched control share both.
 BRIEFS: dict[tuple[str, str], Brief] = {
@@ -142,6 +155,7 @@ BRIEFS: dict[tuple[str, str], Brief] = {
     ("synthetic", "band_pa_summary"): _BAND_PA_SUMMARY,
     ("synthetic", "run_summary"): _RUN_SUMMARY,
     ("synthetic", "run_product_audit"): _RUN_PRODUCT_AUDIT,
+    ("synthetic", "stage_level2"): _STAGE_LEVEL2,
 }
 
 

@@ -63,6 +63,21 @@ Responsibilities: apply that bar to the code and the tests that verify it.
 Below that bar — a tool you would trust, whose tests could nonetheless be stricter — **approve.**
 Stricter-than-necessary is not a defect.
 
+**Where the tool writes — three kinds, each with its own path.** Check the diff against them; the
+gate has checked the mechanics, you judge the class:
+- a **science artifact** (an output that depends on a `parameter`-kind argument, or on a setting
+  outside the mission team's defaults: a band, a grid, a model, a selection) is written under an
+  `output` argument and returned under `products` or `figures`;
+- an **obs-db item** (generic data: raw archive data, the mission team's standard reductions made
+  with its recommended settings only) is
+  written into the observation database and recorded through `obsdb_catalog`; an in-place header
+  keyword on a file the catalog already records is part of that;
+- **scratch** (parameter files, caches, temporary files) is the program's own.
+
+A tool that writes a science artifact into the observation database, or records one in its
+catalog, puts a run's choice into data every later analysis reads: reject it, and name the output
+argument it belongs under.
+
 **Reproducibility — for a science tool.** A *science tool* computes or derives a measurement
 whose result should reproduce within tolerance (a fit, polarization, flux, a derived quantity).
 For such a tool a **reproducibility test** named `test_repro…` is part of the core bar: confirm
@@ -72,11 +87,12 @@ literature-search tools are exempt (their stability is a checksum/differential c
 or toothless reproducibility test on a science tool is a reject.
 
 **Run the no-fabrication check yourself.** This is a *judgment* pass independent of the gate's
-mechanical one. Reject any code that invents, mocks, or stands in for real measurements; any
+mechanical one. Reject any tool code (`lib/`, `skills/`) that invents, mocks, or stands in for real measurements; any
 placeholder/marketing language ("representative", "synthetic", "illustrative", "mock",
 "placeholder", "for now", "in operational mode this would…"); or any output that could be
-silently built on a failed/fake upstream step. Synthetic validation data is legitimate only as
-*data* referenced by a marked `synth…` ObsID, never as data-generating code in the toolkit.
+silently built on a failed/fake upstream step. Synthetic validation data is legitimate only as a
+marked synthetic ObsID (`synth<YYMMDD>-<hex>`) the tests build in their fixture obs-db and record
+through `obsdb_catalog.neutral`, never as data-generating code in the tool (`lib/`, `skills/`).
 Scrutinize the gate's recorded `findings` (e.g. numeric-literal arrays) and decide whether each
 is benign or fabrication.
 

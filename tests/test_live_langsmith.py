@@ -1,7 +1,7 @@
 """Opt-in live LangSmith + cost-recording check.
 
 Run with:
-    AUTO_RESEARCH_LIVE_LANGSMITH_TESTS=1 pytest tests/test_live_langsmith.py -s
+    pytest tests/test_live_langsmith.py --live -s
 
 Cost is recorded into a run's monitor ledger as ``cost.call`` events, so this test installs a
 :class:`~auto_research.observability.costs.CostMeter` over a throwaway monitor — the same wiring
@@ -21,10 +21,7 @@ from auto_research.observability import install_cost_meter
 from tests.dev_logs import dev_log_path
 
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_LANGSMITH_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_LANGSMITH_TESTS=1 to spend provider tokens and create LangSmith traces",
-)
+pytestmark = pytest.mark.live
 
 
 def _unique_handles():

@@ -11,14 +11,13 @@ half caught a 400 no deterministic test could see (the server-tool ``name`` must
 tokens on OpenAI and 35,208 → 9,003 on Anthropic. ``tool_search_enabled`` was flipped true on
 the strength of this run; re-run it whenever the dated provider identifiers move::
 
-    AUTO_RESEARCH_LIVE_MODEL_TESTS=1 pytest tests/test_live_tool_search.py -s
+    pytest tests/test_live_tool_search.py --live -s
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
@@ -36,10 +35,7 @@ from auto_research.models.types import (
 from auto_research.sandbox.registry import ToolkitRegistry
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_MODEL_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_MODEL_TESTS=1 to spend provider tokens",
-)
+pytestmark = pytest.mark.live
 
 _ENABLED = ToolSearchConfig(
     enabled=True,

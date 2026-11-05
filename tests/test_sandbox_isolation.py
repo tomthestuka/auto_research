@@ -1,6 +1,6 @@
 """Opt-in analyst sandbox isolation test.
 
-Activate with: AUTO_RESEARCH_LIVE_SANDBOX_ISOLATION_TESTS=1
+Activate with: pytest tests/test_sandbox_isolation.py --live
 
 Starts two persistent analyst subprocesses with the same setup used by the
 analysis team.  The first subprocess loads IXPE obsid 02008401; the second
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import uuid
 from pathlib import Path
 
@@ -23,11 +22,7 @@ import pytest
 from tests.dev_logs import dev_log_path
 
 
-LIVE = os.getenv("AUTO_RESEARCH_LIVE_SANDBOX_ISOLATION_TESTS") == "1"
-skip_live = pytest.mark.skipif(
-    not LIVE,
-    reason="Set AUTO_RESEARCH_LIVE_SANDBOX_ISOLATION_TESTS=1 to run",
-)
+pytestmark = pytest.mark.live
 
 
 def _write_log(data: dict) -> Path:
@@ -59,7 +54,6 @@ def _write_log(data: dict) -> Path:
     return json_path
 
 
-@skip_live
 def test_persistent_sandboxes_do_not_share_xspec_state(monkeypatch, tmp_path: Path) -> None:
     """Load IXPE in one worker subprocess; another worker's XSPEC status is empty."""
 

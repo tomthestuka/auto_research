@@ -17,7 +17,11 @@ carry on from your text alone.
   useful and a number alone is only a pointer.
 - **What the agent decided and why**, and what it planned next.
 - **What failed**: errors, refused calls, a check that did not pass, with the reason given.
-- **What other members asked or told the agent**, and whether it answered.
+- **What other members asked or told the agent**, and whether it answered. For a text from the
+  human — headed `[Human steer]` or `[Reply from the human]`, or shown as
+  `[A text from the human; the runtime restates it word for word after the summary.]` — write that
+  the human sent a text at that point and what the agent did next; the runtime places the human's
+  words after your summary.
 - **The state of its report**, if it has been drafting one: which fields are written and what
   they say in outline.
 

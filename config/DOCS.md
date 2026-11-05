@@ -42,13 +42,14 @@ uninstalled configuration rather than silently falling back here.
 
 ## Interfaces / Contracts
 - `models.yaml` — role → non-empty `members` list. Each member has `name`,
-  `provider`, `model`, `vision`, `parameters`, and optional `documents` and
-  `priceMTk`.
+  `provider`, `model`, `parameters`, and optional `priceMTk`. What a member may be sent (images,
+  documents) is its model's entry in `model_capabilities.yaml` (`models.providers.media_capability`,
+  Z1d), never a key here; a retired `vision`/`documents` key is refused at load.
   Loaded and validated by `auto_research.models.registry`. Required roles:
   `reviewer`, `analyst_lead`, `analyst_worker`, `librarian_io`, `coder`, `analyst_colead`,
   and `status_monitor` — the full `REQUIRED_ROLES` set, validated at launch. Reviewer and
-  analyst-tier models **must** be marked `vision: true` so figure references can
-  be passed at the multimodal boundary (see
+  analyst-tier members **must** be models whose capability entry takes images so figure references
+  can be passed at the multimodal boundary (see
   [§7](../CLAUDE.md#7-schemas--protocols)). Phase-2 tool-authoring roles (optional, not
   in the required set): `coder` — the tool author, which names **both a model and the harness
   that drives it** (`harness: claude_sdk | codex`, plus `base_url`/`key_env` when the vendor is
@@ -98,11 +99,6 @@ uninstalled configuration rather than silently falling back here.
 - `models.yaml.roles.<role>.members[].key_env` — optional API-key variable, when the member
   does not authenticate from that provider's standard `<PROVIDER>_API_KEY`.
 - `models.yaml.roles.<role>.members[].model` — provider model identifier.
-- `models.yaml.roles.<role>.members[].vision` — whether the member may receive
-  figures.
-- `models.yaml.roles.<role>.members[].documents` — whether the member may
-  receive document attachments. Librarian I/O members are configured with
-  `documents: true` so each team member can ingest PDFs directly.
 - `models.yaml.roles.<role>.members[].parameters` — provider-specific keyword
   arguments. OpenAI reasoning uses `reasoning.effort`; Gemini 3 thinking uses
   `thinking_config.thinking_level`.
@@ -125,7 +121,12 @@ uninstalled configuration rather than silently falling back here.
   million tokens with `input` and `output` keys, consumed by
   `auto_research.observability`.
 - `observations.yaml.obs_db_root` — the single root folder; each mission is a subdirectory
-  `<obs_db_root>/<MISSION>` discovered from disk (marked by its `catalog.json`).
+  `<obs_db_root>/<MISSION>` discovered from disk (marked by its `catalog.json`). It starts empty
+  (H2, 2026-11-04: `/xray02/fzhou_obsdb`, a fresh root the runtime acquires into; the human's
+  `/data/fzhou/XSPEC/Cyg_X-1` stays an archive the runtime does not write): `acquire` creates a
+  mission's folder on its first observation, laid out as HEASARC's archive tree
+  (`ixpe/data/obs/<prefix>/<obsid>/`). An empty root that exists and is writable is healthy. It is
+  also in `orchestration.yaml: agent_fs_allow`. The `.example` files keep the `/path/to/` placeholder.
 - `orchestration.yaml.runtime_dir` — writable runtime data directory outside both repos.
   Holds SQLite, run workspaces, figures/artifacts, report outputs, logs, and cost ledgers.
 - `orchestration.yaml.max_iterations` — hard cap for each outer reviewer
@@ -307,8 +308,10 @@ discount would appear there too.
 prices for it, which used to be worse than an unknown model: the resolver accepted the entry, priced
 every token at zero, and reported `source="litellm"` while the member's own `priceMTk` could never
 engage. Since 2026-08-19 a rate-less entry is treated as absent so the fallback works. A model that
-is genuinely free (Z.AI's Flash tiers are) says so explicitly with `priceMTk: {input: 0, output: 0}`,
-which at least labels the zero as ours.
+is genuinely free says so explicitly with `priceMTk: {input: 0, output: 0}`, which at least labels
+the zero as ours. GLM-5.3-Flash is not free: "GLM-5.3-Flash | $0.15 | $0.03 | … | $0.50" per
+million input, cached-input and output tokens (docs.z.ai/guides/overview/pricing, read 2026-11-04),
+the rates litellm carries for `zai/glm-5.3-flash`.
 
 Two rate structures no static table can express, worth knowing before a cost column is trusted:
 DeepSeek moved to **peak / off-peak** multipliers (effective 2026-08-16), so a recorded DeepSeek
@@ -317,6 +320,29 @@ a context-caching discount that cannot be combined.
 
 The same numbers are kept in `tests/test_live_coder_matrix.py: _PRICES` for the throwaway members
 that file constructs, since a live leg needs them without being configured here.
+
+## Model capabilities (`model_capabilities.yaml`)
+
+The one source of what a model takes (user ruling 2026-11-04, Z1d): `provider -> model ->
+{images, documents}`, written by the builders from each vendor's own model page; the adapters trust
+it and keep only vendor-wide wire behaviour and limits. Every model a member names needs an entry,
+or the launch preflight (`member_capabilities`) refuses the member. `documents` is the model's
+native PDF input; a Responses vendor whose dialect takes no inline document (`accepts_inline_documents
+= False`: Alibaba, DeepSeek, Z.AI) is sent the local parse whatever the entry says. Read 2026-11-04:
+
+| provider / model | images | documents | source (quoted) |
+|---|---|---|---|
+| anthropic / claude-opus-5, claude-sonnet-5, claude-fable-5, claude-opus-5-5 | yes | yes | platform.claude.com/docs/en/models/{opus-5,sonnet-5,fable-5,opus-5-5}/overview: "Input → output \| Text and images → text"; build-with-claude/pdf-support lists all four; PDF "As a base64-encoded PDF in `document` content blocks" |
+| openai / gpt-5.5, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna | yes | yes | developers.openai.com/api/docs/models/<id>: "Image \| Input only"; guides/file-inputs: "The Responses API accepts the file types listed below as `input_file` items", "PDF files: On models with vision capabilities, such as `gpt-4o` and later models, the API extracts both text and page images" |
+| google / gemini-3.5-flash | yes | yes | ai.google.dev/gemini-api/docs/models/gemini-3.5-flash: "Inputs Text, Image, Video, Audio, and PDF" (deprecated, "automatically routed to `gemini-3.6-flash`", same inputs) |
+| deepseek / deepseek-flash | yes | no | api-docs.deepseek.com/quick_start/pricing: model `deepseek-flash`, version "DeepSeek-V4.1-Flash-1017", Vision "✓"; guides/vision: "The `deepseek-flash` model accepts images alongside text"; guides/responses_api: "`deepseek-flash` processes `input_image` parts as real images", and on `message` "File inputs are not supported" (read 2026-11-04; the 2026-08-25 text-only policy is retired, user ruling 2026-11-04) |
+| deepseek / deepseek-v4-flash | yes | no | quick_start/pricing, footnote (1): "The legacy names `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are still accepted, but the corresponding models have been retired, their requests are served by the DeepSeek-V4.1-Flash-1017 model and billed at the Flash price" — the same model as `deepseek-flash` |
+| deepseek / deepseek-v4-pro | no | no | api-docs.deepseek.com/quick_start/pricing: "Vision \| … Not supported"; guides/responses_api: "File inputs are not supported" |
+| zai / glm-5.3 | no | no | docs.z.ai/guides/llm/glm-5.3: "GLM-5.3 currently supports text-only inputs" |
+| zai / glm-5.3-flash | yes | yes | docs.z.ai/guides/vlm/glm-5.3-flash: "Input Modality: Video / Image / Text / File"; api-reference/llm/chat-completion: `file_url` "Only GLM-5.3-Flash series. Supports formats such as pdf …". Both documented on Chat Completions only; this adapter's Responses dialect is not documented by Z.AI and not yet live-probed for media |
+| zai / glm-5.2 | no | no | docs.z.ai/guides/llm/glm-5.2: "Input Modalities: Text" |
+| dashscope / qwen3.8-max | yes | yes | alibabacloud.com/help/en/model-studio/qwen3-8-max: "Input Modality: Image, Text, Video"; qwen-api-via-openai-responses: "input_file { type, file_url } File input. … Currently supported by qwen3.8-flash, qwen3.8-max, and qwen3.5-ocr" (by public URL only, so this adapter sends the parse) |
+| dashscope / qwen3.7-plus | yes | no | alibabacloud.com/help/en/model-studio/qwen3-7-plus: "Input Modality: Image, Text, Video"; not in the `input_file` list above |
 
 ## Changelog
 Compacted 2026-09-01, 2026-09-24, 2026-10-07 and 2026-10-19 (every entry); detail in git history.
@@ -337,3 +363,16 @@ Compacted 2026-09-01, 2026-09-24, 2026-10-07 and 2026-10-19 (every entry); detai
   only; [B5] `context_mgmt_clear_*`, `context_mgmt_exclude_tools` ([B11 ruling] `[message,
   wait_for_reply]`); [B6/B7] `compaction_*`, role `session_compactor`; [B12 ruling]
   `context_mgmt_enabled: false`.
+- 2026-11-04 — A1: `vision`/`documents` member keys retired from `models.yaml`; capability is the
+  adapter's declaration (`models/DOCS.md`).
+- 2026-11-04 — `code_gate.yaml` `allowlist_obsid_tokens`: the `synth_[A-Za-z0-9_]+` entry added earlier the same day is withdrawn (user ruling S1).
+- 2026-11-04 — Z1b: the price note no longer calls Z.AI's Flash tier free; it quotes the pricing page
+  for GLM-5.3-Flash ($0.15 / $0.03 / $0.50), which litellm carries.
+- 2026-11-04 — Z1d: `model_capabilities.yaml` (what each model takes; the one source, read by
+  `models.capabilities`), with the Model capabilities section citing each entry's vendor page.
+- 2026-11-04 — H2: `obs_db_root` is a fresh, empty root (`/xray02/fzhou_obsdb`, also in `agent_fs_allow`); the old Cyg X-1 folder stays the human's archive; `.example` files unchanged.
+- 2026-11-04 — `orchestration.yaml` `gate_readonly_roots` (H1 item 3): folders bound read-only into the gate's Layer-B test run only (`sandbox.gate._jailed_pytest`), never on `agent_fs_allow`, so the toolkit's real-data tests find their inputs after the obs-db moved to `/xray02/fzhou_obsdb` while the workers never see the old tree.
+- 2026-11-04 — `models.yaml` `librarian_io`: only `claude_sonnet_5` remains; the `gpt_5_5_medium` and `gemini_3_5_flash_thinking` members were legacy fixtures (a role runs its first member unless one is named, `agents.roles._select_model`).
+- 2026-11-04 — Z1h: the coder member is `deepseek-flash` (V4.1-Flash); capability rows for `deepseek-flash` and `deepseek-v4-flash` (images yes, documents no) from DeepSeek's pages; the text-only policy is retired.
+- 2026-11-04 — `coder` member sets `model_reasoning_effort: high` (user ruling; DeepSeek's Codex integration page sets it; passed to Codex as a config key by `codex_sdk`).
+- 2026-11-05 — `model_capabilities.yaml`: `openai/gpt-6.1-sol` images true ("Input modalities: text, image", developers.openai.com/api/docs/models/gpt-6.1-sol, read 2026-11-05); documents true per the file-inputs guide, as for the GPT-5.6 rows; confirmed by the paid image+PDF probe. Used as the lead of the live figure-shape attack cells.

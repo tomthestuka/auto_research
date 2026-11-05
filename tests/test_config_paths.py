@@ -100,9 +100,10 @@ def test_the_graph_runtime_reads_it(elsewhere):
     assert load_orchestration_config()["max_iterations"] == 7
 
 
-def test_env_paths_read_it(elsewhere):
+def test_env_paths_read_it(elsewhere, monkeypatch):
     from auto_research import env
 
+    monkeypatch.delenv(env.RUNTIME_DIR_ENV, raising=False)  # the suite's own isolation (D4)
     _write_orchestration(elsewhere)
     assert env.runtime_data_dir() == Path("/tmp/elsewhere-runtime")
     assert env.toolkit_root() == Path("/tmp/elsewhere-toolkit")
@@ -241,3 +242,29 @@ def test_no_module_still_computes_a_config_path_of_its_own():
         and '/ "config"' in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+def test_the_runtime_dir_variable_names_the_runtime_dir_for_the_process_and_its_children(
+    elsewhere, monkeypatch, tmp_path,
+):
+    """D4: `AUTO_RESEARCH_RUNTIME_DIR` overrides `runtime_dir`, read per call; the suite sets it
+    for the whole session, so no test writes the configured runtime dir."""
+    import subprocess
+    import sys
+
+    from auto_research import env
+
+    _write_orchestration(elsewhere)
+    monkeypatch.setenv(env.RUNTIME_DIR_ENV, str(tmp_path / "private"))
+    assert env.runtime_data_dir() == tmp_path / "private"
+    child = subprocess.run(
+        [sys.executable, "-c", "from auto_research.env import runtime_data_dir; print(runtime_data_dir())"],
+        capture_output=True, text=True, check=True,
+    )
+    assert child.stdout.strip() == str(tmp_path / "private")
+
+
+def test_the_suite_runs_in_a_private_runtime_dir(_runtime_dir_in_tmp):
+    from auto_research import env
+
+    assert env.runtime_data_dir() == _runtime_dir_in_tmp

@@ -1,6 +1,6 @@
 """Opt-in LIVE cells for the input validator's tool-input job (plan items 2 and 3, 2026-11-03).
 
-    AUTO_RESEARCH_LIVE_INPUT_VALIDATOR=1 pytest tests/test_live_input_validator.py -s
+    pytest tests/test_live_input_validator.py --live -s
 
 * ``test_every_configured_vendor_accepts_the_kind_schemas`` — each configured worker and lead member is sent
   the real toolkit's tool definitions, as the registry rewrites them (``provider_schema``: data and
@@ -27,10 +27,7 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_INPUT_VALIDATOR") != "1",
-    reason="set AUTO_RESEARCH_LIVE_INPUT_VALIDATOR=1 to run the live input-validator cells",
-)
+pytestmark = pytest.mark.live
 load_dotenv()
 
 LOG = Path(__file__).resolve().parents[1] / "logs" / "dev" / "input-validator"

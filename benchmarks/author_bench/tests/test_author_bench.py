@@ -972,7 +972,8 @@ def test_the_two_correlations_are_crossed_and_never_coincide():
     §8.5 of `papers/FANGZ/DOCS.md` records that no measured arm has the author sharing the
     reviewer's vendor while the lead does not, so the two correlations cannot be told apart. Here
     they are fully crossed: four cells correlate the lead with the reviewer, four correlate the
-    author with it, and none does both -- because the author is DeepSeek and DeepSeek cannot lead.
+    author with it, and none does both -- because the author is DeepSeek and DeepSeek is not on
+    the lead axis.
     The cost of that, asserted so it stays visible, is that no interaction term is estimable.
     """
     from benchmarks.author_bench.legs import GRID
@@ -986,35 +987,60 @@ def test_the_two_correlations_are_crossed_and_never_coincide():
     assert len(author_only) == 4
     assert len(neither) == 12
     assert both == [], "a doubly-correlated cell would confound the two axes it separates"
+    # The lead-correlated diagonal is same-model in every cell (Z1d: Z.AI's co-lead is its lead).
+    assert all(leg.lead_model == leg.colead_model for leg in lead_only), [
+        (leg.lead_model, leg.colead_model) for leg in lead_only]
 
 
-def test_every_grid_lead_is_vision_capable_and_the_deepseek_reviewer_is_not():
+def test_the_grid_axes_are_read_from_its_config_file():
+    """User ruling 2026-11-04: model choices are configuration (`grid.yaml`), never code."""
+    import yaml
+
+    from benchmarks.author_bench import legs
+
+    data = yaml.safe_load((Path(legs.__file__).with_name("grid.yaml")).read_text(encoding="utf-8"))
+    assert [(m.provider, m.model) for m in legs.GRID_LEADS] == [
+        (m["provider"], m["model"]) for m in data["leads"]]
+    assert [(m.provider, m.model) for m in legs.GRID_COLEADS] == [
+        (m["provider"], m["model"]) for m in data["coleads"]]
+    assert ("zai", "glm-5.3-flash") in {(m.provider, m.model) for m in legs.GRID_COLEADS}
+
+
+def _lead_ids(member):
+    return member.slug
+
+
+def _grid_leads():
+    from benchmarks.author_bench.legs import GRID_LEADS
+
+    return list(GRID_LEADS)
+
+
+@pytest.mark.parametrize("lead", _grid_leads(), ids=_lead_ids)
+def test_every_grid_lead_takes_images_as_its_adapter_declares(lead):
     """Vision binds the roles that are sent figures, which is the lead and not the reviewer.
 
-    The lead is handed the accumulated per-worker figure catalog, so a vision-less lead would fail
-    on its first figure deep inside a paid trial. The co-lead is handed none, so a text-only
-    vendor is eligible to review -- which is what puts DeepSeek on one axis and not the other.
+    The lead is handed the accumulated per-worker figure catalog, so a lead without image input
+    would have every figure withheld (the model-input sanitiser, A2). Read from the capability
+    table (`config/model_capabilities.yaml`, Z1d).
     """
-    from benchmarks.author_bench.legs import GRID, GRID_LEADS
+    from auto_research.models.providers import media_capability
+    from auto_research.models.types import RoleModelConfig
 
-    assert all(member.vision for member in GRID_LEADS)
-    assert all(leg.lead_vision for leg in GRID)
-
-    deepseek = [leg for leg in GRID if leg.colead_provider == "deepseek"]
-    assert len(deepseek) == 4
-    assert not any(leg.colead_vision for leg in deepseek), (
-        "declaring vision on a DeepSeek reviewer would state a capability its vendor will not serve"
-    )
+    member = RoleModelConfig(name="lead", provider=lead.provider, model=lead.model)
+    assert media_capability(member).images
 
 
-def test_a_deepseek_reviewer_is_built_without_vision():
-    """The declaration has to survive into the member the trial actually builds, not stop at the
-    roster: `build_pinned_colead` hardcoded `vision=True` until the grid needed otherwise."""
-    from benchmarks.author_bench.legs import BY_SLUG
+def test_a_deepseek_reviewer_is_built_without_image_input():
+    """The co-lead is handed no figure, so a text-only model is eligible to review -- which is
+    what puts DeepSeek on one axis and not the other; its table entry has no image input."""
+    from auto_research.models.providers import media_capability
+    from benchmarks.author_bench.legs import BY_SLUG, GRID
     from benchmarks.author_bench.trial import build_pinned_colead
 
+    assert len([leg for leg in GRID if leg.colead_provider == "deepseek"]) == 4
     colead = build_pinned_colead(BY_SLUG["grid_lead_anthropic_colead_deepseek"], None)
-    assert colead.model.config.vision is False
+    assert media_capability(colead.model.config).images is False
     assert colead.model.config.provider == "deepseek"
     assert colead.model.config.model == "deepseek-v4-pro"
 

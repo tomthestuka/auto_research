@@ -1507,3 +1507,24 @@ def test_both_backends_satisfy_the_extended_interface():
     ):
         assert isinstance(backend, CoderBackend)
         assert callable(backend.steer)
+
+
+def test_a_codex_close_that_raised_keeps_its_client_for_the_retry():
+    """C2c: the app-server client is dropped only once it closed, so the run's teardown, closing
+    the session again, closes the client again instead of finding nothing."""
+    backend = _codex(_AllowAll())
+
+    class Client:   # the app-server process is outside the code under test
+        closes = 0
+
+        def close(self):
+            Client.closes += 1
+            if Client.closes == 1:
+                raise RuntimeError("broken pipe")
+
+    backend._client = Client()
+    with pytest.raises(RuntimeError, match="broken pipe"):
+        asyncio.run(backend.disconnect())
+    asyncio.run(backend.disconnect())
+    assert Client.closes == 2 and backend._client is None
+

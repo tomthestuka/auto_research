@@ -259,17 +259,21 @@ _MANIFEST_ENTRY = '''    "research_toolkit.demo_utils.run_product_audit": {
         "type": "object",
         "properties": {
             "csv_paths": {
+                "kind": "path",
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Reduced-product CSV paths to audit in order.",
             },
             "threshold": {
+                "kind": "parameter",
                 "type": "number",
+                "default": 0.05,
                 "description": (
                     "Probability threshold for the variability verdict, in the unit interval."
                 ),
             },
             "strict": {
+                "kind": "setting",
                 "type": "boolean",
                 "description": "Raise on the first invalid product when true; report per-path errors when false.",
             },

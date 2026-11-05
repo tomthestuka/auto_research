@@ -1,0 +1,36 @@
+# What each model takes, by provider and model id: the one source of a model's media capability.
+# Written by the builders from each vendor's own model page (citations: config/DOCS.md,
+# "Model capabilities"); the adapters trust these entries. Every model a member names needs one.
+#   images:    the model reads image input.
+#   documents: the model reads a document (PDF) natively. Sent natively where the adapter's dialect
+#              carries an inline document; otherwise the local parse is sent (models.sanitise).
+
+anthropic:
+  claude-opus-5:   {images: true, documents: true}    # "Text and images → text"; pdf-support
+  claude-sonnet-5: {images: true, documents: true}    # "Text and images → text"; pdf-support
+  claude-fable-5:  {images: true, documents: true}    # "Text and images → text"; pdf-support
+  claude-opus-5-5: {images: true, documents: true}    # "Text and images → text"; pdf-support
+
+openai:
+  gpt-5.5:       {images: true, documents: true}      # "Image | Input only"; file-inputs guide
+  gpt-5.6-sol:   {images: true, documents: true}      # "Image | Input only"; file-inputs guide
+  gpt-5.6-terra: {images: true, documents: true}      # "Image | Input only"; file-inputs guide
+  gpt-5.6-luna:  {images: true, documents: true}      # "Image | Input only"; file-inputs guide
+  gpt-6.1-sol:   {images: true, documents: true}      # "Input modalities: text, image"; file-inputs guide
+
+google:
+  gemini-3.5-flash: {images: true, documents: true}   # "Text, Image, Video, Audio, and PDF"
+
+deepseek:
+  deepseek-flash:    {images: true, documents: false}   # V4.1-Flash: "Vision ✓"; "File inputs are not supported"
+  deepseek-v4-flash: {images: true, documents: false}   # legacy name, "served by the DeepSeek-V4.1-Flash-1017 model"
+  deepseek-v4-pro:   {images: false, documents: false}  # pricing table: Vision "Not supported"
+
+zai:
+  glm-5.3:       {images: false, documents: false}    # "currently supports text-only inputs"
+  glm-5.3-flash: {images: true, documents: true}      # "Input Modality: Video / Image / Text / File"
+  glm-5.2:       {images: false, documents: false}    # "Input Modalities: Text"
+
+dashscope:
+  qwen3.8-max:  {images: true, documents: true}       # "Image, Text, Video"; input_file supported
+  qwen3.7-plus: {images: true, documents: false}      # "Image, Text, Video"; not in input_file list

@@ -1,6 +1,6 @@
 """Live: a chained analysis keeps its whole provenance chain when agents pass results by ``$ref``.
 
-Opt-in (``AUTO_RESEARCH_LIVE_REF_CHAIN_TESTS=1``), real model calls, production wiring throughout:
+Opt-in (``--live``), real model calls, production wiring throughout:
 ``attach_worker_runtime`` (each worker's sandbox, registry and receipt store), ``attach_channel``
 (the quick channel, so a brief's handles are viewable), the cost meter, the real toolkit
 (``xspec_utils``: extract → fit → Faraday limits → plot on local IXPE data), and for B2 the
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import uuid
 from pathlib import Path
@@ -29,10 +28,7 @@ from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_REF_CHAIN_TESTS") != "1",
-    reason="live ref-chain cells are opt-in: AUTO_RESEARCH_LIVE_REF_CHAIN_TESTS=1",
-)
+pytestmark = pytest.mark.live
 
 LOG = "ref_chain"
 

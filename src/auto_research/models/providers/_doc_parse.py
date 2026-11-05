@@ -6,8 +6,9 @@ image. The text from each page is extracted and provided alongside each page's i
 "The API extracts both text and page images and sends both to the model"). Alibaba publishes no
 route we can use: its Create-a-response reference accepts ``input_file`` by ``file_url`` (a public
 URL) only, and restricts PDF input to ``qwen3.5-ocr``. Our papers are local files with no public
-URL. So for that seat the same two channels have to be assembled here instead, which is what this
-module does — it is not a downgrade bolted onto one vendor, it is the other two vendors' own
+URL. So for that seat — and for any member whose vendor reads no PDF itself (DeepSeek, Z.AI), as
+the model-input sanitiser decides (``models.sanitise``) — the same two channels have to be
+assembled here instead, which is what this module does — it is not a downgrade bolted onto one vendor, it is the other two vendors' own
 behaviour reproduced where the vendor does not provide it.
 
 **Why not extract the embedded images.** Scientific plots are *vector* content: matplotlib's PDF
@@ -36,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,6 +88,12 @@ def cache_root() -> Path:
     return (runtime_data_dir() / "parsed_docs").resolve()
 
 
+#: Cache entries whose parse failed in this process; a later call answers ``None`` at once.
+_FAILED: set[Path] = set()
+#: Held around the cache check and the parse, so parses in concurrent threads never overlap.
+_PARSE_LOCK = threading.Lock()
+
+
 def parse_document(document: DocumentRef, *, root: Path | None = None) -> ParsedDocument | None:
     """Text and figure crops for ``document``, or ``None`` when it cannot be parsed.
 
@@ -107,13 +115,21 @@ def parse_document(document: DocumentRef, *, root: Path | None = None) -> Parsed
         return None
     actual = hashlib.sha256(read.data).hexdigest()
     base = Path(root).resolve() / actual if root is not None else cache_root() / actual
-    parsed = _read_cache(base)
-    if parsed is None:
-        try:
-            parsed = _run_docling(document, base, data=read.data)
-        except Exception:  # noqa: BLE001 — an unparseable attachment degrades, never crashes
-            shutil.rmtree(base, ignore_errors=True)
+    # One parse at a time: seats sanitise in worker threads (A3), and two parses of one paper
+    # would write, and on a failure delete, the same cache folder.
+    with _PARSE_LOCK:
+        if base in _FAILED:
+            # Parsed once in this process and failed: the same answer on every later call, so a
+            # replayed turn stays byte-identical and no call pays the parse again (A2 review).
             return None
+        parsed = _read_cache(base)
+        if parsed is None:
+            try:
+                parsed = _run_docling(document, base, data=read.data)
+            except Exception:  # noqa: BLE001 — an unparseable attachment degrades, never crashes
+                shutil.rmtree(base, ignore_errors=True)
+                _FAILED.add(base)
+                return None
     if read.note:
         parsed = replace(parsed, text=f"{read.note}\n\n{parsed.text}")
     return parsed
@@ -296,21 +312,15 @@ def check_document_parser_ready() -> None:
     it is satisfiable and unproven at the same time, which is what that tier exists for.
     """
     from auto_research.models import load_registry
-    from auto_research.models.providers import provider_for
+    from auto_research.models.providers import media_capability
     from auto_research.preflight import PreflightWarning
 
     registry = load_registry()
     needs_parsing = False
-    for role in registry.config.roles:
-        for handle in registry.resolve(role).handles:
-            config = handle.config
-            if not getattr(config, "documents", False):
-                continue
-            try:
-                vendor = getattr(provider_for(config.provider), "vendor", None)
-            except Exception:  # noqa: BLE001 — a provider this run cannot build is not our check
-                continue
-            if vendor is not None and not vendor.accepts_inline_documents:
+    for group in registry.config.roles.values():
+        for config in group.members:
+            # A harness member (the coder) is never a chat call, so it is never sent a document.
+            if config.harness is None and not media_capability(config).native_documents:
                 needs_parsing = True
     if not needs_parsing:
         return

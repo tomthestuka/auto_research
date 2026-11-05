@@ -1,11 +1,11 @@
 """Opt-in LIVE tests of the lead<->coder channel: the blocking `wait_coder` and queued `drive_coder`.
 
-    AUTO_RESEARCH_LIVE_CODER_WAIT=1 pytest tests/test_live_coder_wait.py -s
-    AUTO_RESEARCH_LIVE_CODER_WAIT=1 pytest tests/test_live_coder_wait.py -s -k mechanism   # cheap
+    pytest tests/test_live_coder_wait.py --live -s
+    pytest tests/test_live_coder_wait.py --live -s -k mechanism   # cheap
     # the lead cells, once per seat (one draw each):
-    AUTO_RESEARCH_LIVE_CODER_WAIT=1 pytest tests/test_live_coder_wait.py -s -k lead
-    AUTO_RESEARCH_LIVE_CODER_WAIT=1 AUTO_RESEARCH_SEATS='analyst_lead=openai:gpt-5.6-terra' \\
-        pytest tests/test_live_coder_wait.py -s -k lead
+    pytest tests/test_live_coder_wait.py --live -s -k lead
+    AUTO_RESEARCH_SEATS='analyst_lead=openai:gpt-5.6-terra' \\
+        pytest tests/test_live_coder_wait.py --live -s -k lead
 
 **Why.** Slot 6 (2026-09-15, `gpt-5.6-terra` lead, $20.43 — the run's most expensive role) made
 134 `check_coder` calls (114 refused by a 900 s rate limit), 47 mid-turn steers, 31 refused
@@ -49,10 +49,7 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_CODER_WAIT") != "1",
-    reason="set AUTO_RESEARCH_LIVE_CODER_WAIT=1 to spend provider tokens on the coder-wait cells",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

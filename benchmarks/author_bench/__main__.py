@@ -177,7 +177,6 @@ def probe_chat_member(provider_name: str, model: str) -> str | None:
         name=f"preflight_{provider_name}",
         provider=provider_name,
         model=model,
-        vision=False,
         parameters=(
             {"max_tokens": 16}
             if provider_name == "anthropic"

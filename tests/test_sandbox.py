@@ -735,7 +735,7 @@ class TestShellServerJail:
         assert old_run["exit_code"] != 0, "the shell can write another run's folder"
         assert authoring["exit_code"] != 0, "the shell can write the run's authoring control files"
         if ";" in (server["env"].get("PFILES") or ""):  # a HEASoft-style stack is configured
-            assert pfiles["stdout"].startswith("/tmp/pfiles;"), pfiles  # its own, not a shared one
+            assert pfiles["stdout"].startswith("/tmp/pfiles/call-"), pfiles  # this command's own (G4)
 
     def test_the_shell_can_look_into_a_built_environment_and_not_write_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -871,7 +871,7 @@ class TestShellServerJail:
         assert write_cwd["exit_code"] == 0 and (workdir / "ok").is_dir(), write_cwd
         assert write_sibling["exit_code"] != 0, "a REPL can write another worker's folder"
         if ";" in pfiles["stdout"]:  # a HEASoft-style stack is configured
-            assert pfiles["stdout"].startswith("/tmp/pfiles;"), pfiles
+            assert pfiles["stdout"].startswith("/tmp/pfiles/call-"), pfiles  # this call's own (G4)
 
     def test_the_gate_runs_tests_with_a_private_tmp_and_its_worktree_bound(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1136,3 +1136,53 @@ def test_the_shell_reads_no_in_tree_bytecode(tmp_path, monkeypatch):
     else:
         assert prefix == str(Path(cfg["private_tmp"]) / "ar-pycache")  # never the shared host /tmp
 
+
+def test_each_shell_command_gets_its_own_empty_parameter_folder(tmp_path, monkeypatch):
+    """G4: `bash_exec` runs every command with a fresh HEASoft user folder in `PFILES` (the system
+    half kept), so a learned value one command writes never reaches the next."""
+    import auto_research.sandbox.builtin_server as bs
+
+    monkeypatch.setenv("PFILES", f"{tmp_path / 'shared'};/opt/heasoft/syspfiles")
+    first = bs.bash_exec('echo "$PFILES"; echo learned > "${PFILES%%;*}/fit.par"; ls "${PFILES%%;*}"')
+    second = bs.bash_exec('echo "$PFILES"; ls "${PFILES%%;*}"')
+    one, two = first["stdout"].split()[0], second["stdout"].split()[0]
+    assert one != two and one.endswith(";/opt/heasoft/syspfiles") and two.endswith(";/opt/heasoft/syspfiles")
+    assert "fit.par" in first["stdout"] and "fit.par" not in second["stdout"], (first, second)
+    assert not Path(one.split(";")[0]).exists()  # removed after the command
+    assert Path(one.split(";")[0]).parent == tmp_path / "shared"  # inside the process's own user half
+
+
+def test_each_repl_call_gets_its_own_empty_parameter_folder(tmp_path, monkeypatch):
+    """G4: the worker REPL gives every toolkit call a fresh parameter folder and puts its own back
+    after the call; a value one call learns is absent in the next."""
+    from auto_research.sandbox.persistent import PersistentSandbox
+
+    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: False)
+    toolkit = tmp_path / "tk"
+    (toolkit / "demo_pf").mkdir(parents=True)
+    (toolkit / "demo_pf" / "__init__.py").write_text(
+        "import os\n"
+        "def learn():\n"
+        "    user = os.environ['PFILES'].split(';')[0]\n"
+        "    before = sorted(os.listdir(user))\n"
+        "    open(os.path.join(user, 'fit.par'), 'w').write('learned')\n"
+        "    return {'stdout': 'ok', 'pfiles': os.environ['PFILES'], 'before': before}\n")
+    ini = tmp_path / "heasoft_init.sh"  # an activation that sets PFILES the way headas-init does
+    ini.write_text(f'export PFILES="{tmp_path / "shared"};/opt/heasoft/syspfiles"\n')
+    import sys
+
+    sandbox = PersistentSandbox(toolkit, tmp_path / "w", analyze_env=sys.prefix, analyze_ini_sh=str(ini))
+
+    async def run():
+        await sandbox.start()
+        try:
+            return [await sandbox.call_tool("demo_pf", "learn", {}) for _ in range(2)]
+        finally:
+            await sandbox.shutdown()
+
+    first, second = asyncio.run(run())
+    assert first["exit_code"] == 0 and second["exit_code"] == 0, (first, second)
+    assert first["pfiles"] != second["pfiles"] and second["pfiles"].endswith(";/opt/heasoft/syspfiles")
+    assert first["before"] == [] and second["before"] == []  # the learned value did not carry over
+    own = Path(first["pfiles"].split(";")[0]).parent  # the REPL's private user half (F23), never a shared /tmp
+    assert own.name == "pfiles" and own != Path("/tmp/pfiles") and own != tmp_path / "shared", own

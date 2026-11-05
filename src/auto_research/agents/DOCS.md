@@ -53,8 +53,12 @@ then produces the role's structured output grounded in the trajectory (both reus
 the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst science
 tools in the `PersistentSandbox`; every call's arguments are the model's completed by the runtime —
 the `bash_exec` folder and shell environment, a configured mission folder, figure outputs under
-the worker's `figures/` — through `provenance.calls.resolve_call_args` over the call's context
-(`_call_context`, which also records the manifest's parameter `defaults`), returned as
+the call's own folder (2026-11-04; the worker's `figures/` before), every `output`-kind argument in the call's own folder
+`<cwd>/products/<fn>/<call id>/` (made before the call; the call id is allocated before it runs and
+is the one its receipts carry) — through `provenance.calls.resolve_call_args` over the call's context
+(`_call_context`, which also records the manifest's parameter `defaults` and the obs-db folders a
+`<mission>_path` argument and an `obs_db_root` argument (`OBS_DB_ROOT_ARG`, H2) take when the
+model leaves them out), returned as
 `ToolOutcome.call_context` and recorded on the `tool_result` ledger line, so the ledger rebuilds
 the arguments the call ran with. Before a toolkit call runs, `_validated` is the unit's input
 validator (`provenance.inputs`): the model's arguments are checked against their declared kinds,
@@ -415,10 +419,31 @@ leaves the turn whole (`*.compaction_failed`) and waits four calls. Never while 
 coding link open. **The lead's coding links are segment bounds** (B14 (c)): a link closes inside
 the tool call that ends it, and at the next complete tool round `_ChainDriver.apply_cut` keeps the
 conversation up to the opening call word for word, rewrites its answer to the link's outcome (the
-summary plus what the closing call answered) and removes the link — coder transcript and closing
-turn — from the end; `close()` applies the last one after the loop. `pin_text` (code, not the
+summary plus what the closing call answered, then what code restates) and removes the link — coder
+transcript and closing turn — from the end; `close()` applies the last one after the loop. `pin_text` (code, not the
 summariser) lists the task's receipt and the receipts the turn produced, each marked evidence or
-a record of where the agent looked; a condensed turn-boundary seed pins every receipt the earlier
+a record of where the agent looked. **What code restates after every cut (C4):** after
+`compaction.RESTATED_MARK`, the seat's exchange with the human word for word
+(`AgentRole.human_exchange`: every text it sent the human and every human text it was shown,
+recorded at the inbox drain and in `ChannelTools`' message-to-human branch, started from the
+ledger's `channel.message`/`channel.reply` events by `history.human_exchange` for a seat in a new
+process; labelled as direction to follow, never a receipt), and for the lead its chain
+(`_ChainDriver.state_text`: each brief's tool, state — running, committed `<sha10>`, ended
+uncommitted, never attempted, queued — any patch its close saved (a failed reset said as such),
+version, lock (in words) and receipt; the credits
+left; the briefs of earlier cycles as they ended). It follows the summary at the coding-span cut
+(the whole exchange, since a later cut rewrites the same answer), at the segment boundary and at
+server compaction (`pin_text(state=)`, via `_pin_state`), and after every turn-boundary seed,
+condensed or not (an index line shortens a long earlier answer, so the block follows whole); it
+sits between `RESTATED_MARK` and `RESTATED_END` (`compaction.restated`), and every summariser's
+input (`render_middle`, the coding-span `_render_span`, `_condensed_transcript`) takes each block
+out and reads `HUMAN_PLACEHOLDER` where the human spoke (`for_summariser`, ruling C4b; both
+compactor prompts say so), so no summary restates or contradicts what code restates. A human
+text is kept in the exchange when it is shown, so one put back unshown (D5) is kept once; a new
+process restores the exchange from the ledger — what the seat sent the human
+(`channel.message`) and every human text it was shown, steers included (the injection records) —
+and the lead its earlier cycles' chain lines (`analyst.lead.chain_state`, recorded as each cycle
+ends; `history.chain_states`); `_chain_driver` is released even when the driver's close raises; a condensed turn-boundary seed pins every receipt the earlier
 turns hold (R10, read from the rebuilt turns: each output's receipt, its figures', the papers its
 tools opened, the figures handed in — never a handle merely quoted in a text). A paper a tool opens
 is pinned by its receipt (`_paper_handle`). The latest round's figures and documents ride the
@@ -493,10 +518,73 @@ Role wrappers:
     first link's session; the turn continues. Before A7 every action open while authoring ended
     the whole cycle, which is how slot 1 finished an analysis with 11 of 12 author credits
     unspent.
+  - **Each link is a brief report of the turn (C3, ruling Q3).** `execute_author_chain` files one
+    `BriefReport` per link into `LeadCycle.briefs` (ids `spec1`, `spec2`, … in filing order; the
+    lead's `ReportWorkspace.briefs` is the same dict) and appends the ids to `LeadCycle.queue` after
+    any links still waiting (ruling (a)); with a link running it only queues. `edit_report` /
+    `write_report` take `report` (default `result`, the lead's report; declared only with
+    authoring on, `briefs=True`, so other roles' schemas are unchanged) and edit a brief as a
+    `TOOLSPEC_BLOCKS` document (`_edit_brief`: schema on every edit; `proposed_tool_name` and
+    `target_domain` refused while a session is bound, ruling (b); a locked brief refuses). The
+    driver opens links from the queue and binds each session to its brief by id
+    (`session.brief`, `brief.bound`); `_ChainDriver.index` is gone, so a later chain opens its own
+    links (C5). `outcome.decision.tool_specs` lists the attempted briefs in opening order, aligned
+    with `outcome.authored`, each as locked at its link's end (the version the attempt was given),
+    then the unopened ones (`_chain_decision`). A link is filed as its brief document reads it back
+    (`_as_brief_value`: a value the document would change or refuse, such as a ':' in a check's
+    kind or a text line written as a '# ' header, is refused at filing by field; surrounding
+    whitespace is normalised); a dataset line is `- MISSION | OBSID` (`| synthetic`). A brief's
+    version hash is the sha256 of its document, so the reviewed version is its receipt's bytes. A
+    link that ends uncommitted — its submissions spent, or its session never opening — locks its
+    brief as the attempt was given ("link_end", ruling 2026-11-04), so an edit is refused saying
+    its link ended. Each submission and rebuttal runs the brief's validator before the gate or the
+    review (`_brief_unready`, `LeadCycle.brief_viewable`; nothing is spent on a refusal), since a
+    commit locks it. A brief locks at its link's commit (`AuthoringSession.commit`), at its link's
+    end, or at `turn_end` (a link never attempted; a queued brief no link can open any more —
+    no credit left, or the chain stopped — is `stranded` at once, its validator then waived, and
+    an edit says so, ruling C3c); when it locks it is minted once
+    (`mint_brief`: kind `result`, produced by `toolspec`, "a tool brief", never evidence), so
+    `view_receipt` shows it, and the commit receipt names it (`toolspec`, parent) and the version
+    the co-lead reviewed (`toolspec_sha256`).
+  - **`turn_end` validates and locks every report of the turn (ruling Q3, every unit).** The
+    lead's validator adds `turn_brief_problems` (each unlocked brief's `brief_problems`: handles
+    only, no number grounding); an accepted `turn_end` runs `execute_turn_end(lock=…)`:
+    `lock_turn_reports` sets `ReportWorkspace.locked` and locks and mints every brief, for the
+    worker and the reviewer too, and the librarian's provider locks its report the same way; a
+    locked report refuses `write_report`/`edit_report`.
   - **The chain advances on a tool result.** `_ChainDriver.advance` (wired to
     `LeadCycle.advance_chain`) closes the finished link — committed, or its review submissions
     spent — records its `MergeFlowResult`, and opens the next, returning the sentence the lead
-    reads. When the chain runs out it says so and points at `edit_report` + `turn_end`. Every
+    reads. Every commit advances: a direct approval in `_submit_now` and a persuaded rebuttal in
+    `execute_respond_to_review` (which takes the cycle for this) both land through
+    `_commit_and_advance`, the one commit tail (commit, environment note, `_advance`), each with
+    its own headline. A link whose submissions are spent is told the session's commits
+    (`session.commits`, tool → SHA) or that it did not commit, and, when the close reset
+    uncommitted work, where the patch was saved (`session.reset_patch`); both are read after
+    `_advance` closed the session. In a cycle a commit always advances, so a spent link has no
+    commits and the patch is named; outside one (`drive_authoring`, which closes its session
+    later) a spent session may list its commits and names no patch. A reset that failed is said
+    as such: the toolkit tree may still hold the work, and the patch is named when one was saved
+    (`session.reset_failed`, C2b). A session whose close raises (`_ChainDriver._close_current`
+    records `analyst.tool.close_failed`) is told in the closing call's result, with whether the
+    toolkit tree is clean (`pending_changes()`), and the chain goes on to its next link (which
+    opens only on a clean tree), so a commit that call landed keeps its receipt; the session
+    moves from `run_control.authoring_session` to `run_control.unclosed_sessions`, which the run's
+    teardown closes again (C2c). A next link that cannot be opened is named in the same result,
+    with why and that it used an author credit (C2c); a dirty-tree refusal
+    (`ToolkitBranchUnclean`) is one fixed sentence ("the toolkit tree still holds uncommitted
+    changes", the refusal's own text stays in the ledger) and stops the chain: `_ChainDriver.blocked`
+    answers every later advance, a new brief included, with no link opened and no credit spent
+    (C2d). A session whose `connect()` raises in `_open` is closed before the refusal is handled;
+    if that close fails, or a cancel (a /stop) lands during `connect()`, the session goes to
+    `run_control.unclosed_sessions` for the bounded teardown instead (C2d). A reset whose patch could not be saved is
+    said as such ("cleared from the toolkit; saving them as a patch failed",
+    `session.reset_save_failed`). `execute_respond_to_review` answers a working coder with no
+    blocking wait as `execute_submit` does. `execute_respond_to_review` waits for a working coder
+    and its narration leads every outcome (`_respond_now` is the review/re-gate/commit half), as
+    `execute_submit` does with `_submit_now`. The submission cap is per link, because each link
+    is its own session. When the chain runs out it says so and points at `edit_report` +
+    `turn_end`. Every
     session lifecycle and every git operation stays in Python (§9.9); the model asks for the next
     link, it never builds one.
   - **`turn_end` validates** through `lead_turn_problems` (above): no report, `rework` without a
@@ -550,7 +638,7 @@ Role wrappers:
   backing model exposes it; ReAct loops additionally emit visible per-tool
   result summaries at `chatter=7`.
 - Live role verification is opt-in:
-  `AUTO_RESEARCH_LIVE_AGENT_TESTS=1 pytest tests/test_live_agents.py -s`.
+  `pytest tests/test_live_agents.py --live -s`.
   It runs one real model call for each role and writes JSONL plus Markdown logs
   under `logs/dev/step-8/`.
 
@@ -613,9 +701,10 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
   `WAIT_FOR_REPLY_TOOL`, `CHANNEL_TOOLS`; `message_tool_def(directory)` (a `coder` address adds the
   instruction note and `mid_turn`), `list_peers_tool_def()`, `execute_list_peers(router, sender,
   label)`, `execute_coder_message(session, text, *, mid_turn=False)`, `view_receipt_tool_def()`,
-  `wait_for_reply_tool_def()`; `execute_view_receipt(store, arguments, *, images_ok)` (any receipt
-  of the run: a figure as its image, a paper as its PDF document, text paged; mints and admits
-  nothing); `execute_wait_for_reply(run_control, agent_key,
+  `wait_for_reply_tool_def()`; `execute_view_receipt(store, arguments)` (any receipt
+  of the run: a figure as its image with its handle on the ref, a paper as its PDF document ("— the
+  paper follows"), text paged; mints and admits nothing; what the model receives is the model-input
+  sanitiser's decision, A3); `execute_wait_for_reply(run_control, agent_key,
   arguments, *, outstanding)` (a seat with no coder; `execute_wait_coder` serves the lead's coder).
 - `ReviewerAgent` — the reviewer as a unit. Method: `review(...)` (see Interfaces); attributes
   `receipts`, `report_dir`.
@@ -682,14 +771,26 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
   `MEDIA_BYTES_FRACTION`, `CompactionPlan` (`as_part`),
   `plan_compaction(messages, task_index, keep_recent=, keep_discovery=)`, `apply_compaction`,
   `summary_message`, `summary_text`, `render_middle`,
-  `pin_text(task_receipt, produced, task=, earlier_turns=False)`,
+  `pin_text(task_receipt, produced, task=, earlier_turns=False, state=None)`, `RESTATED_MARK`,
+  `human_exchange_text(exchange)`; `history.human_exchange(source, actor, run_id=)`;
+  `AgentRole.human_exchange`, `_note_human`, `_note_inbox`, `_pin_state` (the lead's adds
+  `_ChainDriver.state_text`/`state_lines` and its earlier cycles' briefs),
   `is_discovery_turn`, `has_server_compaction`. `_ChainDriver.apply_cut(messages)`,
   `_ChainDriver.pending_cut`; `_compact_coding_span(messages, mark, summary)`.
-- `ProviderTurnFailed(*, agent, action, cause)` (D1, CLAUDE.md §9.3.8) — raised by
-  `AgentRole._react_loop` when `ModelHandle.call` raises a provider error
-  (`models.retry.is_provider_error`: a 400 such as "prompt is too long", a 401, a transient
-  condition whose retry budget is spent). Before raising, the loop records
-  `<role>.<action>.provider_error` (level 1: `error`, `error_type`, `status_code`, `iteration`,
+- `ModelCallFailed(*, agent, action, cause, provider="")` (`provider`: the failing seat's vendor,
+  set by `_react_loop`, A4b; `account_wide`: status 401/403 or every key spent, in that vendor's
+  vocabulary — the run-ending class, ruling (c); `cycle_outcome`: the lead's `LeadCycleOutcome`
+  when it left `run_cycle`, so the debate charges the credits that cycle spent, C3b; the co-lead's
+  verdict call in `AnalystColeadAgent.review_tool` is contained into it as the loop's calls are)
+  (D1, CLAUDE.md §9.3.8; widened by A4,
+  2026-11-04) — raised by `AgentRole._react_loop` when `ModelHandle.call` raises **any**
+  `Exception`: a provider error retry does not fix (a 400 such as "prompt is too long", a 401, a
+  transient condition whose retry budget is spent) or a refusal before the provider (the
+  `ValueError` refusing a medium, which ended run polevo-20261104; since A2 the model-input
+  sanitiser hands that medium on as the member can take it).
+  A cancel (`BaseException`) passes untouched, and `ReactBudgetExhausted` is the loop's own raise,
+  never the call's. Before raising, the loop records
+  `<role>.<action>.model_call_failed` (level 1: `error`, `error_type`, `status_code`, `iteration`,
   `budget_used`, `filed: false`, `requeued_texts`). Texts the failed call carried are in that
   turn's ledger history and reach the worker's next turn through it (B2); texts still held for an
   unresolved server tool go back to the inbox (`_requeue_unread`). It clears the kept turn (E12)
@@ -707,9 +808,9 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
   `None`, and the librarian raises. Per turn because `last_filed_form` is shared with a background
   resume of the same seat.
 - **Texts never shown (D1, D5).** `_react_loop` keeps the inbox entries it drained but has not yet
-  shown the model (`unshown`, arrival order; cleared when they are injected). When a provider error
-  ends the turn (D1) or an accepted terminal ends it (D5), `_requeue_unread(entries)` puts them
-  back in the inbox as they arrived (sender, kind, handles), so a later turn renders each once;
+  shown the model (`unshown`, arrival order; cleared when they are injected). When a failed model
+  call ends the turn (D1, A4) or an accepted terminal ends it (D5), `_requeue_unread(entries)` puts
+  them back in the inbox as they arrived (sender, kind, handles), so a later turn renders each once;
   grace countdowns, coder events and compaction pins are not inbox entries and stay with their
   turn. `*.filed` records `requeued_texts`.
 - `_one_turn_at_a_time` — decorator on `analyze`, `run_cycle`, `research`, `review`, `resume` and
@@ -907,3 +1008,141 @@ entries) and 2026-10-19 (every entry); detail in git history.
 - 2026-11-03 — One citing syntax (build item 9): `_ANALYST_EVIDENCE`, the report-document hints,
   `REVIEWER_EDIT_DESCRIPTION` and `read_paper`'s description and reply teach `{{handle}}`,
   `{{handle#/key}}`, `{{handle#/$args/<name>}}` and `{{handle "…"}}`; no text teaches `[handle]`.
+- 2026-11-04 — C1 (run polevo-20261104): a commit after a persuaded rebuttal advances the chain.
+  `execute_respond_to_review(session, arguments, cycle=None)` ends its commit with `_advance(cycle)`,
+  as `_submit_now` does, and `ReadOnlyToolProvider._execute` passes `self.cycle`; before, the
+  committed link's session stayed open and the lead briefed the next link into it. Tests:
+  `tests/test_chain_advance.py` (the lead's real `run_cycle` over real `AuthoringSession`s).
+- 2026-11-04 — A4 (run polevo-20261104; ruling: an exception a model call raises ends that unit as
+  an honest failure, never the run): `_react_loop` contains every exception `ModelHandle.call`
+  raises as `ProviderTurnFailed` (the `is_provider_error` filter is gone), recorded as
+  `<role>.<action>.provider_error` with `error_type`; the summary names the type. Graph
+  consequences unchanged in this step: a worker's is contained by the debate, a lead's,
+  librarian's or reviewer's still ends the run through `run.error` (routing a failed lead or
+  librarian pass to the reviewer awaits a ruling). The tool schemas are built before the guarded
+  call, so a fault in our own schema code fails as itself.
+  Tests: `tests/test_provider_containment.py`.
+- 2026-11-04 — `SandboxToolProvider` places `output`-kind arguments (plan item B1): `execute`
+  allocates the call id before the call, `_call_context(kind, call_id)` records `output_args` and
+  `products_dir` (a call with outputs and no `cwd` is refused; a declared output wins over a legacy
+  `FIGURE_PATH_ARGS` name), the folder is made before the tool runs, `_inputs_before` skips output
+  arguments, and `receipt_call(call_id=)` stamps the same id. `_made_products_dir` makes the
+  folder only when no part below `cwd` is a link out, and turns a failed `mkdir` into an error
+  result (review of B1).
+- 2026-11-04 — A4 cleanup: `ProviderTurnFailed` → `ModelCallFailed`, event
+  `<role>.<action>.provider_error` → `<role>.<action>.model_call_failed` (it carries refusals
+  before the provider too).
+- 2026-11-04 — C2: one commit tail, `_commit_and_advance(session, review, cycle, headline)`, used by
+  `_submit_now` and `_respond_now` (lead-visible wording unchanged). The budget-spent message names
+  the session's commits (tool → SHA) instead of always "it did not commit", and the patch the close
+  saved the uncommitted work to. `execute_respond_to_review` puts the coder's narration on every
+  outcome, as `execute_submit` does. Tests: `tests/test_chain_advance.py` (C2 cases, the per-link
+  submission cap included). `drive_authoring`'s lead-visible text changed on 2026-11-04 in two
+  cases only (ruled corrections; read `author_bench` numbers from before and after with this in
+  mind): a session that committed and then spent its cap is told its commits, and a rebuttal made
+  while the coder works carries the coder's narration on every verdict (it was dropped before).
+- 2026-11-04 — B2: `SandboxToolProvider` passes a toolkit call's declared `products`
+  (`capture.parse_products`) and its `products_dir` to `receipt_call`, puts the dropped ones in the
+  `[provenance]` note, and places figure arguments in the call's own folder (`figures_dir` and
+  `stamp_ms` retired from the context; the folder is made for figures as for outputs).
+- 2026-11-04 — A1: `ChannelTools`' `view_receipt` reads `images_ok` from the member's adapter-declared
+  capability (`models.providers.media_capability`), not `config.vision`.
+- 2026-11-04 — C2b: the budget-spent message says when the reset of uncommitted work failed (the
+  toolkit tree may still hold it; the saved patch named). `_ChainDriver._close_current` contains
+  an exception from `session.aclose()` (recorded `analyst.tool.close_failed`, told to the lead,
+  `advance` → close + new `_open_next`), so the closing tool call returns and its commit receipt
+  is minted. `execute_respond_to_review` has `execute_submit`'s guard for a working session with no
+  `wait_for_event`. The close note states whether the toolkit tree is clean. Tests:
+  `tests/test_chain_advance.py` (C2b cases).
+- 2026-11-04 — A2: `_react_loop` passes `viewers=` (`_image_viewers`: the seat's channel peers whose
+  members take images, sorted) to `ModelHandle.call` for a seat whose member takes no images, for
+  the sanitiser's note; a text-only seat handed a figure or a paper continues (no refusal).
+- 2026-11-04 — C2c: the budget-spent message says when the tree was cleared but its patch could
+  not be saved; `_ChainDriver._open_next` names a link that cannot be opened (which, why, one
+  author credit used) in the result that closed the previous link; `_close_current` moves a
+  session whose close raised to `run_control.unclosed_sessions` for the run's teardown.
+- 2026-11-04 — A3: `execute_view_receipt` hands any medium on (its `images_ok` gating is gone; the
+  sanitiser decides), a figure's ref carries its receipt handle, and a paper's text reads "— the
+  paper follows" (also `PaperReader` and `execute_read_file`), true for a native PDF and for a parse.
+- 2026-11-04 — C2d: a dirty-tree refusal to open a link is one fixed sentence and stops the
+  chain (`_ChainDriver.blocked`, checked first in `_open_next`); `_open` closes a session whose
+  `connect()` raised, and hands it to `run_control.unclosed_sessions` when that close fails or a
+  cancel lands during `connect()`.
+- 2026-11-04 — A4b prelude: `execute_view_receipt` hands a `data` receipt whose bytes are a PDF (a
+  file a human sent; `_is_pdf`: its mime type, else the `%PDF-` magic) on like a paper.
+- 2026-11-04 — A4b: `ReviewerAgent.review(failure=)` and `_ARRIVED` gain `librarian_failed` /
+  `analysts_failed`: the reviewer's turn says the pass ended without a report and counts as one of
+  the team's, with the runtime's notice naming the unit and the exception (navigation).
+- 2026-11-04 — C3 (ruling Q3): a ToolSpec is a brief report of the lead's turn. New `BriefReport`,
+  `RESULT_REPORT`, `TOOLSPEC_PRODUCER`, `brief_problems`, `turn_brief_problems`, `mint_brief`,
+  `lock_turn_reports`; `ReportWorkspace.briefs`/`locked`/`viewable`; `LeadCycle.briefs`/`queue`;
+  `edit_report_tool_def`/`write_report_tool_def(briefs=)` add the `report` target;
+  `execute_turn_end(lock=)`; `execute_author_chain` files and appends; `_ChainDriver` opens from
+  the queue (`index` removed, `attempted`), binds sessions by brief; `_chain_decision`; the commit
+  receipt names the brief and its reviewed version; `report_edit.TOOLSPEC_BLOCKS` with block kinds
+  `datasets` and `checks`. Tests: `tests/test_brief_reports.py`.
+- 2026-11-04 — C3 review: briefs filed as their document reads them back (`_as_brief_value`);
+  dataset lines `MISSION | OBSID`; `BriefReport.sha256` hashes the document (the receipt's bytes);
+  the brief's validator runs before its commit; `BriefReport.ended` and `_ChainDriver.ran` (the
+  decision pairs a failed link with the version it ran); the run-ending close unbinds the brief.
+- 2026-11-04 — C3 rulings: a link that ends uncommitted locks its brief ("link_end", minted then;
+  `BriefReport.ended` and `_ChainDriver.ran` removed); the brief's validator runs before the gate
+  and before a rebuttal's review (`_brief_unready`), so a refused brief spends no submission.
+- 2026-11-04 — C3b: `ModelCallFailed.account_wide` and `.cycle_outcome` (set by `run_cycle` before
+  the failure leaves it); `AnalystColeadAgent.review_tool` contains its verdict call (any exception
+  but `ValidationError`/`ValueError`, `ModelCallFailed`, `ReactBudgetExhausted` becomes
+  `ModelCallFailed`); `_submit_now`/`_respond_now` return a co-lead `ModelCallFailed` as an error
+  result of the tool (`_colead_failure`; that call is not counted), and an account-wide one ends
+  the run as before. Tests: `tests/test_colead_failure.py`.
+- 2026-11-04 — C3b review: `review_tool` contains only a model failure (a vendor status, an
+  unreachable vendor, a verdict off-schema after its retries, which no longer reaches the
+  "could not read the changeset" arm); a fault in our own code is raised as itself.
+  `_colead_failure(exc, tool, cycle)` refunds a passing failure (`is_transient_provider_error`) and
+  counts one likely to recur, so the link's caps bound the retries; outside a cycle
+  (`drive_authoring`) it raises as before.
+- 2026-11-04 — C3c (rulings; review: a dirty-tree stop strands the queue at once, the
+  over-the-cap wording names the cap, an edit of a stranded brief says it will not open): a
+  passing co-lead failure is refunded at most `COLEAD_REFUNDS` (3)
+  times per session (`session.colead_refunds`), then it counts; a queued brief no link can open
+  any more (no author credit, or the chain stopped) is `BriefReport.stranded`
+  (`_ChainDriver._strand_queue`): `turn_end` locks it as what was never attempted, and its
+  validator blocks nothing. With that, no ToolSpec brief is open at an accepted `turn_end` (a
+  link always opens, ends or strands), so `turn_brief_problems` guards the mechanism for brief
+  types to come; a brief's handles are checked at each edit (a note) and before each submission.
+- 2026-11-04 — C4 (run polevo-20261104: a coding-span cut lost two human rulings, a commit and a
+  saved patch): every cut restates, after `RESTATED_MARK` and outside the summariser's input, the
+  seat's exchange with the human word for word (every unit, ruling A; all of it, ruling B) and the
+  lead's chain state (code-written, ruling C). `AgentRole.human_exchange` (+ ledger start),
+  `_pin_state`, `pin_text(state=)`, `human_exchange_text`, `history.human_exchange`,
+  `_ChainDriver.state_lines`/`state_text`/`patches`. Tests: `tests/test_chain_state_pin.py`.
+- 2026-11-04 — C4 review: every turn-boundary seed is followed by the restated block (condensed or
+  not); `RESTATED_END` and `compaction.restated`/`without_restated` (a block is cut out, what follows
+  it kept), applied to every summariser's input incl. `_render_span` and `_condensed_transcript`;
+  a human text is kept in the exchange when shown (D5's put-back no longer counts twice); state
+  lines name any saved patch, a failed reset and the lock in words.
+- 2026-11-04 — C4b: `compaction.HUMAN_HEADS`/`HUMAN_PLACEHOLDER`/`for_summariser` (every
+  summariser's input; `compactor.md` and `session_compactor.md` say so); `history.human_exchange`
+  reads the human texts a seat was shown from its injection records (steers included) and
+  `history.chain_states` the lead's `analyst.lead.chain_state` records; `AnalystLeadAgent` loads
+  `_earlier_chain` from them; the exchange is loaded at `_react_loop`'s start; `run_cycle`
+  releases `_chain_driver` when `driver.close()` raises.
+- 2026-11-04 — D3b: `SandboxToolProvider._route_environment` flags a call untested when its environment is a superseded build (`Environment.superseded`: an earlier definition kept in use because the current one did not build).
+- 2026-11-04 — C4b review: `_NESTED_HUMAN` matches a human text through its closing guidance
+  paragraph; a link the run ended (a stop) reads "its coding session ended with the run; the stop's
+  cleanup resets its work"; `run_cycle`'s finally restores the provider and releases the driver
+  even when the close raises, and a close failure after the cycle's own failure is recorded
+  (`analyst.lead.cleanup_failed`) without replacing it. Accepted limit: a provider that compacts
+  on its own side (Anthropic, OpenAI) hands its summariser the raw conversation, human texts
+  included; `session_compactor.md` covers both forms, and code restates the exchange after it.
+- 2026-11-04 — D3c: `list_env` rows carry `superseded: true` for a build of an earlier definition
+  kept in use (`envs.describe`), and its description says a tool's result there is flagged untested
+  env; `Environment.superseded` is now derived by the catalogue (sandbox/DOCS.md).
+- 2026-11-04 — `report_edit` `validation_data` hint: ' | synthetic' marks a `synth<YYMMDD>-<hex>` ObsID the coder's tests build in their fixture obs-db (user ruling S1).
+- 2026-11-04 — H2: `OBS_DB_ROOT_ARG`: `_observation_path_args` fills a toolkit argument named `obs_db_root` with the configured root (`<mission>_path` still from the mission folders that exist); `_inputs_before` never treats the root as a mission folder; `execute_data_catalog` on a root with no mission returns the root and that `acquire` creates a mission's folder on its first observation (`_empty_obs_db_note`).
+- 2026-11-04 — H2 review: the empty-root `data_catalog` note is an error result (no toolkit code ran, so the lead path mints no toolkit receipt).
+- 2026-11-04 — Z1f: `_media_trigger` counts a document's bytes only for a member sent documents
+  natively (`media_capability(member).native_documents`): a Qwen seat's papers travel as their
+  parse and no longer cut its history. Test: `tests/test_compaction.py`.
+- 2026-11-04 — Z1h review: `_media_trigger` counts images only for a member that takes them (`media_load(images=)`), so a text-only seat's withheld figures never cut its history.
+- 2026-11-04 — Item 2: the `submit_for_review` description names the toolkit's earlier fast tests among the gate's checks.
+- 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire.

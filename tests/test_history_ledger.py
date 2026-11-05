@@ -287,7 +287,13 @@ def _lead_turn(tmp_path, monkeypatch, script, links=1):
     cycle = LeadCycle(authoring_enabled=True, rounds_left=1)
     specs = [ToolSpec.model_validate({**GOOD_LINK, "proposed_tool_name": f"tool_{i}"})
              for i in range(links)]
-    cycle.brief = AuthoringDecision(should_author=True, tool_specs=specs, rationale="r")
+    # Filed as the lead files it (C3): one brief report per link, queued in order.
+    from auto_research.agents.react import execute_author_chain
+
+    asyncio.run(execute_author_chain(cycle, {
+        "first_link": specs[0].model_dump(mode="json"),
+        "additional_links": [s.model_dump(mode="json") for s in specs[1:]], "rationale": "r",
+    }))
     messages = [ModelMessage(role="system", content="lead"), ModelMessage(role="user", content="t")]
 
     class _Provider:

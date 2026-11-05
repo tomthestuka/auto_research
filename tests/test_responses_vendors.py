@@ -327,7 +327,7 @@ def _figure(tmp_path) -> FigureRef:
     from datetime import datetime
 
     path = tmp_path / "plot.png"
-    payload = png_bytes()
+    payload = png_bytes((16, 12))  # over Alibaba's 10 px minimum side (Z1g)
     path.write_bytes(payload)
     return FigureRef(
         path=path,
@@ -339,21 +339,27 @@ def _figure(tmp_path) -> FigureRef:
     )
 
 
-def test_an_image_is_withheld_with_a_note_on_deepseeks_text_only_endpoint(tmp_path):
-    """DeepSeek's Responses reference explicitly substitutes placeholders for image input.
+def test_deepseek_flash_receives_an_image_and_pro_gets_a_note(tmp_path):
+    """Z1h: "`deepseek-flash` processes `input_image` parts as real images"; `deepseek-v4-pro` is
+    Vision "Not supported" (its pricing table), so its figure becomes a model-visible note (A2)."""
+    from auto_research.models.types import ModelHandle
 
-    The figure becomes a model-visible note: an absence the model cannot see invites it to
-    invent the content.
-    """
-    cfg = RoleModelConfig(name="m", provider="deepseek", model="deepseek-v4-flash")
-    asyncio.run(DeepSeekProvider().call(_messages(), cfg, images=[_figure(tmp_path)]))
+    flash = RoleModelConfig(name="m", provider="deepseek", model="deepseek-flash")
+    asyncio.run(ModelHandle(role="analyst_worker", config=flash, provider=DeepSeekProvider()).call(
+        _messages(), images=[_figure(tmp_path)]))
     sent = json.dumps(_FakeResponses.last["input"])
-    assert "does not accept image input" in sent
+    assert "input_image" in sent and "data:image/png;base64," in sent
+
+    pro = RoleModelConfig(name="m", provider="deepseek", model="deepseek-v4-pro")
+    asyncio.run(ModelHandle(role="analyst_worker", config=pro, provider=DeepSeekProvider()).call(
+        _messages(), images=[_figure(tmp_path)]))
+    sent = json.dumps(_FakeResponses.last["input"])
+    assert "[withheld] Your model reads text" in sent
     assert "input_image" not in sent
 
 
 def test_qwen_max_receives_an_image_its_current_model_page_supports(tmp_path):
-    cfg = RoleModelConfig(name="m", provider="dashscope", model="qwen3.8-max", vision=True)
+    cfg = RoleModelConfig(name="m", provider="dashscope", model="qwen3.8-max")
     asyncio.run(DashscopeProvider().call(_messages(), cfg, images=[_figure(tmp_path)]))
     sent = json.dumps(_FakeResponses.last["input"])
     assert "input_image" in sent

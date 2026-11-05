@@ -42,9 +42,9 @@ def run(tmp_path, monkeypatch):
     from auto_research.sandbox import fs_guard
 
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
-    mission = tmp_path / "IXPE"
-    (mission / "01002901").mkdir(parents=True)
-    (mission / "01002901" / "evt2.fits").write_bytes(b"events")
+    mission = tmp_path / "ixpe"  # laid out as HEASARC's archive (H2)
+    (mission / "data/obs/01/01002901").mkdir(parents=True)
+    (mission / "data/obs/01/01002901" / "evt2.fits").write_bytes(b"events")
     (mission / "catalog.json").write_text(json.dumps({"entries": {"01002901": {"max_level": 2}}}))
     monkeypatch.setattr(react, "_observation_path_args", lambda: {"ixpe_path": str(mission)})
     root = tmp_path / "toolkit"
@@ -57,27 +57,27 @@ def run(tmp_path, monkeypatch):
 
     work = tmp_path / "w0"
     work.mkdir()
-    csv = work / "spectrum.csv"
-
     def tool(module, fn, args):
-        if "out_path" in args:
+        if "obsid" in args:  # the loader: writes its declared product into its own folder
             Path(args["out_path"]).write_text("E,counts\n2,10\n")
-            return {"exit_code": 0, "stdout": f"wrote {args['out_path']}"}
+            return {"exit_code": 0, "stdout": f"wrote {args['out_path']}",
+                    "products": [{"path": args["out_path"], "caption": "spectrum"}]}
         return {"exit_code": 0, "stdout": "PD = 4.02 ± 0.21 %\nchi2/dof = 1.8"}
 
     store = ReceiptStore(tmp_path / "receipts")
     ledger = tmp_path / "monitor.jsonl"
     registry = _FakeRegistry(known={LOAD, FIT}, mcp=set(),
                              schema={"properties": {"obsid": {"kind": "setting"}, "ixpe_path": {"kind": "path"},
-                                                    "out_path": {"kind": "path"}, "csv_path": {"kind": "path"},
+                                                    "out_path": {"kind": "output", "shape": "file"},
+                                                    "csv_path": {"kind": "path"},
                                                     "model": {"kind": "setting"}}})
     registry._root = root
     sandbox = _FakeSandbox(tool_fn=tool)
     tools = SandboxToolProvider(registry, sandbox, cwd=work, receipts=store,
                                 receipt_source="analyst_worker_0")
     worker = AnalystWorkerAgent(model=_Model([
-        ToolCall(id="c1", name=LOAD, arguments={"obsid": "01002901", "out_path": str(csv)}),
-        ToolCall(id="c2", name=FIT, arguments={"csv_path": str(csv), "model": "<b>tbabs</b>"}),
+        ToolCall(id="c1", name=LOAD, arguments={"obsid": "01002901", "out_path": "spectrum.csv"}),
+        ToolCall(id="c2", name=FIT, arguments={"csv_path": {"$ref": "analyst_worker_0:d1"}, "model": "<b>tbabs</b>"}),
     ]), prompt="p", monitor=RunMonitor(chatter=10, jsonl_path=ledger))
     worker.agent_key = "analyst_worker_0"
     asyncio.run(worker._react(seed_messages=[], tools=tools, action="analyze", cap=10))
@@ -152,7 +152,7 @@ def test_every_number_opens_the_chain_that_produced_it(tmp_path, run):
     # Two steps, oldest first: the load (its obs-db input, its file output), then the fit reading it.
     head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
     assert chain.index(f"1. {root.resolve()}/tk.load") < chain.index(f"2. {root.resolve()}/tk.fit")
-    assert "observation IXPE 01002901" in chain and "[analyst_worker_0:d1, step 1]" in chain
+    assert "observation ixpe 01002901" in chain and "[analyst_worker_0:d1, step 1]" in chain
     assert f"toolkit commit <code>{head.strip()}</code>" in chain
     assert "← the number is here" in chain
 
@@ -193,11 +193,15 @@ def test_copy_reproduce_code_carries_the_exact_arguments(tmp_path, run):
     fit = next(c for c in scan.codes if "research_toolkit.tk.fit" in c)
     assert "from mod import fn" in fit and f"_root, _commit = {str(root.resolve())!r}" in fit
     assert "sys.path.insert(0, _root)" in fit
-    args = json.loads(eval(re.search(r"^args = json\.loads\((.*)\)$", fit, re.M).group(1)))  # noqa: S307 — our literal
+    args = json.loads(eval(re.search(r"^args = _ref\(json\.loads\((.*)\)\)$", fit, re.M).group(1)))  # noqa: S307 — our literal
     fit_receipt = store.get("analyst_worker_0:r2")
-    assert args["csv_path"] == str(tmp_path / "w0" / "spectrum.csv") and args["ixpe_path"] == str(tmp_path / "IXPE")
+    product = store.get("analyst_worker_0:d1")
+    # The file the loader declared passes by reference; `_ref` reads it back as its path, checked.
+    assert args["csv_path"] == {"$ref": "analyst_worker_0:d1"} and args["ixpe_path"] == str(tmp_path / "ixpe")
+    assert f"'analyst_worker_0:d1': ({str(product.path)!r}, {product.sha256!r}, 'file')" in fit
     assert args["model"] == "<b>tbabs</b>" and fit_receipt.args_sha256  # rebuilt, and proven by the hash
-    assert args == run_received(run)[-1]  # exactly what the tool process received
+    received = run_received(run)[-1]  # exactly what the tool process received
+    assert received.pop("csv_path") == str(product.path) and {**args, "csv_path": None} == {**received, "csv_path": None}
 
 
 def test_model_text_and_tool_arguments_stay_inert(tmp_path, run):

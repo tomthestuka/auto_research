@@ -58,6 +58,9 @@ class Environment:
     activate: Path | None = None
     boot: Path | None = None
     externals: tuple[External, ...] = field(default=())
+    superseded: bool = False
+    """A pipeline build of an earlier definition kept in use because the current one did not
+    build (D3b): a toolkit call run in it is flagged untested env."""
 
     @property
     def python(self) -> Path:
@@ -309,6 +312,8 @@ def describe(env: Environment, *, detail: bool = False) -> dict:
     conda = [_package_of(line) for line in parts["conda"]]
     python = next((version for name, version in conda if name == "python"), None)
     out = {"name": env.name, "owner": env.owner, "python": python, "fingerprint": f"env:{digest[:12]}"}
+    if env.superseded:  # a build of an earlier definition kept in use (D3c)
+        out["superseded"] = True
     if detail:
         out["conda"] = sorted(f"{name}=={version}" for name, version in conda)
         out["pip"] = sorted(line.split("\t", 1)[0] for line in parts["pip"])

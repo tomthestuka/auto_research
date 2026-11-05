@@ -133,7 +133,7 @@ def test_read_paper_captures_hashes_and_stores_once(tmp_path):
     _run(p.execute("search_literature", {"source": "arxiv", "query": "q"}))
     outcome = _run(p.execute("read_paper", {"hit": 1}))
     assert not outcome.is_error
-    assert outcome.text.startswith("[lib:p1] Lag paper") and "PDF is attached" in outcome.text
+    assert outcome.text.startswith("[lib:p1] Lag paper") and "the paper follows" in outcome.text
     assert "Cite it as {{lib:p1}}" in outcome.text
     # The PDF itself is what the model reads: attached natively, never the checked text layer.
     (document,) = outcome.documents

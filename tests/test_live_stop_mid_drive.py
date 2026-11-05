@@ -1,6 +1,6 @@
 """Opt-in LIVE drill: `/stop` while a REAL coder is mid-drive, through the production lead round.
 
-    AUTO_RESEARCH_LIVE_STOP_MID_DRIVE=1 pytest tests/test_live_stop_mid_drive.py -s
+    pytest tests/test_live_stop_mid_drive.py --live -s
 
     # how long the coder is allowed to work before the stop lands (default 300s)
     AUTO_RESEARCH_STOP_AFTER_S=300
@@ -48,10 +48,7 @@ from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_STOP_MID_DRIVE") != "1",
-    reason="set AUTO_RESEARCH_LIVE_STOP_MID_DRIVE=1 to spend provider tokens on the stop drill",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

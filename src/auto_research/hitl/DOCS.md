@@ -117,8 +117,9 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   connector's env keys are missing.
 - `make_human_channel_check(handler, *, timeout_s=None) -> Callable[[], Awaitable[None]]` —
   the preflight ping: passes only when the channel returns a non-empty reply within the
-  timeout; raises otherwise. Registered by `auto_research.preflight` only when a handler is
-  resolved.
+  timeout; raises otherwise. The connector's `start()` (when it has one) runs before the timeout
+  starts, so the window measures only the human's reply; a failing start raises "did not start".
+  Registered by `auto_research.preflight` only when a handler is resolved.
 - `cli_stdin_handler(query) -> HumanResponse` — attended-terminal handler: renders the query's
   Markdown `message` to stderr with `rich` (a titled rule + `rich.markdown.Markdown`; degrades to
   plain text on a non-tty), then reads stdin off-thread. Waits at most `response_timeout_s()` then
@@ -141,7 +142,10 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   Built per spec; **not live-tested**.
 - `TelegramHandler(*, app=None, token=None, chat_id=None, timeout_s=None)` — **the recommended
   reliable channel** (CLAUDE.md §12/[E4]): long polling (`getUpdates`) — **outbound-only**, no public
-  URL, and Telegram retains updates ≤24h so a reconnect is lossless. Posts to `TELEGRAM_CHAT_ID`
+  URL, and Telegram retains updates ≤24h so a reconnect is lossless. Its own app comes from
+  `_build_telegram_app`, whose bot waits up to `_READ_TIMEOUT_S` (30 s) for a Bot API answer —
+  python-telegram-bot's `read_timeout`, default 5 s, which failed a launch ping the API answered in
+  26.6 s (D2); long polling keeps its own `get_updates_read_timeout`. Posts to `TELEGRAM_CHAT_ID`
   (auth: `TELEGRAM_BOT_TOKEN` from BotFather) and awaits a reply via a Future resolved by `on_message`.
   **Multi-question ready:** `_pending` maps every posted `message_id → Future`, so a Telegram
   **reply-to** (`reply_to_message.message_id`) routes to the right pending query even with several open
@@ -181,7 +185,7 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   failed download becomes a note, never an error. The reply hint offers files only when `reply_dir` is set.
   `start()`/`aclose()` manage the `Application` + polling; `timeout_s` defaults to the shared
   `response_timeout_s()`. Live: `tests/test_live_telegram_render.py` (opt-in,
-  `AUTO_RESEARCH_LIVE_TELEGRAM=1`; `…_REPLY=1` adds a round trip) and the cross-channel
+  `--live` with `AUTO_RESEARCH_LIVE_TELEGRAM=1`; `…_REPLY=1` adds a round trip) and the cross-channel
   `tests/test_live_hitl.py`.
 - `WhatsAppHandler(*, client=None, from_number=None, to_number=None, timeout_s=None,
   poll_interval_s=5)` — **deprecated** (Twilio bills per message; prefer `slack`/`cli` — emits a
@@ -283,3 +287,14 @@ Compacted 2026-09-01 and 2026-09-24, and 2026-10-19 (every entry); detail in git
 - 2026-10-27 — Review: a router with no store lists a text's handles unchecked; `resolve_attachments`
   reads through `RunView` ("not a receipt of this run"). A human steer renders "act on it, answer
   with message(to=\"human\") when it asks you a question".
+- 2026-11-04 — D2: `_build_telegram_app` sets the library's `read_timeout` to `_READ_TIMEOUT_S`
+  (30 s), so a transient slow Bot API answer reaches the connector instead of raising `TimedOut`.
+  Test: `tests/test_telegram_timeout.py` (a local stand-in for the Bot API).
+- 2026-11-04 — D2 ruling: `make_human_channel_check` runs the connector's `start()` before the
+  ping window, so the window measures only the human's reply; a failing start is reported as "the
+  human-response channel did not start: …". Test: `tests/test_preflight.py`.
+- 2026-11-04 — D1b: `TelegramHandler` records how far `start` got (`_steps`), and `aclose` stops
+  and shuts down exactly that, a half-finished start included (an `initialize` that failed after
+  the bot opened its clients: the bot's `shutdown`). `make_human_channel_check` closes a connector
+  whose start failed before raising. Tests: `tests/test_hitl.py`.
+- 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire; the human-channel cells keep their own switch beside `--live`, since they message a person.

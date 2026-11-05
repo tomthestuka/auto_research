@@ -481,3 +481,59 @@ def test_a_viewed_result_says_what_its_call_was_given(tmp_path):
                                    "reference and read no recorded file):")
     assert first(chained.handle) == f"{chained.handle} ({tool}; its call took {typed.handle} by reference and read bands.csv):"
     assert first(shell.handle) == f"{shell.handle} (mcp.builtin.bash_exec):"
+
+
+def test_view_receipt_hands_every_seat_the_figure_with_its_handle(tmp_path):
+    """A3: `view_receipt` hands any medium on, whatever the seat's member takes; the model-input
+    sanitiser decides what the model receives (`tests/test_model_inputs.py`). The ref carries its
+    receipt handle, which the sanitiser's note names for a text-only member."""
+    from auto_research.models.types import ModelHandle, RoleModelConfig
+
+    store = ReceiptStore(tmp_path / "receipts")
+    figure = tmp_path / "fig.png"
+    figure.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    minted = store.mint(source="analyst_worker_0", kind="figure", produced_by="plot", path=figure,
+                        caption="light curve", mime_type="image/png")
+
+    def view(provider: str, model: str) -> ToolOutcome:
+        control = RunControl()
+        router = SeatRouter(control, store=store)
+        handle = ModelHandle(role="analyst_worker",
+                             config=RoleModelConfig(name="m", provider=provider, model=model),
+                             provider=_ScriptedModel())
+        seat = _seat("analyst_worker_1", handle, control, router)
+        return _run(ChannelTools(_SeatTools(), role=seat).execute(
+            "view_receipt", {"handle": minted.handle}))
+
+    for provider, model in (("deepseek", "deepseek-v4-pro"), ("zai", "glm-5.3"),
+                            ("zai", "glm-5.3-flash")):
+        shown = view(provider, model)
+        (ref,) = shown.figures
+        assert ref.sha256 == minted.sha256 and ref.receipt == minted.handle, provider
+        assert shown.text == f"{minted.handle}: light curve"
+
+
+def test_a_pdf_the_human_sent_is_handed_on_like_a_paper(tmp_path):
+    """A human's file is minted as a `data` receipt; when its bytes are a PDF, `view_receipt`
+    hands it on as a document for the sanitiser, and any other data receipt stays named."""
+    from auto_research.hitl.attachments import mint_reply_attachments
+    from tests.media_files import pdf_bytes
+
+    store = ReceiptStore(tmp_path / "receipts")
+    pdf = tmp_path / "draft.pdf"
+    pdf.write_bytes(pdf_bytes("a draft"))
+    table = tmp_path / "values.csv"
+    table.write_text("a,b\n1,2\n", encoding="utf-8")
+    response = HumanResponse(query_id="q1", answer="see these", attachments=[
+        HumanAttachment(path=pdf, filename="draft.pdf", mime_type="application/pdf"),
+        HumanAttachment(path=table, filename="values.csv", mime_type="text/csv"),
+    ])
+    paper, data = mint_reply_attachments(store, source="input", response=response, parent=None)
+    assert paper.kind == data.kind == "data"
+
+    opened = _run(execute_view_receipt(store, {"handle": paper.handle}))
+    (doc,) = opened.documents
+    assert not opened.is_error and doc.sha256 == paper.sha256
+    assert opened.text.startswith(f"[{paper.handle}] ") and opened.text.endswith("the paper follows.")
+    named = _run(execute_view_receipt(store, {"handle": data.handle}))
+    assert not named.documents and "not text to show here" in named.text

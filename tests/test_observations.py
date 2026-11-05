@@ -184,11 +184,17 @@ def test_execute_data_catalog_delegates_to_catalog_utils(monkeypatch):
     assert captured == {"obs_db_path": "/data/x/IXPE", "min_level": 2}
 
 
-def test_execute_data_catalog_requires_obs_db_path(monkeypatch):
+def test_execute_data_catalog_requires_obs_db_path(monkeypatch, tmp_path):
     import asyncio
 
     from auto_research.agents import react
 
+    # A root that holds a mission (H2: an empty root answers with where data will go instead).
+    (tmp_path / "obsdb" / "IXPE").mkdir(parents=True)
+    (tmp_path / "obsdb" / "IXPE" / "catalog.json").write_text('{"entries": {}}')
+    config = tmp_path / "observations.yaml"
+    config.write_text(yaml.safe_dump({"obs_db_root": str(tmp_path / "obsdb")}))
+    monkeypatch.setattr("auto_research.observations.observations_yaml", lambda: config)
     out = asyncio.run(react.execute_data_catalog({}))
     assert out.is_error and "obs_db_path" in out.text
 

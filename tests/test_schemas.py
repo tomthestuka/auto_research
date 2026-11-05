@@ -97,6 +97,7 @@ def test_figure_ref_is_json_serializable_metadata_only():
         "created_at",
         "sha256",
         "thumbnail_b64",
+        "receipt",
     }
 
 

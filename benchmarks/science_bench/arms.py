@@ -21,9 +21,9 @@ cell invisible. Block 1 here is the opposite case -- a hand-balanced fractional 
 each lead and each worker pair appear three times and every lead x worker-pair combination appears
 once -- so it is written literally and its balance is *asserted by test* rather than trusted.
 
-**Capability is declared, never assumed.** Every seat carries its own ``vision`` and ``documents``
-flags, so a vision-less member in a figure-bearing seat fails a test instead of a trial. Two
-eligibility facts are carried as data rather than prose: ``glm-5.3`` is text-only, so Z.AI's
+**Capability is the table's, never assumed.** What a seat may be sent is its model's entry in
+``config/model_capabilities.yaml``, written from the vendor's docs (``Seat.capability``, Z1d), so a member without image input in a
+figure-bearing seat fails a test instead of a trial. Two eligibility facts follow: ``glm-5.3`` is text-only, so Z.AI's
 figure-seat level is ``glm-5.3-flash``; and Alibaba publishes no document channel this project can
 use, so the ``qwen3.8-max`` *reviewer* is sent a paper as locally-parsed text plus cropped figure
 images -- the two channels Anthropic and OpenAI assemble internally for a native PDF.
@@ -52,6 +52,10 @@ import json
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from auto_research.models.providers import MediaCapability
 
 # Vendor brand colours, shared with ``author_bench`` so the two sweeps read as one campaign.
 # Colour never carries meaning alone in the figures (each vendor also gets its own marker and a
@@ -78,8 +82,10 @@ _PRICES: dict[str, dict[str, float]] = {
 #: Models on an axis whose rate has not been read off the vendor's own page yet. Named rather than
 #: guessed: a made-up rate is indistinguishable from a read one once it is in a cost table, and the
 #: sweep's whole cost claim is that its figures are money somebody paid. Resolve before the first
-#: batch, or that member's spend is silently absent from the totals.
-PRICES_UNREAD: tuple[str, ...] = ("glm-5.3-flash",)
+#: batch, or that member's spend is silently absent from the totals. Empty: `glm-5.3-flash` is
+#: priced by litellm (`zai/glm-5.3-flash`, 0.15 / 0.03 / 0.50 per million) at the vendor's own rates
+#: ("GLM-5.3-Flash | $0.15 | $0.03 | … | $0.50", docs.z.ai/guides/overview/pricing, read 2026-11-04).
+PRICES_UNREAD: tuple[str, ...] = ()
 
 # Reasoning effort is pinned at each vendor's maximum in **every** seat, and that is a measurement
 # decision rather than a tuning one: the intra-model spread across effort settings dwarfs every
@@ -147,22 +153,6 @@ class Seat:
     provider: str
     model: str
 
-    vision: bool = True
-    """Whether this member is declared vision-capable, per that vendor's own documentation.
-
-    The reviewer, the analyst lead and the analyst worker are all sent figures, so every level on
-    those three axes must be true. It exists as a declaration so a vision-less member in a
-    figure-bearing seat fails a test rather than a trial: ``glm-5.3`` is text-only by its vendor's
-    own description, which is why Z.AI's level here is ``glm-5.3-flash``."""
-
-    documents: bool = True
-    """Whether this member accepts PDFs natively.
-
-    False for ``qwen3.8-max`` in the reviewer seat: the reviewer is handed paper PDFs and Alibaba
-    publishes no native PDF input, so that arm needs extraction glue with a model-visible note
-    before it can review. Declared here so the gap is data the harness can act on rather than a
-    caveat in prose."""
-
     max_concurrency: int | None = None
     """How many concurrently running trials may use this vendor in any seat; ``None`` is uncapped.
 
@@ -212,6 +202,14 @@ class Seat:
     note: str = ""
     """Why this level is on the axis. One sentence, for the write-up."""
 
+    def capability(self) -> MediaCapability:
+        """What this seat may be sent: its model's capability-table entry (Z1d, ``media_capability``)."""
+        from auto_research.models.providers import media_capability
+        from auto_research.models.types import RoleModelConfig
+
+        return media_capability(RoleModelConfig(name=self.slug, provider=self.provider,
+                                                model=self.model))
+
     def price(self) -> dict[str, float]:
         """Per-million-token rates for the vendors litellm does not price; empty otherwise."""
         return dict(_PRICES.get(self.model, {}))
@@ -252,8 +250,6 @@ CODER = Seat(
     slug="deepseek",
     provider="deepseek",
     model="deepseek-v4-flash",
-    vision=False,
-    documents=False,
     note=(
         "cheapest capable author measured, and it bills to a key rather than a subscription, so "
         "the sweep's cost figures are real money"
@@ -327,15 +323,9 @@ REVIEWERS: tuple[Seat, ...] = (
         slug="qwen",
         provider="dashscope",
         model="qwen3.8-max",
-        # `documents=True` even though Alibaba serves no usable document channel, and the
-        # distinction is what keeps four slots alive. This flag answers "may this seat be sent
-        # documents at all" -- and `ModelHandle.call` RAISES on a mismatch, which is right for a
-        # genuinely mis-declared member and fatal here, since the reviewer opens papers in its own
-        # loop and forwards them into the verdict call. Whether the *bytes* can travel is the
-        # adapter's question, answered per vendor: `DASHSCOPE_VENDOR.accepts_inline_documents` is
-        # False, so the adapter sends locally-parsed text plus cropped figures with a note saying
-        # so. That is the same pair of channels Anthropic and OpenAI build internally.
-        documents=True,
+        # Alibaba takes a document by public URL only, which this adapter cannot send, so documents
+        # reach it "parsed": locally-parsed text plus cropped figures with a note saying so, the same pair
+        # of channels Anthropic and OpenAI build internally.
         note=(
             "tied-first figure reader at a fifth of the price; no usable document channel, so a "
             "paper reaches it as locally-parsed text plus cropped figures, declared as such"

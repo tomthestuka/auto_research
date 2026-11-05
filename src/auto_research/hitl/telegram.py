@@ -104,6 +104,8 @@ class TelegramHandler:
         self._token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
         self.timeout_s = timeout_s if timeout_s is not None else response_timeout_s()
         self._started = False
+        # How far `start` got, so `aclose` stops and shuts down exactly what it started (D1b).
+        self._steps: set[str] = set()
         # Map every posted message_id -> the Future awaiting its reply. All chunks of one query
         # point at the same Future, so a reply-to any chunk resolves it.
         self._pending: dict[int, asyncio.Future[Any]] = {}
@@ -423,10 +425,14 @@ class TelegramHandler:
         if self.app is None:  # real connector: build the Application inside the running loop
             self.app = _build_telegram_app(self._token)
             self._register_listener()
+        self._steps.add("initializing")  # the bot opens its HTTP clients before `getMe` answers
         await self.app.initialize()
+        self._steps.add("initialized")
         await self.app.start()
+        self._steps.add("started")
         # drop_pending_updates: ignore messages that predate this run's polling start.
         await self.app.updater.start_polling(drop_pending_updates=True)
+        self._steps.add("polling")
         await self._publish_command_menu()
         self._started = True
 
@@ -453,14 +459,26 @@ class TelegramHandler:
         for task in list(self._command_tasks):
             if task is not current:
                 task.cancel()
-        if self._started and self.app is not None:
+        if self._steps and self.app is not None:
+            # Whatever `start` got through, a half-finished start included (D1b): polling, then
+            # the app, then what `initialize` opened.
+            steps, self._steps = self._steps, set()
             try:
-                if getattr(self.app, "updater", None) is not None:
+                if "polling" in steps and getattr(self.app, "updater", None) is not None:
                     await self.app.updater.stop()
             finally:
-                await self.app.stop()
-                await self.app.shutdown()
-            self._started = False
+                try:
+                    if "started" in steps:
+                        await self.app.stop()
+                finally:
+                    self._started = False
+                    if "initialized" in steps:
+                        await self.app.shutdown()
+                    elif callable(getattr(self.app.bot, "shutdown", None)):
+                        # `initialize` failed after the bot opened its clients (a `getMe` that
+                        # timed out): the app's shutdown skips an uninitialized app, the bot's
+                        # closes them.
+                        await self.app.bot.shutdown()
 
     async def _send(self, text_html: str, *, buttons: tuple = (), silent: bool = False) -> Any:
         """Send one message as HTML; on a parse rejection, retry as plain text (tags stripped)
@@ -676,13 +694,20 @@ def _inline_keyboard(buttons: tuple) -> Any:
     )
 
 
+#: Seconds a Bot API call may take to answer before python-telegram-bot raises ``TimedOut``. The
+#: library's default is 5 s; on 2026-11-04 the API answered one launch ping in 26.6 s (the next in
+#: 0.45 s), so the default failed the preflight on a transient delay (D2).
+_READ_TIMEOUT_S = 30.0
+
+
 def _build_telegram_app(token: str | None = None) -> Any:
     from telegram.ext import ApplicationBuilder
 
     tok = token or os.environ.get("TELEGRAM_BOT_TOKEN")
     if not tok:
         raise RuntimeError("Telegram connector needs TELEGRAM_BOT_TOKEN.")
-    return ApplicationBuilder().token(tok).build()
+    # The library's own setting; long polling keeps its separate `get_updates_read_timeout`.
+    return ApplicationBuilder().token(tok).read_timeout(_READ_TIMEOUT_S).build()
 
 
 # ── Markdown → Telegram HTML ──────────────────────────────────────────────────────────────

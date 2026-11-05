@@ -1,0 +1,14 @@
+# The lead x co-lead grid's two axes (legs.GRID_LEADS / GRID_COLEADS); the author is fixed in legs.py.
+# What a member may be sent is its model's entry in config/model_capabilities.yaml; every lead takes
+# images (the lead is sent figures), a co-lead is sent none.
+leads:
+  - {slug: anthropic, provider: anthropic, model: claude-opus-5}
+  - {slug: openai, provider: openai, model: gpt-5.6-sol}
+  - {slug: zai, provider: zai, model: glm-5.3-flash, max_concurrency: 2}   # Z.AI throttles above 2
+  - {slug: qwen, provider: dashscope, model: qwen3.8-max}
+coleads:
+  - {slug: anthropic, provider: anthropic, model: claude-opus-5}
+  - {slug: openai, provider: openai, model: gpt-5.6-sol}
+  - {slug: zai, provider: zai, model: glm-5.3-flash, max_concurrency: 2}   # same model as its lead
+  - {slug: qwen, provider: dashscope, model: qwen3.8-max}
+  - {slug: deepseek, provider: deepseek, model: deepseek-v4-pro}           # reviews without vision

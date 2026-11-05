@@ -17,7 +17,7 @@ second opens with one transcript carrying fewer figures than the first produced;
 report places a figure produced in the first turn (round-1 figures stay citable); no provider
 error; the ledger rebuild of every call equals what the adapter was sent; spend recorded.
 
-    AUTO_RESEARCH_LIVE_MODEL_TESTS=1 pytest tests/test_live_session_compaction.py -s
+    pytest tests/test_live_session_compaction.py --live -s
 
 Estimated cost on claude-sonnet-5 ($2/$10 per MTok): ~20 calls averaging ~50k prompt tokens,
 mostly cache reads, plus one compaction pass (~65k read): about $1–2.
@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,10 +38,7 @@ from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_MODEL_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_MODEL_TESTS=1 to spend provider tokens",
-)
+pytestmark = pytest.mark.live
 
 KEY = "analyst_worker_0"
 _TEXT = "\n".join(
@@ -151,7 +147,7 @@ def test_live_one_seat_two_turns_compaction_and_boundary_eviction(tmp_path, monk
 
     assert worker.last_filed_form is not None, "turn 2 filed through turn_end"
     assert report1.status != "failed" and report2.status != "failed"
-    assert not [r for r in rows if r["event"].endswith(".provider_error")], "no overflow"
+    assert not [r for r in rows if r["event"].endswith(".model_call_failed")], "no overflow"
     compactions = [r for r in rows if r["event"].endswith(".compaction") and r["data"].get("server")]
     assert compactions, "the first turn passed 63k tokens and the provider compacted it"
     opening = sent[sent_before]

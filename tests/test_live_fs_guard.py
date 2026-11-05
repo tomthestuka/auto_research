@@ -1,8 +1,8 @@
-"""Env-gated LIVE test: the coder's filesystem jail (PreToolUse hook) actually FIRES in a real
+"""Opt-in LIVE test: the coder's filesystem jail (PreToolUse hook) actually FIRES in a real
 Claude Agent SDK session (todo #3 Stage B).
 
 Activate with:
-    AUTO_RESEARCH_LIVE_FS_GUARD_TESTS=1 pytest tests/test_live_fs_guard.py -q
+    pytest tests/test_live_fs_guard.py --live -q
 
 Unlike the deterministic hook test (which calls the callback directly), this launches a real coder
 and instructs it to run a **battery** of probe accesses spanning the tool surface. We wrap the real
@@ -13,7 +13,6 @@ blocked it). Requires the Claude Agent SDK CLI + a resolvable coder model + the 
 """
 
 import asyncio
-import os
 import subprocess
 from pathlib import Path
 
@@ -23,10 +22,7 @@ from auto_research.graph.runtime import load_orchestration_config
 from auto_research.sandbox.fs_guard import PathGuard, load_fs_allowlist
 from auto_research.sandbox.merge_flow import _author_env, _make_fs_guard_hook, _resolve_coder_model
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_FS_GUARD_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_FS_GUARD_TESTS=1 to run the live coder-jail test (spends tokens)",
-)
+pytestmark = pytest.mark.live
 
 
 def _scratch_clone(tmp_path) -> Path:

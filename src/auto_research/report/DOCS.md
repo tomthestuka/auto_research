@@ -87,7 +87,9 @@ The graph's `compose_report` node calls `publish_report`; the `.tex`/PDF already
   args_json)` (a `$ref` argument is resolved in the code from the parent's stored bytes; the
   toolkit runs at the receipt's stamped commit — the checkout when its HEAD is that commit, else
   that commit extracted with `git archive` into a temp folder; an in-process call with no recorded
-  module imports through its package's `TOOL_MANIFEST`); `HTML_NAME` (`report.html`).
+  module imports through its package's `TOOL_MANIFEST`; every argument the runtime placed in the
+  call's own folder, an output or a figure path, points at a fresh `tempfile.mkdtemp` folder with
+  its file name kept, so a rerun leaves the run's products as they are); `HTML_NAME` (`report.html`).
 - A value reference `{{h#/pointer}}` renders at `provenance.bindings.display_value` (`2.48e7` as
   2.48×10⁷ in HTML, `$2.48\times10^{7}$` in TeX); in HTML it opens a value-first popover (the full
   value, the field, the result's chain one click further). A chain step shows its arguments as
@@ -164,4 +166,7 @@ Compacted 2026-10-19 (every entry); detail in git history.
   `CITE_RE`); a table citing a flagged receipt is refused (`check_table`); the page refuses any
   number the check left unbound instead of rendering it "scoped" (the `_held` popover and the
   `scoped` class are gone).
-
+- 2026-11-04 — `reproduce_code` points placed outputs and figure paths (`call.context`
+  `output_args`, `figure_args`) at a fresh folder (plan item B2).
+- 2026-11-04 — Review of B2: the reproduce code's warning names only the other output-like arguments.
+- 2026-11-04 — H2: an `obsdb` input reads `observation <mission> <obsid>` under either layout (`observations.obsid_mission`), so HEASARC's tree names the mission, not the prefix folder.

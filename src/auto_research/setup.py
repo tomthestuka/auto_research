@@ -674,18 +674,46 @@ def write_configs(values: dict, extra_fs_paths: list[str] | None = None) -> tupl
 
 
 def page_preflight() -> bool:
-    """Page 7 — run the launch preflight as a smoke test. Returns True on pass."""
+    """Page 7 — run the launch preflight as a smoke test. Returns True on pass.
+
+    It ends with the paid media probe (``member_media``), so it is metered like a run (Z1f): its own
+    run id, a ledger under the runtime dir, a cost meter, and the spend printed with the ledger's
+    path."""
     import asyncio
+    import uuid
 
+    from auto_research.monitor import RunMonitor
+    from auto_research.observability import install_cost_meter
     from auto_research.preflight import PreflightError, run_preflight
+    from auto_research.sandbox.workspace import ledger_dir
 
+    run_id = f"setup-preflight-{uuid.uuid4().hex[:8]}"
+    ledger_problem = None
     try:
-        asyncio.run(run_preflight())
-        print("  preflight: ok")
-        return True
+        monitor = RunMonitor(chatter=1, run_id=run_id, jsonl_path=ledger_dir(run_id) / "monitor.jsonl")
+    except OSError as exc:
+        # Reported with the checklist (Z1g); the spend is still counted, in memory.
+        ledger_problem = f"the setup ledger could not be written under the runtime dir: {exc}"
+        monitor = RunMonitor(chatter=1, run_id=run_id)
+
+    async def _run() -> None:
+        meter = install_cost_meter(run_id=run_id, monitor=monitor)
+        monitor.cost_meter = meter
+        try:
+            await run_preflight(monitor=monitor)
+        finally:
+            print(f"  preflight spend: ${meter.total_usd:.4f} (ledger {monitor.jsonl_path or 'not written'})")
+
+    issues = [f"  - [setup_ledger] {ledger_problem}"] if ledger_problem else []
+    try:
+        asyncio.run(_run())
     except PreflightError as exc:
-        print(f"  preflight reported issues:\n{exc}")
+        issues.insert(0, str(exc))
+    if issues:
+        print("  preflight reported issues:\n" + "\n".join(issues))
         return False
+    print("  preflight: ok")
+    return True
 
 
 # ---------------------------------------------------------------------------

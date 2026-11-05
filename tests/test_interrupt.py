@@ -24,6 +24,7 @@ from auto_research.graph import runtime
 from auto_research.graph.runtime import _interrupt_cleanup
 from auto_research.monitor import RunMonitor
 from auto_research.run_control import RunControl, UserInterruptionError
+from auto_research.sandbox.merge_flow import TreeReset
 
 
 class _Recorder:
@@ -432,6 +433,7 @@ def test_stop_mid_drive_kills_the_coder_before_the_toolkit_is_repaired(monkeypat
 
     async def _fake_reset(*args, **kwargs):
         log.events.append("tree_reset")
+        return TreeReset(None, True)  # what the real reset returns
 
     monkeypatch.setattr("auto_research.sandbox.merge_flow._reset_direct_tree", _fake_reset)
 
@@ -466,6 +468,7 @@ def test_stop_with_no_drive_in_flight_is_unchanged():
     with pytest.MonkeyPatch.context() as mp:
         async def _fake_reset(*args, **kwargs):
             log.events.append("tree_reset")
+            return TreeReset(None, True)  # what the real reset returns
 
         mp.setattr("auto_research.sandbox.merge_flow._reset_direct_tree", _fake_reset)
         asyncio.run(scenario())

@@ -144,7 +144,7 @@ def select(args: argparse.Namespace):
 async def _run(args: argparse.Namespace) -> int:
     mutants = select(args)
     toolkit_root = _toolkit_root()
-    needs_toolkit = any(m.base == "real" for m in mutants)
+    needs_toolkit = any(m.base == "real" or m.catalog_writer for m in mutants)
 
     stamps = collect_stamps(toolkit_root, args.toolkit_ref, resolve_toolkit=needs_toolkit)
     # The configuration is part of the measurement, so it is stamped beside the commit hashes:

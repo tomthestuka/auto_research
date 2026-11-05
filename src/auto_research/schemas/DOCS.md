@@ -133,16 +133,20 @@ carried by **reference** (`FigureRef`), never embedded
 - `MessageModel(BaseModel)` — shared base class; `extra="forbid"` and
   `validate_assignment=True`.
 - `FigureRef(path: Path, caption: str, mime_type: str, produced_by: str,
-  created_at: datetime, sha256: str, thumbnail_b64: str | None = None)` —
+  created_at: datetime, sha256: str, thumbnail_b64: str | None = None,
+  receipt: str | None = None)` —
   serializable artifact image reference. `sha256` must be a 64-character
-  lowercase hexadecimal digest.
+  lowercase hexadecimal digest. `receipt` is the figure receipt's handle when the ref was made
+  from one (`Receipt.to_figure_ref`); the model-input sanitiser names it in the note replacing the
+  image for a text-only member (A3).
 - `Receipt(handle, kind, path, sha256, produced_by, created_at, call_id=None,
   toolkit_commit=None, toolkit_root=None, env=None, env_untested=False, args_sha256=None, inputs=[], parents=[], flags=[], caption=None,
   mime_type=None, title=None, ids={}, source_sha256=None, parser=None, commit_sha=None, returned_sha256=None)` — the
   runtime's record of one artifact (`returned_sha256`: the JSON blob of the keys a toolkit tool
   returned beside its stdout, what a `$ref` resolves against); `.source` is the handle's source; `.to_figure_ref()`.
 - `InputFile(path, sha256, basis="content"|"listing"|"obsdb", receipt=None)` — one input a call read;
-  `obsdb` is an observation the tool located from its ObsID (`<mission folder>/<obsid>`, hashed over
+  `obsdb` is an observation the tool located from its ObsID (its folder under the mission folder,
+  flat or HEASARC's tree, `observations.obsid_folder`; hashed over
   its catalog entry and its folder listing). `Receipt.toolkit_root` names the toolkit checkout the
   toolkit tool ran from (stamped only on toolkit producers; the commit is stamped on every call).
 - `KIND_LETTER` / `LETTER_KIND` / `HANDLE_PATTERN` / `ArtifactKind` / `ReceiptFlag` — the handle
@@ -323,3 +327,7 @@ Compacted 2026-10-07 and 2026-10-19 (every entry); detail in git history.
   reference or a paper attribution.
 - 2026-11-03 — Field descriptions (`AnalystReport.findings`, `ReviewerSection.body`) teach the one
   citing syntax: every number its own citation inside `{{ }}`.
+- 2026-11-04 — A3: `FigureRef.receipt` (the figure's receipt handle, set by `Receipt.to_figure_ref`).
+- 2026-11-04 — `ValidationDataset` (docstring, `synthetic` description): a synthetic input is a marked `synth<YYMMDD>-<hex>` ObsID the coder's tests build in their fixture obs-db (user ruling S1).
+- 2026-11-04 — `ToolSpec.validation_data`: a synthetic ObsID is added beside the required real input; `ValidationDataset.obsid` admits the marked synthetic ObsID; lowercase hex.
+- 2026-11-04 — H2: `InputFile.basis` description: an `obsdb` path is the ObsID's folder, flat or under HEASARC's tree.

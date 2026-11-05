@@ -20,7 +20,7 @@ same PNGs ``report.tex`` references. Override the directory with
 ``AUTO_RESEARCH_FIGURE_TEST_DIR``.
 
 Run with:
-    AUTO_RESEARCH_LIVE_FIGURE_TESTS=1 pytest tests/test_live_figure_vision.py -s
+    pytest tests/test_live_figure_vision.py --live -s
 """
 
 import asyncio
@@ -36,6 +36,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 
 from auto_research.models import load_registry
+from auto_research.models.providers import media_capability
 from auto_research.models.types import (
     ModelResponse,
     ModelMessage,
@@ -47,10 +48,7 @@ from auto_research.schemas import FigureRef
 from tests.dev_logs import dev_log_path
 
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_FIGURE_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_FIGURE_TESTS=1 to spend provider tokens",
-)
+pytestmark = pytest.mark.live
 
 # The real PA/PD-vs-time diagnostic from run 46ed6671… (the PNG report.tex includes).
 _FIG_DIR = Path(
@@ -62,7 +60,7 @@ _FIG_DIR = Path(
 )
 _FIG_NAME = "stability_plot_1782983803257_pa_pd_timeseries.png"
 
-# Roles that review plots and are configured for vision.
+# Roles that review plots; their members take images as each adapter declares.
 _VISION_ROLES = ("analyst_worker", "analyst_lead", "analyst_colead")
 
 # A deliberately NON-revealing caption: it never says the chart is a time series, so a
@@ -104,7 +102,7 @@ def _vision_members():
     registry = load_registry()
     for role in _VISION_ROLES:
         for handle in registry.resolve(role).handles:
-            if handle.config.vision:
+            if media_capability(handle.config).images:
                 yield role, handle
 
 
@@ -336,7 +334,6 @@ def test_live_many_image_request_that_used_to_400(tmp_path):
         name="worker",
         provider="anthropic",
         model="claude-sonnet-5",
-        vision=True,
         parameters={"max_tokens": 512},
     )
 
@@ -536,8 +533,6 @@ def test_live_qwen_receives_a_paper_as_text_and_figures(tmp_path):
             name="qwen_doc_probe",
             provider="dashscope",
             model="qwen3.8-max",
-            vision=True,
-            documents=True,
             parameters={"reasoning": {"effort": "high"}},
         ),
         provider=DashscopeProvider(),
@@ -664,7 +659,6 @@ def test_live_pending_server_tool_with_figures_that_used_to_400(tmp_path, monkey
             name="worker",
             provider="anthropic",
             model="claude-sonnet-5",
-            vision=True,
             parameters={"max_tokens": 2048},
         ),
         provider=AnthropicProvider(),

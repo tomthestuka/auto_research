@@ -1,9 +1,9 @@
-"""Env-gated LIVE test: the coder's structure context actually conveys the absolute toolkit
+"""Opt-in LIVE test: the coder's structure context actually conveys the absolute toolkit
 root + the obsdb validation-data paths, so a real Claude Agent SDK author can ``ls`` them
 cleanly on the first try — no wrong-root guessing, no ``find /`` hunting (todo #2).
 
 Activate with:
-    AUTO_RESEARCH_LIVE_PATH_HINT_TESTS=1 pytest tests/test_live_path_hints.py -q
+    pytest tests/test_live_path_hints.py --live -q
 
 What it proves: we build the **real** ``_build_structure_context`` (the exact block the runtime
 injects into the author's first turn) and ask the coder to ``ls`` (a) its research_toolkit
@@ -19,7 +19,6 @@ Requires the Claude Agent SDK CLI + a resolvable coder model + the analyst env.
 """
 
 import asyncio
-import os
 import subprocess
 from pathlib import Path
 
@@ -34,10 +33,7 @@ from auto_research.sandbox.merge_flow import (
     _resolve_coder_model,
 )
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_PATH_HINT_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_PATH_HINT_TESTS=1 to run the live path-hint test (spends tokens)",
-)
+pytestmark = pytest.mark.live
 
 
 def _scratch_clone(tmp_path) -> Path:

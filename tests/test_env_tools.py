@@ -253,7 +253,7 @@ def test_the_seed_names_each_package_environment_and_the_definitions(tmp_path, m
     assert "as `base`: astropy" in context
 
 
-@pytest.mark.skipif(not os.environ.get("AR_LIVE_ENV_BUILD"), reason="live: set AR_LIVE_ENV_BUILD=1 (network, ~1 GB)")
+@pytest.mark.live  # network, ~1 GB
 def test_live_solve_then_build_then_activate(tmp_path, monkeypatch):
     """Real conda: the coder's three steps — solve a tiny lock, build the candidate, run in it."""
     _patch_config(monkeypatch, None)
@@ -603,7 +603,7 @@ def test_a_stop_during_the_commit_build_kills_it_and_says_so(tmp_path, monkeypat
 
     _patch_config(monkeypatch, _fake_base(tmp_path))
 
-    def slow(toolkit_root, env_ids, *, runner):
+    def slow(toolkit_root, env_ids, *, runner, on_start=None):
         runner(["/bin/sleep", "30"])
         return []
 
@@ -906,7 +906,7 @@ def test_replay_environment_reads_the_lock_store_and_reports_externals(tmp_path,
         replay_environment("0" * 64, runner=_fake_conda([]))
 
 
-@pytest.mark.skipif(not os.environ.get("AR_LIVE_ENV_BUILD"), reason="live: set AR_LIVE_ENV_BUILD=1 (network, ~1 GB)")
+@pytest.mark.live  # network, ~1 GB
 def test_live_a_recorded_state_replays_and_matches_its_conda_part(tmp_path, monkeypatch):
     """B4 checkpoint: a state a receipt would stamp (its lock in the store) rebuilds from the
     lock alone into its own prefix, and the rebuilt conda part equals the recorded one."""

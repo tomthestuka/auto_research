@@ -15,24 +15,20 @@ What it checks, on the configured GPT worker member (est. < $0.10):
   3. the next request, replaying the output (compaction item included), is accepted.
 Every row is written and flushed as it happens.
 
-    AUTO_RESEARCH_LIVE_MODEL_TESTS=1 pytest tests/test_live_openai_compaction.py -s
+    pytest tests/test_live_openai_compaction.py --live -s
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_MODEL_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_MODEL_TESTS=1 to spend provider tokens",
-)
+pytestmark = pytest.mark.live
 
 _FILLER = "The observed count rate was steady across the interval. " * 120
 _TOOL = {

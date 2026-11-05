@@ -10,12 +10,11 @@ for human inspection (LLM content is not asserted — only the structural contra
      ``status="failed"`` ``AnalystReport`` (finalize-and-document vs. bounded rework)?
 
 Run with:
-    AUTO_RESEARCH_LIVE_HONEST_FAILURE_TESTS=1 pytest tests/test_live_honest_failure.py -s
+    pytest tests/test_live_honest_failure.py --live -s
 """
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
@@ -36,10 +35,7 @@ from auto_research.schemas import (
 )
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_HONEST_FAILURE_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_HONEST_FAILURE_TESTS=1 to spend provider tokens",
-)
+pytestmark = pytest.mark.live
 
 
 # --- Fixtures mirroring the real edge content -------------------------------------------------

@@ -66,6 +66,7 @@ agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-on
   - /path/to/conda/envs/analysis     # analyze_env
   - /path/to/heasoft/x86_64-...      # HEADAS
   - /path/to/CALDB                   # CALDB
+gate_readonly_roots: []       # read-only to the gate's Layer-B test run only, never on the workers' allow-list
 
 # ── Tool discovery ──
 mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)

@@ -1,6 +1,6 @@
 """Live: every path the reviewer can take, and every escape an attack agent can try.
 
-Opt-in (``AUTO_RESEARCH_LIVE_REVIEWER_PATHS=1``), real model calls, production wiring throughout
+Opt-in (``--live``), real model calls, production wiring throughout
 (``attach_reviewer_runtime``, the run's ``ReceiptStore``, ``ReviewerRender``, ``publish_report``).
 Each cell writes a live ledger under ``logs/dev/reviewer-paths/`` as it runs, and a record when it
 ends, so a stalled cell still leaves the trace of what it was doing.
@@ -35,10 +35,7 @@ from dotenv import load_dotenv
 from tests.dev_logs import dev_log_path
 from tests.seats import from_seat, seated
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_REVIEWER_PATHS") != "1",
-    reason="live reviewer paths are opt-in: AUTO_RESEARCH_LIVE_REVIEWER_PATHS=1",
-)
+pytestmark = pytest.mark.live
 
 PAPER_PDF = Path("/data/fzhou/ar_runtime/papers/nasa_ads_2022ApJ...934....4K.pdf")
 PAPER_TITLE = (

@@ -187,8 +187,8 @@ class CandidateEnvs:
             return step(*args)
 
     def _activate(self, env_id: str, folder: Path) -> str:
-        from auto_research.env import analysis_environment, conda_executable, declared_externals
-        from auto_research.sandbox.env_build import build, read_definition, validate
+        from auto_research.env import agent_conda_dir, analysis_environment, conda_executable, declared_externals
+        from auto_research.sandbox.env_build import PACKAGE_ARCHIVE, build, read_definition, validate
         from auto_research.sandbox.jail import jail_enabled
 
         human = analysis_environment()
@@ -200,7 +200,8 @@ class CandidateEnvs:
         try:
             environment = build(read_definition(folder), conda_dir=self.cand_dir / "conda",
                                 conda_exe=conda_executable(), base_envs=bases, externals=externals,
-                                jailed=jail_enabled(), runner=self._runner)
+                                jailed=jail_enabled(), runner=self._runner,
+                                package_archive=agent_conda_dir() / PACKAGE_ARCHIVE)
         except Exception as exc:  # noqa: BLE001 — a failed build is the tool's answer, never a crash
             # A rebuild replaces the prefix the wrappers point at: they go with it.
             self._clear_wrappers()

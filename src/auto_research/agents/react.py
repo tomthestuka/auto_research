@@ -11,12 +11,14 @@ reviewer/lead read-only tools and the librarian's sources are added alongside.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
 from functools import partial
 import re
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -28,19 +30,22 @@ from pydantic import ValidationError
 from auto_research.agents.report_edit import (
     ANALYST_BLOCKS,
     REVIEWER_BLOCKS,
+    TOOLSPEC_BLOCKS,
     WRITE_REPORT_TOOL,
     Block,
     blocks_for,
     change,
     edit_tool_def,
+    layout,
     outline,
+    parse as parse_document,
     render,
     reply_lines,
     write_tool_def,
 )
 from auto_research.provenance import check_report_fields
 from auto_research.provenance.calls import FIGURE_PATH_ARGS, resolve_call_args
-from auto_research.provenance.capture import inputs_before, receipt_call
+from auto_research.provenance.capture import inputs_before, parse_products, receipt_call
 from auto_research.env import coder_wait_limits_s, tool_search_config
 from auto_research.observations import load_observations_config
 from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
@@ -75,8 +80,8 @@ from auto_research.schemas import (
 
 
 # Figure-output arguments, by naming convention → the extension the toolkit expects.
-# A toolkit tool exposing one of these args has its figure written under the worker's
-# figures_dir (``provenance.calls.resolve_call_args``). ``""`` = base/prefix path
+# A toolkit tool exposing one of these args has its figure written in the call's own products
+# folder (``provenance.calls.resolve_call_args``). ``""`` = base/prefix path
 # (the tool appends its own suffix, e.g. ``_DU1.png``); ``.png`` = full file path.
 # Convention-keyed (not tool-keyed) so new toolkits inherit it for free.
 _FIGURE_PATH_ARGS = FIGURE_PATH_ARGS
@@ -179,7 +184,8 @@ def list_env_tool_def() -> dict:
         "description": (
             "List the software environments your tools run in. With no argument: each one's name, "
             "owner, Python version and fingerprint, which one your tools use (`active`) and which "
-            "your shell uses (`shell`). With `env`: its conda and pip packages, the external "
+            "your shell uses (`shell`); `superseded` marks a build of an earlier definition kept in "
+            "use, where a tool's result is flagged untested env. With `env`: its conda and pip packages, the external "
             "software it uses, and, for a human environment, the variables its activation sets. Use it to check a package or version before relying on it; the listing shows "
             "where to look and is not evidence."
         ),
@@ -287,6 +293,22 @@ def execute_use_env(sandbox: Any, arguments: Mapping[str, Any], *, shell_jailed:
 
 
 from auto_research.sandbox.envs import in_environment as _in_environment  # noqa: E402 — shared with the coder's candidates
+
+
+def _made_products_dir(workdir: Path, folder: Path) -> str | None:
+    """Make a call's own products folder under the unit's working folder; the refusal the model
+    reads when it cannot (``None`` when made). The unit's shell writes its working folder, so a
+    link planted there would point the runtime's ``mkdir`` outside it: every part below the working
+    folder must be a real folder, and a failed ``mkdir`` is an error result, never a dead turn
+    (§9.3.7, §9.3.8)."""
+    try:
+        if folder.resolve() != workdir.resolve() / folder.relative_to(workdir):
+            raise OSError(f"{folder} resolves outside {workdir}")
+        folder.mkdir(parents=True, exist_ok=True)
+    except (OSError, RuntimeError, ValueError) as exc:  # RuntimeError: a link loop before 3.13
+        return (f"This call was not run: its products folder could not be made ({exc}). Keep "
+                f"{workdir / 'products'} a plain folder of yours, then call again.")
+    return None
 
 
 def _receipted(
@@ -474,8 +496,9 @@ def view_receipt_tool_def() -> dict:
     return {
         "name": VIEW_RECEIPT_TOOL,
         "description": (
-            "Show one receipt by its handle: a figure as an image, a text receipt (a tool output, "
-            "a page, a paper) as its text, a long one page by page. Opens any receipt of this run, "
+            "Show one receipt by its handle: a figure as an image, a paper as your model reads it "
+            "(the PDF, or its text with a note), a text receipt (a tool output, a page) as its "
+            "text, a long one page by page. Opens any receipt of this run, "
             "whoever made it; an earlier output shown as one line names the handle that reads it "
             "back in full. Viewing shows you the content; your report cites the evidence in your "
             "own scope."
@@ -505,15 +528,23 @@ def view_receipt_tool_def() -> dict:
     }
 
 
-async def execute_view_receipt(
-    store: Any | None,
-    arguments: Mapping[str, Any],
-    *,
-    images_ok: bool = True,
-) -> ToolOutcome:
+def _is_pdf(receipt: Any) -> bool:
+    """Whether a receipt's bytes are a PDF: by its recorded mime type, else by the file's magic."""
+    if receipt.mime_type == "application/pdf":
+        return True
+    try:
+        with open(receipt.path, "rb") as handle:
+            return handle.read(5) == b"%PDF-"
+    except OSError:
+        return False
+
+
+async def execute_view_receipt(store: Any | None, arguments: Mapping[str, Any]) -> ToolOutcome:
     """Show any receipt of the run (view is global, user ruling 2026-10-27).
 
-    Mints nothing and admits nothing — a peer's figure seen here stays the peer's evidence.
+    Mints nothing and admits nothing — a peer's figure seen here stays the peer's evidence. A figure
+    or a paper is handed on as its medium; the model-input sanitiser gives the member what it can
+    take (A2/A3: the image, the PDF, the local parse, or a note naming the handle).
     """
     handle = str(arguments.get("handle") or "").strip()
     if store is None:
@@ -531,25 +562,20 @@ async def execute_view_receipt(
     # model-visible note and a ledger alert (F26, human ruling 2026-10-06).
     if receipt.kind == "figure":
         caption = receipt.caption or ""
-        if not images_ok:
-            return ToolOutcome(
-                text=f"{handle} is a figure ({caption}); this seat reads text, so it is named "
-                "rather than shown."
-            )
         return ToolOutcome(text=f"{handle}: {caption}", figures=[receipt.to_figure_ref()])
-    if receipt.kind == "paper":
+    if receipt.kind == "paper" or (receipt.kind == "data" and _is_pdf(receipt)):
         # The receipted PDF itself, as the librarian's reader attaches it (the receipted hash, not
-        # the file's current one); the provider's media guard decides whether it fits.
+        # the file's current one); the provider's media guard decides whether it fits. A PDF a
+        # human sent is a `data` receipt and is handed on the same way.
+        title = receipt.title or receipt.caption or Path(receipt.path).name
         try:
             doc = document_from_file(
-                Path(receipt.source_path or receipt.path), title=f"[{handle}] {receipt.title or ''}",
+                Path(receipt.source_path or receipt.path), title=f"[{handle}] {title}",
                 sha256=receipt.source_sha256 or receipt.sha256,
             )
         except OSError as exc:
             return ToolOutcome(text=f"{handle}: the PDF cannot be read ({type(exc).__name__}).", is_error=True)
-        return ToolOutcome(
-            text=f"[{handle}] {receipt.title or 'untitled'} — the PDF is attached.", documents=[doc],
-        )
+        return ToolOutcome(text=f"[{handle}] {title} — the paper follows.", documents=[doc])
     if receipt.kind in ("data", "commit"):
         return ToolOutcome(
             text=f"{handle} is a {receipt.kind} receipt produced by {receipt.produced_by}; its "
@@ -722,6 +748,24 @@ def data_catalog_tool_def() -> dict | None:
     }
 
 
+def _empty_obs_db_note() -> str | None:
+    """What ``data_catalog`` called with no mission folder answers while the obs-db root holds no
+    mission yet (H2): the root, and that ``acquire`` creates a mission's folder, with its catalog,
+    on its first observation. ``None`` once a mission exists, or when the root is not configured."""
+    try:
+        cfg = load_observations_config()
+    except Exception:  # noqa: BLE001 — no configured root: the ordinary argument checks answer
+        return None
+    if cfg.missions:
+        return None
+    return (
+        f"The local observation database at {cfg.obs_db_root} holds no mission yet, so nothing is "
+        "local. acquire creates a mission's folder, with its catalog, on its first observation; "
+        "list the archive's observations with the remote search tools and acquire the ones the "
+        "analysis needs."
+    )
+
+
 async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
     """Run the ``catalog_utils`` local-data read in-process (the analyst-lead path).
 
@@ -733,6 +777,9 @@ async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
     """
     global _catalog_read_fn
     obs_db_path = str(arguments.get("obs_db_path") or "").strip()
+    empty = None if obs_db_path else _empty_obs_db_note()
+    if empty is not None:  # no catalog was read: a failed result, which grounds nothing
+        return ToolOutcome(text=empty, is_error=True)
     if not obs_db_path:
         return ToolOutcome(
             text="data_catalog needs obs_db_path — a mission directory from your local "
@@ -967,6 +1014,58 @@ WORKER_STATUS_VALUES: tuple[str, ...] = ("succeeded", "failed")
 LEAD_STATUS_VALUES: tuple[str, ...] = ("succeeded", "failed", "needs_human")
 
 
+#: The id of a turn's result report; a brief's id is ``spec<n>`` (C3).
+RESULT_REPORT = "result"
+#: Who a locked brief's receipt names as its producer: a brief, never evidence.
+TOOLSPEC_PRODUCER = "toolspec"
+_LOCKED_BY = {
+    "commit": "its link committed", "turn_end": "turn_end filed the turn",
+    "link_end": "its link has ended, so no session reads it",
+}
+
+
+@dataclass
+class BriefReport:
+    """A brief the unit files mid-turn: today one tool brief (``ToolSpec``) per chain link (C3).
+
+    One of the turn's reports (ruling Q3, 2026-11-04): edited like the result report, with
+    ``edit_report``/``write_report`` and ``report`` set to its ``id``; checked by its own validator
+    (schema on every edit, handles at ``turn_end``; no number grounding, a brief makes no claims);
+    read live by the coding session bound to it (``bound``), whose coder, gate and co-lead read
+    the current ``value``; locked at its link's commit, at its link's end without one, or at
+    ``turn_end`` (``locked_by``), then minted once as a receipt (``receipt``) the run can view and
+    never cite.
+    """
+
+    id: str
+    value: Any  # a ToolSpec
+    blocks: tuple[Block, ...] = TOOLSPEC_BLOCKS
+    locked_by: str | None = None
+    receipt: str | None = None
+    bound: bool = False
+    #: Queued when no link could open it any more (no author credit left, or the chain stopped):
+    #: locked at turn_end as what was never attempted, its validator then waived (ruling C3c).
+    stranded: bool = False
+
+    @property
+    def sha256(self) -> str:
+        """The hash of the current version's document: what every reader records, and the
+        sha256 of the brief's receipt once it is minted."""
+        return hashlib.sha256(self.document().encode("utf-8")).hexdigest()
+
+    def values(self) -> dict[str, Any]:
+        dumped = self.value.model_dump(mode="json")
+        return {b.field: dumped.get(b.field) for b in self.blocks}
+
+    def document(self) -> str:
+        """The brief as the text document the lead edits and the coder reads."""
+        return render(self.values(), self.blocks)
+
+    def lock(self, by: str) -> None:
+        if self.locked_by is None:
+            self.locked_by = by
+
+
 @dataclass
 class ReportWorkspace:
     """Per-round report-authoring state wired onto a provider for write_report/edit_report.
@@ -1006,6 +1105,12 @@ class ReportWorkspace:
     # The text edit_report and write_report add after the document layout, when the analysts'
     # wording (figure handles, receipts) does not describe this role's report (the reviewer's).
     edit_description: str | None = None
+    # The turn's other reports (C3): briefs by id, in filing order (the lead's cycle shares its
+    # dict here); empty for every other role. `locked` is set when `turn_end` accepts the turn.
+    briefs: dict[str, BriefReport] = field(default_factory=dict)
+    locked: bool = False
+    # Handles a brief may name beyond `receipts` (what reached the unit by message).
+    viewable: Callable[[str], bool] | None = None
 
 
 #: The report fields the provenance check reads: prose a claim can be made in. Decision and
@@ -1249,6 +1354,7 @@ async def execute_turn_end(
     validator: Callable[[], list[str]] | None,
     arguments: Mapping[str, Any],
     warnings: Callable[[], list[str]] | None = None,
+    lock: Callable[[], None] | None = None,
 ) -> ToolOutcome:
     """Accept the turn, or reject it naming exactly what is missing (F5c).
 
@@ -1264,6 +1370,7 @@ async def execute_turn_end(
 
     ``warnings`` (ruling 2026-10-18) are shown and never refuse: beside the problems on a
     rejection, and after "Turn ended." on an accepted turn, which files the report as it stands.
+    ``lock`` runs once the turn is accepted: it locks every report of the turn (ruling Q3, C3).
     """
     problems = list(validator() if validator is not None else [])
     notes = list(warnings() if warnings is not None else [])
@@ -1277,6 +1384,8 @@ async def execute_turn_end(
             ),
             is_error=True,
         )
+    if lock is not None:
+        lock()
     summary = str(arguments.get("summary") or "").strip()
     text = f"Turn ended. {summary}".strip()
     if notes:
@@ -1481,17 +1590,19 @@ def edit_report_tool_def(
     status_values: tuple[str, ...] = WORKER_STATUS_VALUES,
     report_model: type | None = None,
     description: str | None = None,
+    briefs: bool = False,
 ) -> dict:
     """Definition for ``edit_report`` — Edit over the report draft document (A7).
 
     ``prose_fields`` selects this role's blocks and must match the workspace's own ``prose_fields``;
     ``description`` (the reviewer's) replaces the analysts' evidence text after the edit text.
+    ``briefs`` (the lead with authoring on, C3) adds the ``report`` target and the brief layout.
     """
-    return edit_tool_def(
+    return _with_briefs(edit_tool_def(
         EDIT_REPORT_TOOL, report_blocks(prose_fields, report_model),
         _role_status_values(prose_fields, status_values),
         _role_extra(prose_fields, report_model, description),
-    )
+    ), briefs)
 
 
 def write_report_tool_def(
@@ -1499,13 +1610,38 @@ def write_report_tool_def(
     status_values: tuple[str, ...] = WORKER_STATUS_VALUES,
     report_model: type | None = None,
     description: str | None = None,
+    briefs: bool = False,
 ) -> dict:
     """Definition for ``write_report`` — Write the whole report draft document (A7)."""
-    return write_tool_def(
+    return _with_briefs(write_tool_def(
         report_blocks(prose_fields, report_model),
         _role_status_values(prose_fields, status_values),
         _role_extra(prose_fields, report_model, description),
-    )
+    ), briefs)
+
+
+_BRIEF_TEXT = (
+    "Each tool brief author_chain files (one per link, ids spec1, spec2, ...) is a report of its "
+    "own: write or edit it the same way, with report set to its id. While its link's coding "
+    "session runs, the coder reads each revision at its next turn as a diff, and the gate and the "
+    "co-lead read the current version at each submission; the link's commit locks its brief, and "
+    "turn_end locks every report of the turn. A brief's document:\n"
+)
+
+
+def _with_briefs(definition: dict, briefs: bool) -> dict:
+    """Add the ``report`` target and the brief document's layout to a report tool (C3)."""
+    if not briefs:
+        return definition
+    definition["description"] += "\n\n" + _BRIEF_TEXT + layout(TOOLSPEC_BLOCKS)
+    definition["input_schema"]["properties"]["report"] = {
+        "type": "string",
+        "description": (
+            f"The report to change: {RESULT_REPORT} (the default) for your report, or a brief's "
+            "id (spec1, spec2, ... as author_chain lists them) for that tool brief."
+        ),
+    }
+    return definition
 
 
 def _is_figured(model: type) -> bool:
@@ -1649,6 +1785,13 @@ async def execute_edit_report(
     """
     if workspace is None:
         return ToolOutcome(text=f"{tool} is not available for this role.", is_error=True)
+    if str(arguments.get("report") or RESULT_REPORT) != RESULT_REPORT:
+        return _edit_brief(workspace, arguments, tool)
+    if workspace.locked:
+        return ToolOutcome(
+            text=f"{tool}: your report is filed and locked by turn_end; it stands as filed.",
+            is_error=True,
+        )
     figured = _is_figured(workspace.report_model)
     blocks = _blocks(workspace)
     result = change(_report_values(workspace, workspace.written_report), blocks, tool, arguments)
@@ -1741,6 +1884,173 @@ async def execute_write_report(
     return await execute_edit_report(workspace, arguments, WRITE_REPORT_TOOL)
 
 
+#: A brief's text fields, where a handle a brief names is checked (C3).
+_BRIEF_TEXT_FIELDS = ("science_context", "expected_behavior", "observed_issue", "notes")
+
+
+def _edit_brief(workspace: ReportWorkspace, arguments: Mapping[str, Any], tool: str) -> ToolOutcome:
+    """Apply one write or edit to a brief of the turn (C3): its schema decides, never its numbers."""
+    target = str(arguments.get("report"))
+    brief = workspace.briefs.get(target)
+    if brief is None:
+        filed = f" and the briefs {', '.join(workspace.briefs)}" if workspace.briefs else ""
+        return ToolOutcome(
+            text=(
+                f"{tool}: this turn has no report {target!r}. Its reports are {RESULT_REPORT} (your "
+                f"report, the default){filed}."
+            ),
+            is_error=True,
+        )
+    if brief.locked_by is not None:
+        return ToolOutcome(
+            text=(
+                f"{tool}: brief {target} is locked ({_LOCKED_BY.get(brief.locked_by, brief.locked_by)}) "
+                "and stands as it is"
+                + (f"; view it as receipt {brief.receipt}" if brief.receipt else "")
+                + ". Brief a further change as a new link with author_chain."
+            ),
+            is_error=True,
+        )
+    result = change(brief.values(), brief.blocks, tool, arguments)
+    problems = list(result.problems)
+    new = None
+    if not problems:
+        try:
+            new = type(brief.value).model_validate(
+                {**result.values, "id": brief.value.id, "created_at": brief.value.created_at}
+            )
+        except ValidationError as exc:
+            problems.append(f"the brief does not validate: {exc}")
+    if new is not None and brief.bound:
+        # The branch, the submission snapshots and the coder's view of the package are keyed by
+        # these, so they stay while the link's session runs (ruling (b), C3).
+        for name in ("proposed_tool_name", "target_domain"):
+            if getattr(new, name) != getattr(brief.value, name):
+                problems.append(
+                    f"# {name} stays {getattr(brief.value, name)!r} while this link's coding "
+                    "session runs; brief a different tool as a new link with author_chain."
+                )
+    if problems:
+        return ToolOutcome(
+            text=(
+                f"{tool}: brief {target} is unchanged.\n"
+                + "\n".join(f"  - {p}" for p in problems)
+                + f"\nBrief {target} on file reads:\n" + brief.document().rstrip("\n")
+            ),
+            is_error=True,
+        )
+    before = brief.sha256
+    brief.value = new
+    lines = reply_lines(tool, result, brief.document())
+    lines.append(
+        f"Brief {target} ({new.proposed_tool_name}) is version {brief.sha256[:8]}"
+        + (" (unchanged)" if brief.sha256 == before else "")
+        + ("; its running coding session reads this version: the coder at its next turn, as a "
+           "diff, and the gate and the co-lead at the next submission." if brief.bound else ".")
+    )
+    handles = brief_problems(brief, _brief_viewable(workspace))
+    if brief.stranded:
+        lines.append(
+            f"No link can open brief {target} any more, so turn_end locks it as written, as what "
+            "was never attempted."
+        )
+    elif handles:
+        lines.append("turn_end will refuse until these are fixed:")
+        lines.extend(f"  - {problem}" for problem in handles)
+    return ToolOutcome(text="\n".join(lines))
+
+
+def _stripped(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return [_stripped(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _stripped(v) for k, v in value.items()}
+    return value
+
+
+def _as_brief_value(spec: Any) -> tuple[Any | None, list[str]]:
+    """``spec`` as its brief document reads it back (C3), or what does not survive the trip.
+
+    A value filed through ``author_chain`` that the document would change or refuse — a ':' in a
+    check's kind, a text line written as a '# ' header — is refused at filing, by field, so no later
+    edit changes what the lead filed without saying so. Surrounding whitespace is normalised.
+    """
+    filed = spec.model_dump(mode="json")
+    document = render({b.field: filed.get(b.field) for b in TOOLSPEC_BLOCKS}, TOOLSPEC_BLOCKS)
+    values, problems = parse_document(document, TOOLSPEC_BLOCKS)
+    if problems:
+        return None, problems
+    try:
+        back = type(spec).model_validate({**values, "id": spec.id, "created_at": spec.created_at})
+    except ValidationError as exc:
+        return None, [f"the brief does not read back: {exc}"]
+    returned = back.model_dump(mode="json")
+    lost = [b.field for b in TOOLSPEC_BLOCKS
+            if _stripped(filed.get(b.field)) != _stripped(returned.get(b.field))]
+    return (None, [
+        f"{field} reads back differently from its brief document; rephrase it (a check's kind "
+        "without ':', a dataset part without '|')" for field in lost
+    ]) if lost else (back, [])
+
+
+def _brief_viewable(workspace: ReportWorkspace | None) -> Callable[[str], bool]:
+    """What a brief may name: a receipt the unit can open, or one that reached it by message."""
+    scope = getattr(workspace, "receipts", None)
+    extra = getattr(workspace, "viewable", None)
+    return lambda h: bool((scope is not None and scope.visible(h)) or (extra is not None and extra(h)))
+
+
+def brief_problems(brief: BriefReport, viewable: Callable[[str], bool]) -> list[str]:
+    """A brief's validator (C3): its handles are receipts of this run. Its schema is checked on
+    every edit; its numbers are prescriptions, so nothing grounds them."""
+    from auto_research.provenance.refs import brief_handle_problems
+
+    texts = {name: str(getattr(brief.value, name, "") or "") for name in _BRIEF_TEXT_FIELDS}
+    texts["proposed_checks"] = "\n".join(
+        str(getattr(c, "description", "")) for c in getattr(brief.value, "proposed_checks", []) or []
+    )
+    return [p for name, text in texts.items() for p in brief_handle_problems(name, text, viewable)]
+
+
+def turn_brief_problems(workspace: ReportWorkspace | None) -> list[str]:
+    """Every unlocked brief's validator, for ``turn_end`` (a locked brief was checked at its lock;
+    a stranded one is never handed on, so its handles block nothing)."""
+    if workspace is None:
+        return []
+    viewable = _brief_viewable(workspace)
+    return [
+        f"brief {brief.id}: {problem}"
+        for brief in workspace.briefs.values() if brief.locked_by is None and not brief.stranded
+        for problem in brief_problems(brief, viewable)
+    ]
+
+
+def mint_brief(brief: BriefReport, store: Any | None, source: str | None) -> str | None:
+    """A locked brief, minted once as a receipt (C3): viewable by the run, never evidence."""
+    if brief.receipt is None and store is not None and source:
+        # A text the unit wrote, recorded as a dispatched brief is (`ReceiptStore.mint_input`):
+        # kind "result", nothing ran, so no environment.
+        brief.receipt = store.mint(
+            source=source, kind="result", produced_by=TOOLSPEC_PRODUCER, data=brief.document(),
+            env_default=False,
+            caption=f"tool brief {brief.id} ({brief.value.proposed_tool_name}), version {brief.sha256[:8]}",
+        ).handle
+    return brief.receipt
+
+
+def lock_turn_reports(workspace: ReportWorkspace | None, store: Any | None = None,
+                      source: str | None = None) -> None:
+    """``turn_end`` accepted (ruling Q3): every report of the turn is locked, each brief minted."""
+    if workspace is None:
+        return
+    workspace.locked = True
+    for brief in workspace.briefs.values():
+        brief.lock("turn_end")
+        mint_brief(brief, store, source)
+
+
 # ----------------------------------------------------------------------------
 # Lead-only tool-authoring tools (§9.3, B-topology). The analyst lead drives a live
 # AuthoringSession: it steers the coder (message to the coder, E12), submits to the deterministic
@@ -1760,7 +2070,8 @@ def submit_tool_def() -> dict:
         "description": (
             "Submit the coder's current work to the deterministic gate and the independent "
             "co-lead review. The gate is mechanical (determinism, no-fabrication, structure, the "
-            "tool's own tests) — you can only satisfy it, by fixing the code through message to the coder. The "
+            "tool's own tests, and the toolkit's earlier fast tests, which the change keeps passing) "
+            "— you can only satisfy it, by fixing the code through message to the coder. The "
             "review judges whether the plan and its tests are right and strict enough. On gate-pass "
             "AND review-pass the tool is committed automatically — you never self-approve. If the "
             "gate fails, fix and submit again; if the review rejects, either message the coder to address "
@@ -2086,15 +2397,48 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
         # credits ended the entire analysis (slot 1, 2026-09-11), and a lead in the identical
         # position paid a debate round and a full worker rerun to say the same thing (slot 2).
         # Now the link closes, the next one opens, and the lead is still in its turn.
+        # The facts are read off the session, after the close: the commits it landed (a session
+        # that had committed twice was told "it did not commit", run polevo-20261104) and the
+        # patch its uncommitted work was saved to when the close reset the tree (C2).
+        name = session.tool_spec.proposed_tool_name
+        advanced = await _advance(cycle)
+        commits = list(getattr(session, "commits", ()))
+        landed = (
+            f"are used. This session committed {name} ({', '.join(sha[:10] for sha in commits)}); "
+            + ("that commit stays" if len(commits) == 1 else "those commits stay")
+            + " on the authoring branch."
+            if commits else "are used and it did not commit."
+        )
+        patch = getattr(session, "reset_patch", None)
+        if getattr(session, "reset_failed", False):
+            # C2b: the reset raised, so the work may still be in the tree workers import.
+            saved = (
+                " Clearing this session's uncommitted changes from the toolkit failed, so the "
+                "toolkit tree may still hold them"
+                + (f"; they are saved as a patch at {patch}." if patch else ".")
+            )
+        elif getattr(session, "reset_save_failed", False):
+            # C2c: the tree is clean, and the work has no patch to recover it from.
+            saved = (
+                " This session's uncommitted changes were cleared from the toolkit; saving them as "
+                "a patch failed."
+            )
+        else:
+            saved = (
+                f" This session's uncommitted changes were cleared from the toolkit and saved as a "
+                f"patch at {patch}." if patch else ""
+            )
         return ToolOutcome(
             text=(
-                f"CI BUDGET SPENT — all {session.submit_cap} review submissions for "
-                f"{session.tool_spec.proposed_tool_name} are used and it did not commit. This "
-                "attempt is over; reconsider the plan and the wiring rather than resubmitting. "
-                "An honest failure is an acceptable, correct outcome — never fabricate to force "
-                "a pass." + await _advance(cycle)
+                f"CI BUDGET SPENT — all {session.submit_cap} review submissions for {name} "
+                f"{landed}{saved} This attempt is over; reconsider the plan and the wiring rather "
+                "than resubmitting. An honest failure is an acceptable, correct outcome — never "
+                "fabricate to force a pass." + advanced
             )
         )
+    unready = _brief_unready(session, cycle)
+    if unready is not None:
+        return unready
     session.submits_used += 1
     gate = await session.run_gate_step()
     if not gate.passed:
@@ -2116,6 +2460,14 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
         # The tree could not be read for the review: an honest error to the lead, never a crash.
         return ToolOutcome(text=f"The co-lead review could not read the changeset: {exc}. "
                                 "Fix the tree with the coder, then submit_for_review.", is_error=True)
+    except Exception as exc:
+        failed = _colead_failure(exc, SUBMIT_TOOL, cycle, session)
+        if failed is None:
+            raise
+        outcome, refund = failed
+        if refund:
+            session.submits_used -= 1  # a passing failure: the submission is not counted
+        return outcome
     if not review.approved:
         issues = "\n".join(f"- {i}" for i in review.issues) or review.rationale
         return ToolOutcome(
@@ -2125,19 +2477,112 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
                 "respond_to_review to defend the design if you believe a challenge is unfounded."
             )
         )
+    return await _commit_and_advance(
+        session, review, cycle,
+        lambda name, sha: (
+            f"COMMITTED {name} → {sha}. Gate passed and the co-lead approved — the tool is on the "
+            "authoring branch. Authoring for this tool is done."
+        ),
+    )
+
+
+#: Passing co-lead failures a coding session refunds before they count (ruling C3c).
+COLEAD_REFUNDS = 3
+
+
+def _colead_failure(
+    exc: BaseException, tool: str, cycle: "LeadCycle | None", session: Any = None,
+) -> tuple[ToolOutcome, bool] | None:
+    """A co-lead review whose model call failed, as the error result of the lead's ``tool`` (C3b),
+    and whether the call is refunded.
+
+    The co-lead is not a unit: its failure ends neither the lead's turn nor the run. A passing
+    failure (overload, rate, an unreachable vendor) is refunded, so the lead may call again, up to
+    ``COLEAD_REFUNDS`` per session; after those, and for one likely to recur (a refusal of the
+    request, a verdict off-schema after its retries), it is counted, so the link's own caps bound
+    the retries. ``None`` — raised as before — for an account-wide
+    failure (ruling (c)), any other exception, and outside a cycle (``drive_authoring``, whose path
+    backs published measurements).
+    """
+    from auto_research.agents.roles import ModelCallFailed
+    from auto_research.models.retry import is_transient_provider_error
+
+    if cycle is None or not isinstance(exc, ModelCallFailed) or exc.account_wide:
+        return None
+    cause = f"{type(exc.cause).__name__}: {str(exc.cause)[:300]}"
+    passing = is_transient_provider_error(exc.cause, exc.provider)
+    refunded = int(getattr(session, "colead_refunds", 0) or 0)
+    if passing and refunded >= COLEAD_REFUNDS:
+        return ToolOutcome(
+            text=(
+                f"The co-lead review did not run: its vendor did not answer ({cause}). After "
+                f"{COLEAD_REFUNDS} such failures on this link were not counted, this call counts "
+                "against your budget, as will each further one. Nothing was committed. Say so in "
+                "your report if it recurs."
+            ),
+            is_error=True,
+        ), False
+    if passing:
+        if session is not None:
+            session.colead_refunds = refunded + 1
+        return ToolOutcome(
+            text=(
+                f"The co-lead review did not run: its vendor did not answer ({cause}). Nothing was "
+                f"committed, and this call is not counted against your budget. Call {tool} again "
+                "to have the work reviewed."
+            ),
+            is_error=True,
+        ), True
+    return ToolOutcome(
+        text=(
+            f"The co-lead review did not run: its model call failed ({cause}), and the same "
+            f"request is likely to fail again. Nothing was committed; this call counts against "
+            "your budget. Say so in your report if it recurs."
+        ),
+        is_error=True,
+    ), False
+
+
+def _brief_unready(session: Any, cycle: "LeadCycle | None") -> ToolOutcome | None:
+    """The brief's validator, run before a submission spends anything (C3 ruling): the commit it
+    may lead to locks the brief, and ``turn_end`` checks only the briefs still open."""
+    brief = getattr(session, "brief", None)
+    viewable = getattr(cycle, "brief_viewable", None)
+    if brief is None or viewable is None:
+        return None
+    problems = brief_problems(brief, viewable)
+    if not problems:
+        return None
+    return ToolOutcome(
+        text=(
+            f"Not submitted: brief {brief.id} needs a fix first, since a commit locks it:\n"
+            + "\n".join(f"  - {p}" for p in problems)
+            + f"\nFix it with edit_report, report set to {brief.id}, then submit again. Nothing "
+            "was spent."
+        ),
+        is_error=True,
+    )
+
+
+async def _commit_and_advance(
+    session: Any, review: Any, cycle: "LeadCycle | None", headline: Callable[[str, str], str]
+) -> ToolOutcome:
+    """Land the approved tree and close the link: the one commit tail of both review verdicts.
+
+    ``submit_for_review`` (an approval) and ``respond_to_review`` (a persuaded co-lead) each call
+    this once gate ∧ review hold, so a commit always reports the environment note and opens the
+    next link (C1: the rebuttal's own copy of this tail lacked the advance, run polevo-20261104).
+    ``headline(tool, short_sha)`` is each path's own first sentence. The commit receipt is minted
+    by the provider around both tools (``ReadOnlyToolProvider._commit_receipted``).
+    """
+    name = session.tool_spec.proposed_tool_name
     try:
-        sha = await session.commit(
-            review.commit_summary.strip() or session.tool_spec.proposed_tool_name
-        )
+        sha = await session.commit(review.commit_summary.strip() or name)
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
         return ToolOutcome(text=f"Not committed: {exc}. Call submit_for_review to judge the tree as it is now.",
                            is_error=True)
     return ToolOutcome(
-        text=(
-            f"COMMITTED {session.tool_spec.proposed_tool_name} → {sha[:10]}. Gate passed and the "
-            "co-lead approved — the tool is on the authoring branch. Authoring for this tool is "
-            "done." + getattr(session, "env_note", "") + await _advance(cycle)
-        )
+        text=headline(name, sha[:10]) + getattr(session, "env_note", "") + await _advance(cycle)
     )
 
 
@@ -2194,10 +2639,16 @@ def respond_to_review_tool_def() -> dict:
     }
 
 
-async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
+async def execute_respond_to_review(
+    session: Any, arguments: Mapping[str, Any], cycle: "LeadCycle | None" = None
+) -> ToolOutcome:
     """Re-run the co-lead review with the lead's rebuttal in view (§9.3 debate). On a concede, the
     immovable gate is re-validated before committing (the tree may have changed); commit ⇔ gate ∧
-    review still holds. Bounded by ``session.debate_cap``."""
+    review still holds. Bounded by ``session.debate_cap``.
+
+    A persuaded commit goes through :func:`_commit_and_advance`, as a direct approval does in
+    :func:`_submit_now`, so it closes the link and opens the next (C1). The coder's narration from
+    the wait leads every outcome of the review (C2), as :func:`execute_submit` does."""
     message = str(arguments.get("message") or "").strip()
     if not message:
         return ToolOutcome(
@@ -2215,10 +2666,31 @@ async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) 
                 "by messaging the coder, or conclude — an honest failure is an acceptable outcome."
             )
         )
-    # The co-lead re-reads the tree: hold until the coder stops, as a submit does.
+    # The co-lead re-reads the tree: hold until the coder stops, as a submit does. A session with
+    # no blocking wait (a benchmark's, a double's) is answered as `execute_submit` answers it.
+    if getattr(session, "drive_status", None) == "working" and not hasattr(session, "wait_for_event"):
+        return ToolOutcome(
+            text=(
+                "The coder is still working, and the co-lead reads the working tree. Respond once "
+                "it has stopped."
+            ),
+            is_error=True,
+        )
     prefix, blocked = await _wait_before_submit(session)
     if blocked is not None:
         return blocked
+    outcome = await _respond_now(session, message, cycle)
+    if prefix:
+        outcome.text = prefix + outcome.text
+    return outcome
+
+
+async def _respond_now(session: Any, message: str, cycle: "LeadCycle | None") -> ToolOutcome:
+    """The review + re-gate + commit half of :func:`execute_respond_to_review`, over a tree nobody
+    is writing."""
+    unready = _brief_unready(session, cycle)
+    if unready is not None:
+        return unready
     session.debates_used += 1
     try:
         review = await session.run_review_step(session.last_gate, lead_rebuttal=message)
@@ -2226,6 +2698,14 @@ async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) 
         # The tree could not be read for the review: an honest error to the lead, never a crash.
         return ToolOutcome(text=f"The co-lead review could not read the changeset: {exc}. "
                                 "Fix the tree with the coder, then submit_for_review.", is_error=True)
+    except Exception as exc:
+        failed = _colead_failure(exc, RESPOND_TO_REVIEW_TOOL, cycle, session)
+        if failed is None:
+            raise
+        outcome, refund = failed
+        if refund:
+            session.debates_used -= 1  # a passing failure: the turn is not counted
+        return outcome
     if not review.approved:
         issues = "\n".join(f"- {i}" for i in review.issues) or review.rationale
         return ToolOutcome(
@@ -2249,19 +2729,12 @@ async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) 
                 f"{failed}\nFix it by messaging the coder, then submit_for_review."
             )
         )
-    try:
-        sha = await session.commit(
-            review.commit_summary.strip() or session.tool_spec.proposed_tool_name
-        )
-    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
-        return ToolOutcome(text=f"Not committed: {exc}. Call submit_for_review to judge the tree as it is now.",
-                           is_error=True)
-    return ToolOutcome(
-        text=(
-            prefix + f"The co-lead was PERSUADED and the gate passed — COMMITTED "
-            f"{session.tool_spec.proposed_tool_name} → {sha[:10]}. Authoring for this tool is done."
-            + getattr(session, "env_note", "")
-        )
+    return await _commit_and_advance(
+        session, review, cycle,
+        lambda name, sha: (
+            f"The co-lead was PERSUADED and the gate passed — COMMITTED {name} → {sha}. "
+            "Authoring for this tool is done."
+        ),
     )
 
 
@@ -2332,6 +2805,15 @@ class LeadCycle:
     #: True while a coding session is open, so ``turn_end`` can refuse a turn that walks away from
     #: a running coder rather than finishing or abandoning it deliberately.
     session_open: bool = False
+
+    #: The turn's tool briefs by id (C3), one per link ``author_chain`` filed, in filing order; the
+    #: lead's report workspace shares this dict, so ``edit_report`` reaches them by id.
+    briefs: dict[str, BriefReport] = field(default_factory=dict)
+    #: The ids of the briefs whose links are still to open, oldest first: a later chain appends
+    #: (ruling (a), C3), and the chain driver opens them in this order.
+    queue: list[str] = field(default_factory=list)
+    #: What a brief may name (the lead's receipts and messages), for the check before a commit.
+    brief_viewable: Callable[[str], bool] | None = None
 @dataclass
 class LeadCycleOutcome:
     """What one turn of the lead's cycle loop concluded (``AnalystLeadAgent.run_cycle``).
@@ -2556,8 +3038,11 @@ def author_chain_tool_def() -> dict:
     return {
         "name": AUTHOR_CHAIN_TOOL,
         "description": (
-            "File the ordered chain of tool briefs to author now, and open the coding session on "
-            "its first link. Each link IS the opening prompt of one coding session: a coder reads "
+            "File the ordered chain of tool briefs to author now: each link becomes a brief report "
+            "of its own (spec1, spec2, ... in filing order), queued after any links still waiting, "
+            "and the next link's coding session opens when none is running. A brief stays yours to "
+            "revise with edit_report or write_report, report set to its id, until its link commits "
+            "or your turn ends. Each link IS the opening prompt of one coding session: a coder reads "
             "it and writes that tool, so write it as instructions to an engineer — the signature, "
             "the exact procedure, the edge cases, the tests it must add. A worker surfaces only "
             "the FIRST gap it hits, while you read the whole analysis prescription: file the "
@@ -2566,7 +3051,7 @@ def author_chain_tool_def() -> dict:
             "in the same chain. Read the target lib/ source with read_file/list_dir before filing, "
             "so each link's target_domain and disposition reflect what is already there. The links "
             "are authored back-to-back, each coder seeing the previous link's committed code; you "
-            "then steer each one with message to the coder and finish it with submit_for_review. File "
+            "then steer each one with message to the coder and finish it with submit_for_review. "
             "If the request resolves without new code, write your report and end your turn."
         ),
         "strict": True,
@@ -2638,26 +3123,48 @@ async def execute_author_chain(cycle: LeadCycle, arguments: Mapping[str, Any]) -
         except (TypeError, AttributeError) as exc:
             label = "first_link" if position == 1 else f"additional_links[{position - 2}]"
             problems.append(f"{label}: {type(exc).__name__}: {exc}")
+    for position, spec in enumerate(list(specs) if not problems else []):
+        # A brief is edited as its document, so it is filed as the document reads it back (C3).
+        back, lost = _as_brief_value(spec)
+        label = "first_link" if position == 0 else f"additional_links[{position - 1}]"
+        if lost:
+            problems.extend(f"{label}: {p}" for p in lost)
+        else:
+            specs[position] = back
     if problems:
         return ToolOutcome(
             text="These chain links are incomplete — fix them and file again:\n"
             + "\n".join(f"- {p}" for p in problems),
             is_error=True,
         )
+    # One brief report per link (C3), queued after any links still waiting (ruling (a)).
+    waiting = list(cycle.queue)
+    filed = []
+    for spec in specs:
+        brief_id = f"spec{len(cycle.briefs) + 1}"
+        cycle.briefs[brief_id] = BriefReport(id=brief_id, value=spec)
+        filed.append(brief_id)
+    cycle.queue.extend(filed)
     cycle.brief = AuthoringDecision(
         should_author=True,
-        tool_specs=specs,
+        tool_specs=[brief.value for brief in cycle.briefs.values()],
         rationale=str(arguments.get("rationale") or "").strip(),
     )
-    names = ", ".join(spec.proposed_tool_name for spec in specs)
+    names = ", ".join(f"{bid} ({cycle.briefs[bid].value.proposed_tool_name})" for bid in filed)
+    after = ""
+    if waiting:
+        after += f" They open after the links still waiting ({', '.join(waiting)})."
     opened = ""
-    if cycle.advance_chain is not None:
+    if cycle.session_open:
+        after += " They open once the running link ends."
+    elif cycle.advance_chain is not None:
         opened = "\n\n" + await cycle.advance_chain()
     return ToolOutcome(
         text=(
-            f"Brief accepted — {len(specs)} link(s), in order: {names}. Your turn continues; "
-            "when the chain is done, or you decide it is not worth continuing, write your report "
-            "and call turn_end." + opened
+            f"Brief accepted — {len(specs)} link(s), filed as briefs {names}, in order.{after} "
+            "Revise a brief with edit_report or write_report, report set to its id. Your turn "
+            "continues; when the chain is done, or you decide it is not worth continuing, write "
+            "your report and call turn_end." + opened
         )
     )
 
@@ -2666,18 +3173,26 @@ async def execute_author_chain(cycle: LeadCycle, arguments: Mapping[str, Any]) -
 # Analyst science tools — the existing ToolkitRegistry + PersistentSandbox.
 # ----------------------------------------------------------------------------
 
-def _observation_path_args() -> dict[str, str]:
-    """Map tool path-args to configured observation roots, e.g. ``ixpe_path`` →
-    the IXPE ``obs_db_path`` from ``config/observations.yaml``.
+#: The toolkit argument the runtime fills with the configured obs-db root itself (H2): `acquire`
+#: takes it, so it works on a root that holds no mission yet.
+OBS_DB_ROOT_ARG = "obs_db_root"
 
-    Convention: mission ``<m>`` in observations.yaml fills a tool argument named
-    ``<m>_path``.  Used to auto-supply instrument data paths so the model need not.
+
+def _observation_path_args() -> dict[str, str]:
+    """Map tool path-args to configured observation folders, e.g. ``ixpe_path`` →
+    the IXPE ``obs_db_path`` from ``config/observations.yaml``, and ``obs_db_root`` → the root.
+
+    Convention: a mission folder ``<m>`` under the root fills a tool argument named
+    ``<m>_path``, and the root fills one named ``obs_db_root`` (H2). Used to auto-supply instrument
+    data paths so the model need not.
     """
     try:
         cfg = load_observations_config()
     except Exception:  # noqa: BLE001
         return {}
-    return {f"{mission}_path": str(c.obs_db_path) for mission, c in cfg.missions.items()}
+    paths = {f"{mission}_path": str(c.obs_db_path) for mission, c in cfg.missions.items()}
+    paths[OBS_DB_ROOT_ARG] = str(cfg.obs_db_root)
+    return paths
 
 
 class SandboxToolProvider:
@@ -2730,10 +3245,6 @@ class SandboxToolProvider:
         # the worker can confirm an authoritative-doc point (mission threads, calibration memos)
         # rather than guessing (its prompt promises this). In-process, never in the sandbox.
         self.web_source = web_source
-        # Figures land in <worker scratch>/figures (under the runtime data dir),
-        # never in /tmp or a repo. See provenance.calls.resolve_call_args.
-        self.figures_dir = (Path(cwd) / "figures") if cwd is not None else None
-        self._figures_dir_ready = False
         self.timeout_s = timeout_s
         self.results: list[ToolResult] = []
         # Filesystem jail (CLAUDE.md §2/§12): the worker's builtin file tools are otherwise raw.
@@ -2806,6 +3317,7 @@ class SandboxToolProvider:
             return await execute_turn_end(
                 lambda: worker_report_problems(self.report_workspace), arguments,
                 lambda: report_warnings(self.report_workspace),
+                lambda: lock_turn_reports(self.report_workspace),
             )
         if name == READ_FILE_TOOL:
             # In this process, checked against the worker's allow-list (it resolves links). The
@@ -2882,7 +3394,10 @@ class SandboxToolProvider:
                 ),
                 is_error=True,
             )
-        context, shell_env = await self._call_context(kind)
+        # The call's id, allocated before it runs: it names the call's own products folder and is
+        # the `call_id` on every receipt the call mints, so the two agree.
+        call_id = uuid.uuid4().hex
+        context, shell_env = await self._call_context(kind, call_id)
         if isinstance(shell_env, ToolOutcome):
             return shell_env
         args = resolve_call_args(arguments, context)
@@ -2917,9 +3432,6 @@ class SandboxToolProvider:
         else:
             spec = self.registry.spec(kind)
             schema_props = (spec.get("args_schema") or {}).get("properties", {})
-            if context.get("figure_args") and not self._figures_dir_ready:
-                self.figures_dir.mkdir(parents=True, exist_ok=True)
-                self._figures_dir_ready = True
             # The environment the call runs in (env plan B3b): the package's tested one
             # (`tool_config.yaml` `env:`), or the caller's `env` — recorded with the call, marked
             # untested on its receipts, never sent to the tool.
@@ -2935,7 +3447,12 @@ class SandboxToolProvider:
                 self._validated, kind, arguments, sent, spec.get("args_schema"))
             if ref_error is not None:
                 return ToolOutcome(text=ref_error, is_error=True)
-            state = await self._inputs_before(sent, named=arguments)
+            outputs = context.get("output_args") or {}
+            if "products_dir" in context:
+                problem = _made_products_dir(Path(self.cwd), Path(context["products_dir"]))
+                if problem is not None:
+                    return ToolOutcome(text=problem, is_error=True)
+            state = await self._inputs_before(sent, named=arguments, outputs=outputs)
             raw = await self.sandbox.call_tool(
                 spec["module"], spec["fn"], sent, timeout_s=call_timeout,
                 **({"environment": routed} if routed is not None else {}),
@@ -2945,6 +3462,7 @@ class SandboxToolProvider:
 
         raw = normalize_tool_raw(raw)
         figures, figure_notes = parse_tool_figures(raw.get("figures"))
+        products, product_notes = parse_products(raw.get("products")) if ran else ([], [])
         text, exit_code = tool_text(raw)
         header = ""
         provenance_notes: list[str] = []
@@ -2966,9 +3484,11 @@ class SandboxToolProvider:
                 env_untested=untested, parents=ref_parents,
                 # What a toolkit tool returned beside its stdout: what a later `$ref` resolves.
                 returned={k: v for k, v in raw.items() if k not in PROTOCOL_KEYS} if ran else None,
+                call_id=call_id, products=products,
+                products_dir=Path(context["products_dir"]) if "products_dir" in context else None,
             )
             figures = minted.figures
-            provenance_notes = list(minted.notes)
+            provenance_notes = product_notes + list(minted.notes)
             receipt_call_id = minted.result.call_id
             header = minted.header() + "\n"
             environment = getattr(self.sandbox, "call_environment", None) or getattr(self.sandbox, "environment", None)
@@ -3048,7 +3568,8 @@ class SandboxToolProvider:
 
         if match.owner == "pipeline" and not jail_enabled():
             return None, f"{want} runs only in the jail, which is off for this run.", False
-        return match, None, untested
+        # A build of an earlier definition kept in use (its rebuild failed, D3b) is not the tested one.
+        return match, None, untested or bool(getattr(match, "superseded", False))
 
     def _usable_handles(self) -> set[str]:
         """The receipts a ``$ref`` may name: this agent's own results (user ruling 2026-11-03). A
@@ -3075,16 +3596,21 @@ class SandboxToolProvider:
             return dict(completed), [], str(exc)
         return values.sent, values.parents, None
 
-    async def _inputs_before(self, args: Mapping[str, Any], named: Mapping[str, Any] | None = None) -> Any:
-        """Hash what the call's arguments name, before it runs (data roots and outputs skipped)."""
+    async def _inputs_before(
+        self, args: Mapping[str, Any], named: Mapping[str, Any] | None = None, outputs: Iterable[str] = (),
+    ) -> Any:
+        """Hash what the call's arguments name, before it runs (data roots and outputs skipped;
+        ``outputs``: the call's ``output``-kind arguments, which name where it writes)."""
         if self.receipts is None or self.receipt_source is None:
             return None
         # A mission folder argument: the configured `<mission>_path` names, and `obs_db_path` (how
-        # `acquire` and `data_catalog` take theirs). The folder is never hashed whole (a mission
+        # `data_catalog` takes its own). The folder is never hashed whole (a mission
         # holds tens of thousands of files); the observations the call names in it are.
         missions = set(_observation_path_args()) | {"obs_db_path"}
-        skip = missions | set(_FIGURE_PATH_ARGS)
-        folders = {name: args[name] for name in sorted(missions) if isinstance(args.get(name), str) and args[name]}
+        skip = missions | set(_FIGURE_PATH_ARGS) | set(outputs)
+        # The root is no mission folder: never hashed, and no ObsID is looked up in it (H2).
+        folders = {name: args[name] for name in sorted(missions - {OBS_DB_ROOT_ARG})
+                   if isinstance(args.get(name), str) and args[name]}
         # `named`: the model's own arguments; a mission folder the runtime filled in is not one it read.
         by_model = [name for name in folders if named is None or (named.get(name) or "")]
         return await asyncio.to_thread(
@@ -3092,7 +3618,7 @@ class SandboxToolProvider:
                     observation_paths=folders, named_folders=by_model)
         )
 
-    async def _call_context(self, kind: str) -> tuple[dict[str, Any], Any]:
+    async def _call_context(self, kind: str, call_id: str) -> tuple[dict[str, Any], Any]:
         """What the runtime decides for one call that the model does not write: ``(context, shell
         environment)``, or ``(context, ToolOutcome)`` when the worker's shell environment is gone.
 
@@ -3106,10 +3632,14 @@ class SandboxToolProvider:
         - ``defaults``: the defaults the tool's manifest declares for its parameters, passed when
           the model leaves one out, so the call records the value the tool ran with;
         - ``module`` / ``fn``: where a toolkit tool's code is (the registry's manifest entry);
-        - ``figure_args`` / ``figures_dir`` / ``stamp_ms``: figure outputs are placed under
-          the worker's figures folder (any toolkit tool following the ``_FIGURE_PATH_ARGS``
-          convention), never /tmp, a repository, or wherever the model named; an unnamed figure is
-          called ``<fn>_<stamp_ms>``;
+        - ``figure_args``: figure outputs (any toolkit tool following the ``_FIGURE_PATH_ARGS``
+          convention) are placed in the call's own folder ``products_dir``, like outputs, never
+          /tmp, a repository, or wherever the model named; an unnamed figure is called ``<fn>``;
+        - ``output_args`` / ``products_dir`` (/ ``output_names``, the manifest's default file names):
+          every ``output``-kind argument the manifest declares, ``{argument: shape}``, and the call's
+          own folder ``<workdir>/products/<fn>/<call_id>``
+          they are placed in (``call_id`` is the one the call's receipts carry); a declared output
+          wins over a legacy figure name; a call with outputs and no working folder is refused;
         - ``runtime_only``: ``env`` for a toolkit tool declaring no argument of that name (it picks
           the environment, ``_route_environment``) and ``shell_env`` for a wrapped shell command:
           recorded and hashed with the call, never sent to the tool.
@@ -3151,10 +3681,24 @@ class SandboxToolProvider:
         if "env" not in schema_props:
             # The caller's `env` picks the environment (`_route_environment`) and is never sent.
             context["runtime_only"] = ["env"]
-        figure_args = [name for name in _FIGURE_PATH_ARGS if name in schema_props]
-        if figure_args and self.figures_dir is not None:
-            context.update(figure_args=figure_args, figures_dir=str(self.figures_dir),
-                           stamp_ms=int(time.time() * 1000))
+        from auto_research.provenance.inputs import declared_output_names, declared_outputs
+
+        outputs = declared_outputs(spec.get("args_schema"))
+        figure_args = [name for name in _FIGURE_PATH_ARGS if name in schema_props and name not in outputs]
+        if figure_args and self.cwd is not None:
+            context.update(figure_args=figure_args,
+                           products_dir=str(Path(self.cwd) / "products" / str(spec.get("fn")) / call_id))
+        if outputs:
+            if self.cwd is None:
+                return context, ToolOutcome(
+                    text="This tool writes into a folder the runtime places, and this call path has none.",
+                    is_error=True,
+                )
+            context.update(output_args=outputs,
+                           products_dir=str(Path(self.cwd) / "products" / str(spec.get("fn")) / call_id))
+            names = declared_output_names(spec.get("args_schema"))
+            if names:
+                context["output_names"] = names
         return context, None
 
 
@@ -3879,7 +4423,8 @@ class ReadOnlyToolProvider:
                 {
                     "name": "open_paper",
                     "description": (
-                        "Open a local PDF (text + figures) to read it before citing. Pass a path "
+                        "Open a local PDF to read it, as your model reads a paper, before citing. "
+                        "Pass a path "
                         "from text_search. The papers you open and actually use are exactly the "
                         "ones to list in the verdict's cited_paths; the report's References "
                         "section links to those files. A paper too large for the model's provider "
@@ -3919,8 +4464,9 @@ class ReadOnlyToolProvider:
                 self.report_workspace.prose_fields, self.report_workspace.status_values,
                 self.report_workspace.report_model, self.report_workspace.edit_description,
             )
-            definitions.append(edit_report_tool_def(*surface))
-            definitions.append(write_report_tool_def(*surface))
+            briefs = self.cycle is not None and self.cycle.authoring_enabled
+            definitions.append(edit_report_tool_def(*surface, briefs=briefs))
+            definitions.append(write_report_tool_def(*surface, briefs=briefs))
         if self.editable_file is not None:
             definitions.append(file_edit_tool_def(self.editable_file))
         if self.turn_end_validator is not None:
@@ -4014,9 +4560,18 @@ class ReadOnlyToolProvider:
             "submissions_used": getattr(session, "submits_used", None),
             "submit_cap": getattr(session, "submit_cap", None),
         }
+        # The brief the link was bound to, locked by the commit (C3): the receipt names the
+        # version the co-lead reviewed, and the brief's own receipt is its parent.
+        brief = getattr(session, "brief", None)
+        parents: list[str] = []
+        if brief is not None:
+            handle = mint_brief(brief, self.receipts, self.receipt_source)
+            record["toolspec"] = handle
+            record["toolspec_sha256"] = getattr(session, "reviewed_spec_sha", None)
+            parents = [handle] if handle else []
         minted = self.receipts.mint(
             source=self.receipt_source, kind="commit", produced_by="approve_edit",
-            data=json.dumps(record, sort_keys=True),
+            data=json.dumps(record, sort_keys=True), parents=parents,
         )
         return replace(outcome, text=f"[receipt {minted.handle}] (commit)\n{outcome.text}")
 
@@ -4030,7 +4585,7 @@ class ReadOnlyToolProvider:
                 return await execute_wait_coder(self.authoring_session, arguments)
             if name == SUBMIT_TOOL:
                 return await execute_submit(self.authoring_session, self.cycle)
-            return await execute_respond_to_review(self.authoring_session, arguments)
+            return await execute_respond_to_review(self.authoring_session, arguments, self.cycle)
         if name == AUTHOR_CHAIN_TOOL and self.cycle is not None:
             return await execute_author_chain(self.cycle, arguments)
         if name == EDIT_REPORT_TOOL:
@@ -4040,9 +4595,14 @@ class ReadOnlyToolProvider:
         if name == FILE_EDIT_TOOL:
             return await execute_file_edit(self.editable_file, arguments, self._guard)
         if name == TURN_END_TOOL:
+            validator = self.turn_end_validator
             return await execute_turn_end(
-                self.turn_end_validator, arguments,
+                # Every report of the turn is validated (ruling Q3): the role's own, then each brief.
+                lambda: [*(validator() if validator is not None else []),
+                         *turn_brief_problems(self.report_workspace)],
+                arguments,
                 lambda: report_warnings(self.report_workspace),
+                lambda: lock_turn_reports(self.report_workspace, self.receipts, self.receipt_source),
             )
         if name in ("read_file", "list_dir"):
             target = Path(str(arguments.get("path", "")))
@@ -4113,7 +4673,7 @@ class ReadOnlyToolProvider:
             if resolved not in self.opened_paths:
                 self.opened_paths.append(resolved)
             return ToolOutcome(
-                text=f"opened '{doc.title}' ({target}); the PDF is attached in this conversation.",
+                text=f"opened '{doc.title}' ({target}); the paper follows in this conversation.",
                 documents=[doc],
             )
 

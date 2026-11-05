@@ -1,6 +1,6 @@
 """Opt-in live WhatsApp round-trip (CLAUDE.md §9.8 / §10 live-API stub).
 
-    AUTO_RESEARCH_LIVE_WHATSAPP=1 pytest tests/test_live_whatsapp.py -s
+    AUTO_RESEARCH_LIVE_WHATSAPP=1 pytest tests/test_live_whatsapp.py --live -s
 
 Sends a real ``HumanQuery`` to your WhatsApp via Twilio and **blocks for your reply**, then
 records the exchange under ``logs/dev/``. Requires the Twilio WhatsApp env keys
@@ -20,10 +20,10 @@ import pytest
 from auto_research.env import check_required_env
 from auto_research.schemas import HumanQuery
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
     os.getenv("AUTO_RESEARCH_LIVE_WHATSAPP") != "1",
-    reason="set AUTO_RESEARCH_LIVE_WHATSAPP=1 to send a real WhatsApp clarification",
-)
+    reason="set AUTO_RESEARCH_LIVE_WHATSAPP=1 with --live to send a real WhatsApp clarification",
+)]
 
 
 def test_live_whatsapp_round_trip():

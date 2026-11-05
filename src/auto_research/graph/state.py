@@ -34,8 +34,13 @@ class ResearchState(TypedDict, total=False):
     # and the one sent to the human is the run's report.
     verdict: ReviewerReport | None
     verdicts: Annotated[list[ReviewerReport], operator.add]
-    # What came back since the reviewer's last turn: request | librarian | analysts | human.
+    # What came back since the reviewer's last turn: request | librarian | analysts | human, or
+    # librarian_failed | analysts_failed for a pass that filed no report (A4b).
     arrived: str
+    # The runtime's notice for that failed pass (the unit and the exception), read by the
+    # reviewer only on a *_failed arrival and cleared by the next filed pass: navigation, never a
+    # receipt (A4b).
+    pass_failure: str | None
     # The human's replies: their text as nudges (guidance, never receipts, human 2026-09-25) and
     # their files as input: receipt handles; and how many reports went to the human.
     human_nudges: Annotated[list[str], operator.add]

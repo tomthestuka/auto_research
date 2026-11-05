@@ -20,7 +20,9 @@ at all — self-modification is impossible by construction.
 Coding agents: read **`CLAUDE.md`** before doing anything. It is the single source of
 truth for how this project is built — current status, the phase spec, and the build
 order live there, not here. **Phase 3 (active):** generalizing the agent unit inside this
-repository (per-unit toolkit and sandbox, subagent grants). Its software-environment stream is
+repository (per-unit toolkit and sandbox, subagent grants). Its first step decouples the
+orchestration from `research_toolkit`: every coupling is removed or written into one toolkit
+contract, so any toolkit that meets it pairs with the orchestration. Its software-environment stream is
 built and live-verified: the coding pipeline defines and builds environments, and each toolkit call
 runs in its package's own. The Phase 2 spec is archived in `CLAUDE_p2.md`.
 
@@ -67,7 +69,7 @@ pytest -q          # ~477 deterministic tests; no API keys needed
 The suite is **portable**: tests that need a fully-provisioned machine (a real `analyze_env`
 interpreter, `obsdb_catalog` in the toolkit, a populated data root) **skip** gracefully when those
 are absent, rather than failing — so a fresh clone reports passes + skips, not errors. Live/XSPEC
-tests are opt-in and env-gated.
+tests are opt-in: marked `live`, skipped unless `--live` is passed.
 
 ### The two environments
 
@@ -127,9 +129,10 @@ smoke test.
 |---|---|
 | `.env` | API keys and optional tracing flags. Loaded automatically. Never committed (`cp .env.example .env`). |
 | `config/models.yaml` | Role → model-group mapping (OpenAI/Anthropic/Google/DeepSeek/Z.AI/Qwen). No model IDs in code. |
+| `config/model_capabilities.yaml` | What each model takes (images, PDF): the one capability source; every configured member's model needs an entry. |
 | `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `env_externals`, `conda_exe`, `disabled_tools`, `agent_fs_allow` (the per-agent filesystem allow-list), the internet-stability retry policy (`provider_retry_*` — transient provider failures waited out with growing cooldowns instead of killing the run), report formats, report retry cap, and Phase-2 authoring caps. |
-| `config/observations.yaml` | `obs_db_root` — the single obs-db folder; missions are its `<MISSION>` subdirs (those holding a `catalog.json`), discovered from disk and treated as data. |
-| `AUTO_RESEARCH_CONFIG_DIR` | Optional. Names a directory holding all four files below, and every reader honours it, so one process can be run against a whole different configuration — other model seats, another toolkit checkout, another runtime and obs root — without editing anything here. Unset (the normal case) is `config/`. An environment variable because the readers include subprocesses that inherit it and are not all Python. The `.example` templates and `.env` stay with the repo either way. |
+| `config/observations.yaml` | `obs_db_root` — the single obs-db folder; it may start empty, and `acquire` creates a mission's folder, laid out as HEASARC's archive tree, on its first observation. Missions are its subdirs holding a `catalog.json`. |
+| `AUTO_RESEARCH_CONFIG_DIR` | Optional. Names a directory holding all five files below, and every reader honours it, so one process can be run against a whole different configuration — other model seats, another toolkit checkout, another runtime and obs root — without editing anything here. Unset (the normal case) is `config/`. An environment variable because the readers include subprocesses that inherit it and are not all Python. The `.example` templates and `.env` stay with the repo either way. |
 | `config/code_gate.yaml` | The Phase-2 gate's no-fabrication scan lists (banned vocabulary, hard-fail vs finding-tier code patterns — which list a pattern sits in decides its severity; RNG is finding-tier since Monte-Carlo tools need randomness — literal-array findings, ObsID allowlist). A Tier-1 word inside an explicit negation is demoted to the finding tier, so prose stating the no-fabrication discipline is not rejected for stating it. Human-tunable; no scan constant in code. |
 
 **Keys** (the provider SDKs read these directly; see `.env.example` for the full template):
@@ -307,9 +310,11 @@ It prints at the end
 of a live, detached or CLI run (`ResearchRun.summary()` renders it on demand), and a run that *crashed*
 gets the same block, so a failure is as legible as a success.
 
-**Tests** — `pytest -q` for deterministic checks. Live API / XSPEC tests are opt-in via
-env flags (e.g. `AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1`) and write logs under
-`logs/dev/step-N/`.
+**Tests** — `pytest -q` (or `-m "not live"`) runs the deterministic suite. Live API / XSPEC tests
+carry the `live` marker and run only with `--live`; pick them by path and `-k`
+(`pytest tests/test_live_channel.py --live -s -k matrix`). Tests that message a person (Telegram,
+WhatsApp, HITL) or take destructive steps (the B-run) also keep their own `AUTO_RESEARCH_LIVE_*`
+switch. Logs go under `logs/dev/`.
 
 Any test that drives a real role resolves its model the way production does, so it measures
 whatever `config/models.yaml` names. `--seats` (or `AUTO_RESEARCH_SEATS`) points a whole session at
@@ -319,13 +324,13 @@ without a test knowing**:
 
 ```bash
 AUTO_RESEARCH_SEATS='analyst_lead=openai:gpt-5.6-terra,reviewer=dashscope:qwen3.8-max' \
-  AUTO_RESEARCH_LIVE_FIGURE_TESTS=1 pytest tests/test_live_figure_vision.py -s
+  pytest tests/test_live_figure_vision.py --live -s
 
-pytest tests/test_live_read_file.py \
+pytest tests/test_live_read_file.py --live \
   --seats 'analyst_worker=anthropic:claude-sonnet-5|dashscope:qwen3.7-plus'
 ```
 
-Members of one role are separated by `|`; a member may carry `!novision` or `!nodocs`. With no
+Members of one role are separated by `|`; what a member may be sent comes from its adapter. With no
 seat spec the session resolves the repository's own `config/` exactly as before.
 
 `--chatter` follows an XSPEC-style 1-10 verbosity scale; it filters live summaries and
@@ -461,15 +466,15 @@ prompts carry role and scope only; tool names, arguments, and descriptions reach
 through tool loading, not prompt text.
 
 Model groups are **config-driven** (`config/models.yaml`) across OpenAI, Anthropic, Google,
-DeepSeek, Z.AI, and Alibaba Model Studio. Role eligibility follows capabilities: DeepSeek's
-Responses endpoint is text-only, while Alibaba currently documents Qwen Max with image/text/video
-input. No model identifier is hardcoded. Defaults: reviewer group = Fable 5,
-GPT-5.5 high effort, and Gemini 3.5 Flash high thinking; analyst lead = Opus 4.8;
-analyst worker group = Sonnet 4.6 and GPT-5.5 medium effort; librarian group =
-Sonnet 4.6, GPT-5.5 medium effort, and Gemini 3.5 Flash thinking. Phase 2 adds `coder`
-(the tool author) and `analyst_colead` (GPT-5.5 xhigh) so tool authoring and review are
+DeepSeek, Z.AI, and Alibaba Model Studio. What each model takes is configuration
+(`config/model_capabilities.yaml`): DeepSeek's V4.1-Flash (`deepseek-flash`) takes images and `deepseek-v4-pro` does
+not, as DeepSeek's model page documents, while Alibaba currently documents Qwen Max with image/text/video input. Preflight ends
+with one paid probe per chat member (`member_media`). No model identifier is hardcoded. Defaults (`config/models.yaml`):
+reviewer group = Fable 5 and GPT-5.6 Sol; analyst lead = Opus 5; analyst worker group = Sonnet 5
+and GPT-5.6 Terra; librarian = Sonnet 5 (a role runs its first member unless a member is named). Phase 2 adds `coder`
+(the tool author) and `analyst_colead` (GPT-5.6 Sol, reasoning high) so tool authoring and review are
 provider-decorrelated. The `coder` member names **both a model and the author harness that drives
-it** (`harness: claude_sdk | codex`): the shipped default is DeepSeek through the Codex
+it** (`harness: claude_sdk | codex`): the shipped default is DeepSeek (`deepseek-flash`, V4.1-Flash) through the Codex
 app-server, and the Claude Agent SDK is the second harness; Codex also reaches Z.AI GLM and
 Alibaba Model Studio models through the endpoints those vendors document. Legal harness/provider pairings
 are checked at launch. A light `compactor` role summarises a finished

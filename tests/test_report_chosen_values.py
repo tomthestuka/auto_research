@@ -29,7 +29,8 @@ from tests.test_sandbox import _FakeRegistry, _FakeSandbox
 MAKE, FIT = "research_toolkit.tk.make", "research_toolkit.tk.fit"
 ME = "analyst_worker_0"
 REASON = "the request asks for a <b>99%</b> limit"
-SCHEMA = {"properties": {"d": {"kind": "data"}, "cl": {"kind": "parameter"}, "f": {"kind": "path"}},
+SCHEMA = {"properties": {"d": {"kind": "data"}, "cl": {"kind": "parameter"}, "f": {"kind": "path"},
+                         "o": {"kind": "output", "shape": "folder"}, "save_path": {"kind": "path"}},
           "required": ["cl"]}
 
 
@@ -58,14 +59,13 @@ def run(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
     monkeypatch.setattr(react, "_observation_path_args", lambda: {})
-    made = tmp_path / "w0" / "spec.pha"
-
     def tool(module, fn, args):
-        if "d" not in args:  # make
-            made.parent.mkdir(parents=True, exist_ok=True)
+        if "d" not in args:  # make: writes into its own folder and declares the file
+            made = Path(args["o"]) / "spec.pha"
             made.write_text("PHA\n")
             payload = {"bins": [{"q": 0.021510398015379906}], "file": str(made)}
-            return {"exit_code": 0, "stdout": json.dumps(payload), **payload}
+            return {"exit_code": 0, "stdout": json.dumps(payload), **payload,
+                    "products": [{"path": str(made), "caption": "spectrum"}]}
         return {"exit_code": 0, "stdout": "limit = 0.37959418926306543", "limit": 0.37959418926306543}
 
     store = ReceiptStore(tmp_path / "receipts")
@@ -120,11 +120,22 @@ def test_the_reproduce_code_feeds_each_call_what_its_tool_received(tmp_path, run
     fits = [by_receipt[f"# Reproduce {ME}:{r}: {FIT}"] for r in ("r2", "r3")]
     (tmp_path / "mod.py").write_text("def fn(**kwargs):\n    return kwargs\n")
     monkeypatch.syspath_prepend(str(tmp_path))
+    import tempfile
+
+    rerun = tmp_path / "rerun"
+    rerun.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(rerun))  # the reproduce code's fresh folders land here
     for code, want in zip(fits, (received[1], received[2])):
         monkeypatch.delitem(sys.modules, "mod", raising=False)
         namespace: dict = {}
         exec(code, namespace)  # noqa: S102 — the generated notebook lines, run as a human would
-        assert namespace["out"] == want
+        out = dict(namespace["out"])
+        # The output folder is a fresh one, so the rerun leaves the run's products as they are (B2).
+        rerun_folder = Path(out.pop("o"))
+        assert rerun_folder.is_dir() and rerun_folder.parent == rerun
+        # A figure path the runtime placed goes to the same fresh folder, its file name kept.
+        assert Path(out.pop("save_path")) == rerun_folder / Path(want["save_path"]).name == rerun_folder / "fn.png"
+        assert out == {k: v for k, v in want.items() if k not in ("o", "save_path")}
         args_line = next(line for line in code.splitlines() if line.startswith("args = "))
         assert "reason" not in args_line and "$args" not in args_line  # a parameter arrives as its value
 

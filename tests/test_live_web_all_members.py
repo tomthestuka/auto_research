@@ -1,8 +1,8 @@
-"""Env-gated LIVE test: every web-capable member (across all providers) can actually search the
+"""Opt-in LIVE test: every web-capable member (across all providers) can actually search the
 web via the wired tools and answer a real IXPE question ([I10] cross-provider round-trip).
 
 Activate with:
-    AUTO_RESEARCH_LIVE_WEB_MEMBERS_TESTS=1 pytest tests/test_live_web_all_members.py -q -s
+    pytest tests/test_live_web_all_members.py --live -q -s
 
 For each DISTINCT model member of the web-capable roles (reviewer, analyst_lead, analyst_worker,
 analyst_colead), we drive a minimal ReAct loop with a `web_source`-backed ReadOnlyToolProvider and
@@ -15,7 +15,6 @@ all three provider APIs, so it spends tokens and a few Tavily credits.
 
 import asyncio
 import json
-import os
 import time
 from pathlib import Path
 
@@ -30,10 +29,7 @@ from auto_research.agents.react import (
 from auto_research.agents.roles import AgentRole
 from auto_research.models import ModelMessage, load_registry
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_WEB_MEMBERS_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_WEB_MEMBERS_TESTS=1 to run the all-members web live test (spends tokens + Tavily credits)",
-)
+pytestmark = pytest.mark.live
 
 _WEB_ROLES = ["reviewer", "analyst_lead", "analyst_worker", "analyst_colead"]
 

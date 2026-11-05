@@ -28,7 +28,7 @@ REPO = Path(__file__).resolve().parents[1]
 PACKAGE = REPO / "src" / "auto_research"
 # The tests are scanned too. A live test's slip is the same defect wearing a cheaper hat: on
 # 2026-08-19 a missing import in the coder matrix wasted a live invocation, and a test that only
-# runs behind an env flag has even fewer chances to be caught than a rare source branch.
+# runs behind `--live` has even fewer chances to be caught than a rare source branch.
 SCANNED = sorted(PACKAGE.rglob("*.py")) + sorted((REPO / "tests").glob("*.py")) + sorted(
     (REPO / "benchmarks").rglob("*.py")
 )

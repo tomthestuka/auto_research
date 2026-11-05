@@ -205,14 +205,14 @@ contention that does not happen. The imprecision runs the other way only when a 
 have two same-vendor roles in flight, which the ceilings absorb by sitting below the measured
 limit. The approximation is stated rather than modelled away.
 
-### Capability is declared, never assumed
+### Capability is the table's, never assumed
 
-Every seat carries its own vision and document flags. The reviewer, the lead and the worker are all
-sent figures, so a vision-less member in one of those seats must fail a **test**, not a trial. Two
-eligibility facts are carried as data rather than prose: one vendor's flagship is text-only, so its
-figure-seat level is the smaller vision-capable model instead; and one reviewer level has no native
-PDF, so it declares so, since the reviewer is handed paper PDFs and that arm needs extraction glue
-with a model-visible note before it can review.
+What a seat may be sent is its model's entry in `config/model_capabilities.yaml`, written from the
+vendor's docs (`Seat.capability()`, `auto_research.models.providers.media_capability`, Z1d). The reviewer, the lead and the worker are all
+sent figures, so a member without image input in one of those seats must fail a **test**, not a
+trial. Two eligibility facts follow: one vendor's flagship is text-only, so its figure-seat level is
+the smaller vision-capable model instead; and one reviewer level's dialect carries no inline PDF,
+so its documents are `"parsed"` (locally parsed text plus crops, with a model-visible note).
 
 Prices are carried only for the models the maintained pricing map does not cover, and a model whose
 rate has not been read off its vendor's own page is **named as unread** rather than guessed. A
@@ -356,7 +356,7 @@ This was found by an audit of the first live ledger, not by design review: the p
 
 | Symbol | Meaning |
 |---|---|
-| `Seat` | One model in one role: vendor, model, declared vision and document capability, vendor ceiling, and why the level is on its axis. |
+| `Seat` | One model in one role: vendor, model, its adapter's media capability (`capability()`), vendor ceiling, and why the level is on its axis. |
 | `Seat.price()` / `Seat.parameters()` | Its per-million-token rate when the maintained map lacks one, and its pinned maximum-effort settings. |
 | `WorkerPair` | The two analyst workers of one arm; `providers()` is what the decorrelation test reads. |
 | `Arm` | One seat combination — lead, reviewer, worker pair — plus the two pinned seats. |
@@ -507,7 +507,7 @@ empty figure is later mistaken for a result.
 
 Invariants a caller may rely on, each pinned by a test: block 1 is balanced as described; run ids
 are unique across the whole campaign and carry no part of their condition; `BLOCK0 is BLOCK1[0]`;
-every figure-bearing seat is vision-declared; every worker pair is provider-decorrelated; every
+every figure-bearing seat takes images by its capability entry; every worker pair is provider-decorrelated; every
 vendor on an axis has pinned parameters; the two pinned seats are identical in every arm and
 decorrelated from each other.
 
@@ -526,12 +526,9 @@ Nothing depends on this package.
 
 ## 5. Dictionary-level reference
 
-- **`Seat.vision`** — declared per that vendor's own documentation. True for every level on the
-  lead, reviewer and worker axes, since all three are sent figures; false on the pinned author,
-  which is a harness subprocess and is never handed one.
-- **`Seat.documents`** — whether the vendor accepts PDFs natively. False on the reviewer level
-  whose vendor publishes no native PDF input; that arm needs extraction glue with a model-visible
-  note, since silent substitution would corrupt the very comparison the seat is in.
+- **`Seat.capability()`** — the seat's `MediaCapability` from its adapter (A1): image input true
+  on every level of the lead, reviewer and worker axes; documents `"native"` or `"parsed"` on every
+  reviewer level.
 - **`Seat.max_concurrency`** — concurrently running *trials* that may use this vendor in any seat.
   `None` is uncapped.
 - **`Seat.note`** — one sentence saying why the level is on its axis, for the write-up.
@@ -587,3 +584,10 @@ Compacted 2026-09-24 and 2026-10-19 (every entry); detail in git history.
   corrected.
 - 2026-10-06 — **[F25] A trial's allow-list names `<runtime_dir>/runs`, not the whole runtime dir,
   and the trial's papers are read-only** (`environment.orchestration_config`), as in production.
+- 2026-11-04 — A1: `Seat.vision`/`documents` retired; `Seat.capability()` reads the adapter's
+  declaration, and a written member carries no capability key.
+- 2026-11-04 — Z1b: `PRICES_UNREAD` is empty (`glm-5.3-flash` is priced by litellm at the vendor's
+  rates); `test_prices_are_read_or_declared_unread_never_invented` reads each seat's rate through
+  `observability.costs.token_rates_for`.
+- 2026-11-04 — Z1d: a trial's config dir carries `model_capabilities.yaml` byte for byte
+  (`environment.py`); `Seat.capability` reads it through `media_capability`.

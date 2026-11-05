@@ -871,3 +871,67 @@ def test_chunk_md_repeats_a_split_tables_header_in_every_part():
         assert part.startswith("| n | value |\n|---|---|\n")
     rows = [l for p in parts for l in p.split("\n")[2:]]
     assert rows == [f"| {i} | v{i} |" for i in range(450)]  # nothing lost or duplicated
+
+
+def test_a_half_started_telegram_connector_is_shut_down_by_aclose():
+    """D1b: polling failed to start after `initialize` and `app.start` ran; `aclose` stops and
+    shuts down what was started (and leaves the polling it never started alone)."""
+    calls: list[str] = []
+
+    class _PollingFails(_FakeTGApp):
+        def __init__(self):
+            super().__init__()
+
+            async def start_polling(**kwargs):
+                raise RuntimeError("deleteWebhook timed out")
+
+            async def stop():
+                calls.append("updater.stop")
+
+            self.updater = SimpleNamespace(start_polling=start_polling, stop=stop)
+
+        async def stop(self):
+            calls.append("stop")
+
+        async def shutdown(self):
+            calls.append("shutdown")
+
+    handler = TelegramHandler(app=_PollingFails(), chat_id="555")
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="deleteWebhook"):
+            await handler.start()
+        await handler.aclose()
+        await handler.aclose()  # nothing left to close
+
+    asyncio.run(scenario())
+    assert calls == ["stop", "shutdown"]
+
+
+def test_a_telegram_start_that_fails_in_initialize_closes_the_bots_clients():
+    """D1b: `getMe` timed out inside `initialize`, after the bot opened its HTTP clients; the app's
+    shutdown skips an uninitialized app, so `aclose` closes the bot's."""
+    calls: list[str] = []
+
+    class _GetMeTimesOut(_FakeTGApp):
+        async def initialize(self):
+            raise TimeoutError("getMe timed out")
+
+        async def shutdown(self):
+            calls.append("app.shutdown")
+
+    app = _GetMeTimesOut()
+
+    async def bot_shutdown():
+        calls.append("bot.shutdown")
+
+    app.bot.shutdown = bot_shutdown
+    handler = TelegramHandler(app=app, chat_id="555")
+
+    async def scenario():
+        with pytest.raises(TimeoutError):
+            await handler.start()
+        await handler.aclose()
+
+    asyncio.run(scenario())
+    assert calls == ["bot.shutdown"]

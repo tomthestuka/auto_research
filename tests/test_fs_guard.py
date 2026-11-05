@@ -76,15 +76,18 @@ def test_real_config_denies_auto_research_allows_toolkit():
 # named-path guard nor the jail's mount plan has to carry a denial rule for it.
 
 
-def test_the_run_record_is_outside_the_allowlist_and_the_workspace_is_inside():
+def test_the_run_record_is_outside_the_allowlist_and_the_workspace_is_inside(monkeypatch):
     """The whole point of splitting `ledger_dir` from `run_dir`, asserted on the live config.
 
     Both halves matter. If the workspace were denied too, an agent could not read back the
     figure it just wrote; if the record were allowed, a `grep -r` over the run directory finds
-    the ledger, which is exactly how this started.
+    the ledger, which is exactly how this started. The configured runtime dir is the one under
+    test (paths only, nothing written), not the suite's private one (D4).
     """
+    from auto_research.env import RUNTIME_DIR_ENV
     from auto_research.sandbox.workspace import ledger_dir, run_dir
 
+    monkeypatch.delenv(RUNTIME_DIR_ENV, raising=False)
     roots = load_fs_allowlist()
     if not roots:
         pytest.skip("agent_fs_allow not configured")
@@ -123,7 +126,7 @@ def test_a_records_location_follows_the_run_directory_not_ambient_config(tmp_pat
     from auto_research.sandbox import workspace
 
     # Ambient config points somewhere else entirely — as it does for every benchmark trial.
-    monkeypatch.setenv("AUTO_RESEARCH_DATA_DIR", str(tmp_path / "launcher_runtime"))
+    monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path / "launcher_runtime"))
     private = tmp_path / "ws" / "abc123" / "runtime" / "runs" / "abc123"
     private.mkdir(parents=True)
 
@@ -145,7 +148,7 @@ def test_the_record_directory_exists_by_the_time_the_path_is_handed_back(tmp_pat
     """
     from auto_research.sandbox import workspace
 
-    monkeypatch.setenv("AUTO_RESEARCH_DATA_DIR", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path / "elsewhere"))
     run_directory = tmp_path / "ws" / "r1" / "runtime" / "runs" / "r1"
     run_directory.mkdir(parents=True)
     path = workspace.record_beside(run_directory, "backend.log")
@@ -156,7 +159,7 @@ def test_the_record_directory_exists_by_the_time_the_path_is_handed_back(tmp_pat
 def test_a_record_written_under_the_old_layout_is_still_found(tmp_path, monkeypatch):
     """Every batch on disk — including the ones behind published numbers — keeps these files
     inside the run directory, and offline scoring reads them long after the run."""
-    monkeypatch.setenv("AUTO_RESEARCH_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
     from auto_research.sandbox import workspace
 
     legacy = workspace.run_dir("old") / "monitor.jsonl"

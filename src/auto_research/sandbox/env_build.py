@@ -391,8 +391,26 @@ def build(
     jailed: bool,
     runner: Runner = subprocess.run,
     timeout_s: int = 3600,
+    on_build: Callable[[str], None] | None = None,
+    package_archive: Path | None = None,
+    on_restore: Callable[[str], None] | None = None,
 ) -> Environment:
     """The :class:`Environment` a definition names, built if it is not there yet.
+
+    ``package_archive`` (D3b, [F30]): a shared folder of package files conda reads as a second,
+    read-only cache (bound read-only in the jail); after a successful build the files the lock
+    names, checked against its md5/sha256, are added to it (:func:`_archive_packages`), so the next
+    build of the same packages downloads nothing. A prefix moved aside by a rebuild keeps its record
+    under ``built/kept/``; a later build of that very lock verifies it and puts it back
+    (:func:`_swap_back`), then calls ``on_restore(kept_name)`` (D3c). A rebuild that fails over a
+    working build restores that build and its record as they were; when it is a build of another
+    definition, the catalogue reads it as superseded (:func:`built_environments`) and its results
+    are flagged untested env.
+
+    ``on_build(reason)``, when given, is called once a fresh build begins (not for a reused
+    prefix): ``missing`` (no record), ``stale`` (another definition), ``unjailed`` (a jailed caller,
+    a record built unjailed), ``tainted`` (an unjailed build ran in this conda dir) or
+    ``interrupted`` (a record without its prefix) — D1b.
 
     Derived: the base's prefix with this definition's activation and boot file (falling back to the
     base's). Built: ``conda create --file env.lock`` into ``<conda_dir>/envs/ar-<name>``
@@ -463,6 +481,19 @@ def build(
                 if any(record.get(key) != value for key, value in current.items()):
                     _write_record(conda_dir, target, {**record, **current})
                 return environment
+            # A build of this very lock kept aside by an earlier rebuild (a branch switched back,
+            # D3b): verified and put back, instead of building it again.
+            swapped = _swap_back(conda_dir, target, record, staged, digest, environment,
+                                 jailed=jailed, tainted=tainted)
+            if swapped:
+                if on_restore is not None:
+                    on_restore(swapped)
+                return environment
+            if on_build is not None:
+                on_build("missing" if not record else
+                         "stale" if record.get("definition_sha256") != digest else
+                         "unjailed" if jailed and record.get("jailed") is not True else
+                         "tainted" if jailed and tainted else "interrupted")
             if not jailed:  # sticky: written before anything unjailed runs
                 _write_record(conda_dir, Path(_UNJAILED), {"unjailed_build": staged.name})
             record_path = conda_dir / "built" / f"{target.name}.json"
@@ -475,35 +506,68 @@ def build(
                 # binding the whole envs folder, a lazy import) sees the new build at once.
                 kept = target.with_name(f"{target.name}.prev-{record['definition_sha256'][:8]}-{uuid.uuid4().hex[:6]}")
                 target.rename(kept)
-            # Then the old record: an interrupted rebuild must never be reused under it.
-            if os.path.lexists(record_path):
-                os.unlink(record_path)
-            if target.exists():  # an interrupted build: nothing runs from it
-                _remove_tree(target)
-            for older in (conda_dir / "envs").glob(f"{target.name}.prev-*"):  # only the latest kept
-                if older != kept:
-                    _remove_tree(older)
-            target.mkdir()
-            home, pkgs = work / "home", work / "pkgs"
-            home.mkdir()
-            pkgs.mkdir()
-            env = {k: os.environ[k] for k in _BUILD_PASS if k in os.environ}
-            env.update({
-                "HOME": str(home), "CONDA_PKGS_DIRS": str(pkgs), "CONDA_ALWAYS_COPY": "true",
-                "CONDA_CHANNELS": "conda-forge", "CONDA_REGISTER_ENVS": "false",
-                "CONDA_SAFETY_CHECKS": "enabled", "CONDA_EXTRA_SAFETY_CHECKS": "true",
-                "CONDA_SSL_VERIFY": "true", "PYTHONNOUSERSITE": "1",
-            })
-            wrap = _jail(conda_exe, staged, target, work) if jailed else (lambda argv: list(argv))
-            log = work / "output.log"  # in work, which no build binds
-            _check_pkgs_dirs(runner, wrap, conda_exe, env, pkgs, timeout_s, log)
-            _run(runner, wrap([conda_exe, "create", "--yes", "--quiet", "--prefix", str(target),
-                               "--file", str(staged.lock_path)]), env, timeout_s, log)
-            if _pins(staged):
-                _run(runner, wrap([str(target / "bin" / "python"), "-m", "pip", "install", "--isolated",
-                                   "--no-deps", "--no-input", "--no-cache-dir", "--require-hashes",
-                                   "--only-binary=:all:", "-r", str(staged.pip_path)]), env, timeout_s, log)
-            _verify(staged, target)
+                _keep_aside_records(conda_dir, target, kept, record)  # so a switch back can reuse it (D3b)
+            try:
+                # Then the old record: an interrupted rebuild must never be reused under it.
+                if os.path.lexists(record_path):
+                    os.unlink(record_path)
+                if target.exists():  # an interrupted build: nothing runs from it
+                    _remove_tree(target)
+                for older in (conda_dir / "envs").glob(f"{target.name}.prev-*"):  # only the latest kept
+                    if older != kept:
+                        _remove_tree(older)
+                        _drop_kept_records(conda_dir, older)
+                target.mkdir()
+                home, pkgs = work / "home", work / "pkgs"
+                home.mkdir()
+                pkgs.mkdir()
+                # conda's second, read-only cache ([F30], D3b): for a jailed build only (unjailed,
+                # conda would find it writable and extract into it), and never an archive holding a
+                # folder (an extracted package nothing re-checks: something other than this code
+                # wrote there).
+                if package_archive is not None and (not jailed or (package_archive.is_dir() and any(
+                        entry.is_dir() for entry in package_archive.iterdir()))):
+                    package_archive = None
+                if package_archive is not None:
+                    package_archive.mkdir(parents=True, exist_ok=True)
+                    (package_archive / "urls.txt").touch()
+                env = {k: os.environ[k] for k in _BUILD_PASS if k in os.environ}
+                env.update({
+                    "HOME": str(home),
+                    "CONDA_PKGS_DIRS": ",".join([str(pkgs), *([str(package_archive)] if package_archive else [])]),
+                    "CONDA_ALWAYS_COPY": "true",
+                    "CONDA_CHANNELS": "conda-forge", "CONDA_REGISTER_ENVS": "false",
+                    "CONDA_SAFETY_CHECKS": "enabled", "CONDA_EXTRA_SAFETY_CHECKS": "true",
+                    "CONDA_SSL_VERIFY": "true", "PYTHONNOUSERSITE": "1",
+                })
+                wrap = (_jail(conda_exe, staged, target, work, package_archive) if jailed
+                        else (lambda argv: list(argv)))
+                log = work / "output.log"  # in work, which no build binds
+                _check_pkgs_dirs(runner, wrap, conda_exe, env, pkgs, timeout_s, log, package_archive)
+                _run(runner, wrap([conda_exe, "create", "--yes", "--quiet", "--prefix", str(target),
+                                   "--file", str(staged.lock_path)]), env, timeout_s, log)
+                if _pins(staged):
+                    _run(runner, wrap([str(target / "bin" / "python"), "-m", "pip", "install", "--isolated",
+                                       "--no-deps", "--no-input", "--no-cache-dir", "--require-hashes",
+                                       "--only-binary=:all:", "-r", str(staged.pip_path)]), env, timeout_s, log)
+                _verify(staged, target)
+            except BaseException:
+                if kept is not None:
+                    # The rebuild failed over a working build (D1c): that build and its record
+                    # come back, so the environment stays in the catalogue (as the drift path
+                    # does); the caller reports the failure — the build's, whatever the restore.
+                    try:
+                        _remove_tree(target, missing_ok=True)
+                        kept.rename(target)
+                        _take_back_records(conda_dir, kept, target)
+                        # Its record as it was: a build of another definition reads as superseded
+                        # in the catalogue, by its digest (D3c), until one of this definition lands.
+                        _write_record(conda_dir, target, record)
+                    except Exception:  # noqa: BLE001 — the working build stays at `kept`, named
+                        pass
+                raise
+            if package_archive is not None:
+                _archive_packages(staged.lock_path, pkgs, package_archive)
             _write_dists(conda_dir, target, installed_dists(target))
             _write_record(conda_dir, target, {
                 "definition_sha256": digest, "jailed": jailed, **_record_fields(environment),
@@ -515,6 +579,91 @@ def build(
 
 #: Written into ``<conda_dir>/built/`` once an unjailed build has run there; no jailed reuse after.
 _UNJAILED = "unjailed"
+
+
+def _kept_record_path(conda_dir: Path, kept: Path) -> Path:
+    """Where a prefix moved aside keeps its build record: a subfolder the catalogue never lists."""
+    return Path(conda_dir) / "built" / "kept" / f"{Path(kept).name}.json"
+
+
+def _keep_aside_records(conda_dir: Path, target: Path, kept: Path, record: dict) -> None:
+    """A prefix moved aside to ``kept`` keeps its record and its distribution list beside it, so a
+    switch back can put it back exactly as it was (D3b). Written as the runtime writes records."""
+    folder = _own_dir(Path(conda_dir) / "built" / "kept")
+    path = _kept_record_path(conda_dir, kept)
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(record, handle)
+    os.replace(temp, path)
+    dists = _dists_path(conda_dir, target)
+    if dists.is_file() and not dists.is_symlink():
+        os.replace(dists, folder / f"{Path(kept).name}.dists")
+
+
+def _take_back_records(conda_dir: Path, kept: Path, target: Path) -> None:
+    """The kept records of ``kept``, now at ``target`` again: its distribution list back in place,
+    its kept record gone (the caller writes the record)."""
+    folder = Path(conda_dir) / "built" / "kept"
+    dists = folder / f"{Path(kept).name}.dists"
+    if dists.is_file() and not dists.is_symlink():
+        os.replace(dists, _dists_path(conda_dir, target))
+    _kept_record_path(conda_dir, kept).unlink(missing_ok=True)
+
+
+def _drop_kept_records(conda_dir: Path, kept: Path) -> None:
+    folder = Path(conda_dir) / "built" / "kept"
+    _kept_record_path(conda_dir, kept).unlink(missing_ok=True)
+    (folder / f"{Path(kept).name}.dists").unlink(missing_ok=True)
+
+
+def _swap_back(conda_dir: Path, target: Path, record: dict | None, staged: EnvDefinition,
+               digest: str, environment: Environment, *, jailed: bool, tainted: bool) -> str | None:
+    """Put back a kept-aside build of this very lock (``<target>.prev-<digest8>-*`` whose kept
+    record names ``digest`` and is as strong as asked) once it verifies and still holds exactly the
+    distributions recorded at its build (a hand change is drift, never a new baseline); the current
+    build, if any, is kept aside in its place. The kept prefix's name when one was put back (D3b)."""
+    for candidate in sorted(target.parent.glob(f"{target.name}.prev-{digest[:8]}-*")):
+        try:
+            kept_record = json.loads(_kept_record_path(conda_dir, candidate).read_text(encoding="utf-8"))
+            kept_dists = (Path(conda_dir) / "built" / "kept" / f"{candidate.name}.dists").read_text(
+                encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+        if (not isinstance(kept_record, dict) or kept_record.get("definition_sha256") != digest
+                or (jailed and (kept_record.get("jailed") is not True or tainted))
+                or not candidate.is_dir() or candidate.is_symlink()):
+            continue
+        try:
+            _verify(staged, candidate)
+        except BuildMismatch:
+            continue
+        if installed_dists(candidate) != [line for line in kept_dists.split("\n") if line]:
+            continue
+        # The current record first, as a rebuild does: a crash mid-swap never pairs a prefix with
+        # another build's record.
+        record_path = Path(conda_dir) / "built" / f"{target.name}.json"
+        if os.path.lexists(record_path):
+            os.unlink(record_path)
+        aside = None
+        if target.exists() and not target.is_symlink() and record \
+                and isinstance(record.get("definition_sha256"), str):
+            aside = target.with_name(f"{target.name}.prev-{record['definition_sha256'][:8]}-{uuid.uuid4().hex[:6]}")
+            target.rename(aside)
+            _keep_aside_records(conda_dir, target, aside, record)
+        elif target.is_symlink():
+            target.unlink()
+        elif target.exists():  # an interrupted build: nothing runs from it
+            _remove_tree(target)
+        candidate.rename(target)
+        _take_back_records(conda_dir, candidate, target)
+        _write_record(conda_dir, target, {**kept_record, **_record_fields(environment)})
+        for older in target.parent.glob(f"{target.name}.prev-*"):  # only the latest kept
+            if older != aside:
+                _remove_tree(older)
+                _drop_kept_records(conda_dir, older)
+        return candidate.name
+    return None
 
 
 def _activation(conda_dir: Path, staged: EnvDefinition, name: str) -> Path | None:
@@ -762,12 +911,27 @@ def build_record(conda_dir: Path, prefix: Path) -> dict | None:
 
 def built_environments(
     conda_dir: Path, externals: Mapping[str, External], base_envs: Mapping[str, Environment] | None = None,
+    definitions: Path | None = None,
 ) -> list[Environment]:
     """Every environment :func:`build` has finished in ``conda_dir``, read back from its records:
     the most recent build of each name, its prefix present, its activation and boot file only from
     the runtime's own ``activation/`` folder, its externals only from the human's declared list. For
-    listing and the shell (``use_env``); nothing here re-verifies a prefix."""
+    listing and the shell (``use_env``); nothing here re-verifies a prefix.
+
+    ``definitions`` (the toolkit's ``envs/`` folder): an environment whose record names another
+    digest than its definition there, or whose definition is gone or unreadable, is ``superseded``
+    (D3c): a build of an earlier definition kept in use, whose results are flagged untested env."""
     conda_dir = Path(conda_dir)
+
+    def superseded(record: dict, name: str) -> bool:
+        if definitions is None:
+            return False
+        try:
+            current = read_definition(Path(definitions) / name.removeprefix("ar-")).digest()
+        except (OSError, ValueError):
+            return True  # no definition on the branch vouches for this build
+        return record.get("definition_sha256") != current
+
     folder = conda_dir / "built"
     if not folder.is_dir():
         return []
@@ -802,10 +966,12 @@ def built_environments(
                 environment = Environment(
                     name=name, prefix=base.prefix, owner="pipeline", activate=activate or base.activate,
                     boot=boot or base.boot, externals=picked or base.externals,
+                    superseded=superseded(record, name),
                 )
             elif prefix.is_dir():
                 environment = Environment(name=name, prefix=prefix, owner="pipeline",
-                                          activate=activate, boot=boot, externals=picked)
+                                          activate=activate, boot=boot, externals=picked,
+                                          superseded=superseded(record, name))
             else:
                 continue
             stamp = entry.stat(follow_symlinks=False).st_mtime_ns
@@ -1077,19 +1243,23 @@ def _read_plain(path, *, single_link: bool = False, limit: int | None = None, di
     return data
 
 
-def _jail(conda_exe: str, staged: EnvDefinition, target: Path, work: Path) -> Wrap:
+def _jail(conda_exe: str, staged: EnvDefinition, target: Path, work: Path,
+          archive: Path | None = None) -> Wrap:
     from auto_research.sandbox.jail import jail_argv
 
-    argv = jail_argv(build_policy(conda_exe=conda_exe, staged=staged, target=target, work=work))
+    argv = jail_argv(build_policy(conda_exe=conda_exe, staged=staged, target=target, work=work,
+                                  archive=archive))
     if not argv:
         raise RuntimeError("a jailed build needs bwrap, which is not available here")
     return lambda command: [*argv, "--", *command]
 
 
-def build_policy(*, conda_exe: str, staged: EnvDefinition, target: Path, work: Path):
-    """The jail for one build: the conda installation and the staged definition read-only; only
-    the target prefix and this build's ``work`` folder (its cache and home) writable, a private
-    ``/tmp`` inside ``work``; network on (packages are downloaded)."""
+def build_policy(*, conda_exe: str, staged: EnvDefinition, target: Path, work: Path,
+                 archive: Path | None = None):
+    """The jail for one build: the conda installation, the staged definition and the shared
+    package archive (D3b) read-only; only the target prefix and this build's ``work`` folder (its
+    cache and home) writable, a private ``/tmp`` inside ``work``; network on (packages are
+    downloaded)."""
     from auto_research.sandbox.jail import JAIL_HOME_AT, JailPolicy
 
     root = conda_root(conda_exe)
@@ -1099,7 +1269,7 @@ def build_policy(*, conda_exe: str, staged: EnvDefinition, target: Path, work: P
         # As spelled, like every other path here: conda is handed this spelling, and the jail binds
         # the resolved folder and recreates the spelling as a link (`/data` → `/nfsdata1` on this
         # host; a resolved-only bind left the staged lock unreachable, B5 live cell 2026-10-07).
-        ro=(str(root), str(staged.root)),
+        ro=(str(root), str(staged.root), *((str(archive),) if archive is not None else ())),
         rw=(str(target), str(Path(work) / "pkgs"), str(Path(work) / "home")),
         network=True, home=str(Path(work) / "home"), home_at=JAIL_HOME_AT, tmp=str(tmp),
         label="env-build",
@@ -1120,7 +1290,9 @@ def conda_root(conda_exe: str) -> Path:
 
 
 def _check_pkgs_dirs(runner: Runner, wrap: Wrap, conda_exe: str, env: dict, pkgs_dir: Path,
-                     timeout_s: int, log: Path) -> None:
+                     timeout_s: int, log: Path, archive: Path | None = None) -> None:
+    """conda's effective ``pkgs_dirs`` must be exactly the build's own cache, then the shared
+    package archive when one is given (read-only to the build, D3b)."""
     code, out = _call(runner, wrap([conda_exe, "config", "--show", "pkgs_dirs", "--json"]), env, timeout_s,
                       log, keep=1024 * 1024)
     if code != 0:
@@ -1129,11 +1301,65 @@ def _check_pkgs_dirs(runner: Runner, wrap: Wrap, conda_exe: str, env: dict, pkgs
         shown = json.loads(out or "{}").get("pkgs_dirs")
     except (json.JSONDecodeError, AttributeError):
         shown = None
-    if not isinstance(shown, list) or [str(Path(p)) if isinstance(p, str) else p for p in shown] != [str(pkgs_dir)]:
+    expected = [str(pkgs_dir)] + ([str(archive)] if archive is not None else [])
+    if not isinstance(shown, list) or [str(Path(p)) if isinstance(p, str) else p for p in shown] != expected:
         raise RuntimeError(
-            f"conda would use package caches {_quoted(str(shown))}, not only {pkgs_dir}: a condarc "
-            "outside the build sets pkgs_dirs; remove it there before building."
+            f"conda would use package caches {_quoted(str(shown))}, not only {', '.join(expected)}: "
+            "a condarc outside the build sets pkgs_dirs; remove it there before building."
         )
+
+
+#: The shared archive of downloaded package files, under the runtime's agent conda dir (D3b,
+#: [F30]): conda reads it as a second, read-only package cache.
+PACKAGE_ARCHIVE = "pkgs-archive"
+
+
+def _archive_packages(lock_path: Path, pkgs_dir: Path, archive: Path) -> list[str]:
+    """Add to ``archive`` each package file in ``pkgs_dir`` that ``lock_path`` names and whose
+    bytes match its lock line's md5/sha256, with its URL in ``urls.txt`` (which conda needs to use
+    the cache); the file names added. Run by the runtime outside the jail, under the archive's own
+    lock: a file the build changed never enters the archive, and conda checks an archived file
+    against the lock again before using it (probed 2026-11-04)."""
+    import fcntl
+
+    added: list[str] = []
+    archive.mkdir(parents=True, exist_ok=True)
+    with open(archive / ".lock", "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        urls_path = archive / "urls.txt"
+        listed = set(urls_path.read_text(encoding="utf-8").split()) if urls_path.is_file() else set()
+        for line in Path(lock_path).read_text(encoding="utf-8").splitlines():
+            url, _, digest = line.strip().partition("#")
+            if not url.startswith("http") or not digest:
+                continue
+            name = url.rsplit("/", 1)[-1]
+            source, target = Path(pkgs_dir) / name, archive / name
+            if not source.is_file() or source.is_symlink():
+                continue
+            if not target.is_file():
+                algorithm, expected = (("sha256", digest[7:]) if digest.startswith("sha256:")
+                                       else ("md5", digest))
+                hasher = hashlib.new(algorithm)
+                with open(source, "rb") as stream:
+                    for chunk in iter(lambda: stream.read(1 << 20), b""):
+                        hasher.update(chunk)
+                if hasher.hexdigest() != expected:
+                    continue  # not the file the lock names: never archived
+                temp = archive / f".{name}.{uuid.uuid4().hex}"
+                try:
+                    os.link(source, temp)
+                except OSError:
+                    import shutil
+
+                    shutil.copyfile(source, temp)
+                os.chmod(temp, 0o444)
+                os.replace(temp, target)
+                added.append(name)
+            if url not in listed:
+                with open(urls_path, "a", encoding="utf-8") as urls:
+                    urls.write(url + "\n")
+                listed.add(url)
+    return added
 
 
 def _call(runner: Runner, argv: list[str], env: dict, timeout_s: int, log: Path, *, keep: int = 400) -> tuple[int, str]:

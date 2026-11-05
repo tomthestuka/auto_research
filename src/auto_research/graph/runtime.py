@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -608,40 +609,61 @@ def _normalize_report_formats(
     return list(value)
 
 
+#: Why the launch built an environment, as the ledger says it (D1b).
+_BUILT_BECAUSE = {
+    "missing": "it had no build record",
+    "stale": "its build record named another definition",
+    "unjailed": "its build ran unjailed and the jail is on",
+    "tainted": "an unjailed build ran in this conda dir",
+    "interrupted": "its prefix was gone",
+}
+
+
 async def _reconcile_environments(toolkit_root: Path, monitor: Any) -> None:
     """The pipeline's environments against their committed definitions, before any unit runs (env
     plan B3c-5): missing builds made, drift rebuilt visibly, changed externals reported — each a
-    ledger event. A problem is recorded, never the end of the launch; a stop kills the builds."""
+    ledger event. A problem is recorded, never the end of the launch; a stop kills the builds.
+    While it runs, each fresh build and a 5-minute heartbeat are recorded (D1/D1b,
+    ``merge_flow.run_builds``): run polevo-20261104 was silent 34 min while `ar-xspec` rebuilt."""
     from auto_research.sandbox.env_build import StoppableRunner
-    from auto_research.sandbox.merge_flow import reconcile_environments
+    from auto_research.sandbox.merge_flow import (
+        PREVIOUS_IN_USE, reconcile_environments, restored_summary, run_builds,
+    )
 
     runner = StoppableRunner()
+
+    async def record(event: str, **fields: Any) -> None:
+        await monitor.record("run", event, **fields)
+
     try:
-        results = await asyncio.to_thread(reconcile_environments, toolkit_root, runner=runner)
-    except asyncio.CancelledError:
-        runner.stop()
-        raise
+        results = await run_builds(
+            lambda on_start: reconcile_environments(toolkit_root, runner=runner, on_start=on_start),
+            record=record, runner=runner,
+        )
     except Exception as exc:  # noqa: BLE001 — environments are reported, never the launch's end
         await monitor.record("run", "env.reconcile.error", level=2,
                              summary=f"environments not reconciled: {type(exc).__name__}: {exc}",
                              data={"error": repr(exc)})
         return
     summaries = {
-        "built": lambda r: f"built {r.get('name')} (its build record was {r.get('cause')})",
+        "built": lambda r: f"built {r.get('name')} ({_BUILT_BECAUSE.get(r.get('cause'), r.get('cause'))})",
+        "restored": restored_summary,
         "drift": lambda r: (f"ar-{r['env']} drifted from its definition: kept as {Path(r['kept']).name}, "
-                            "rebuilt from the definition" if r.get("rebuilt") else
+                            + (f"restored kept build {r['restored']}" if r.get("restored")
+                               else "rebuilt from the definition") if r.get("rebuilt") else
                             f"ar-{r['env']} drifted from its definition; the rebuild failed "
                             f"({r.get('error')}), so the drifted prefix stays in use"),
         "tainted": lambda r: (f"an unjailed build ran in this conda dir: every jailed build is fresh "
                               f"(nothing reused) until a human checks and removes {r['marker']}"),
         "external_changed": lambda r: f"ar-{r['env']}: declared externals changed: {', '.join(r['externals'])}",
-        "failed": lambda r: f"ar-{r['env']}: {r.get('error')}",
+        "failed": lambda r: f"ar-{r['env']}: {r.get('error')}" + (PREVIOUS_IN_USE if r.get("previous_in_use") else ""),
     }
     for result in results:
         if result["status"] in summaries:
-            event = {"built": "env.build", "drift": "env.drift", "external_changed": "env.external_changed",
+            event = {"built": "env.build", "restored": "env.restored", "drift": "env.drift",
+                     "external_changed": "env.external_changed",
                      "failed": "env.build.error", "tainted": "env.tainted"}[result["status"]]
-            await monitor.record("run", event, level=2 if result["status"] != "built" else 3,
+            await monitor.record("run", event, level=3 if result["status"] in ("built", "restored") else 2,
                                  summary=summaries[result["status"]](result), data=result)
 
 
@@ -748,293 +770,318 @@ async def run_research(
                 "reason": heal_result.reason,
                 "base_ref": heal_result.base_ref,
                 "patch": str(heal_result.patch_path) if heal_result.patch_path else None,
+                "note": heal_result.note,
             },
         )
 
     # Run the full launch checklist — which pings the channel — before any LLM (§9.8).
-    await run_preflight(human_handler=human_handler, monitor=run_monitor)
-
-    orch = load_orchestration_config()
-
-    if max_iterations is None:
-        max_iterations = int(orch.get("max_iterations", 3))
-    debate_max_rounds = int(orch.get("debate_max_rounds", 3))
-    tool_retry_cap = int(orch.get("tool_retry_cap", 3))
-    toolkit_root = Path(orch["toolkit_root"])  # required; validated by the launch preflight
-    await _reconcile_environments(toolkit_root, run_monitor)
-    sandbox_settings = SandboxSettings.from_config(orch)
-    # Every receipt names the environment it was produced in (env plan B1): in-process tools run
-    # in the orchestrator's; the analysis environment's lock is written now, the worker stamps it.
     try:
-        from auto_research.env import env_lock_dir, host_environment
-        from auto_research.provenance.store import ReceiptStore as _Store
-        from auto_research.sandbox.envs import fingerprint_and_lock
+        await run_preflight(human_handler=human_handler, monitor=run_monitor)
+    except BaseException:
+        # A failed launch closes the channel the ping opened (D1c): it is all that runs yet.
+        await _close_connector(human_handler, run_monitor)
+        raise
 
-        _Store.for_run(run_dir(run_id)).default_env = fingerprint_and_lock(
-            host_environment(), env_lock_dir()
-        )
-        analysis = sandbox_settings.environment  # the same object the REPL and the shell run in
-        if analysis is not None:
-            fingerprint_and_lock(analysis, env_lock_dir())
-        env_error: Exception | None = None
-    except Exception as exc:  # noqa: BLE001 — an unreadable env leaves receipts unstamped, never the run dead
-        env_error = exc  # recorded after run.start, which opens the ledger
-    analyze_env = sandbox_settings.analyze_env
-    analyze_ini_sh = sandbox_settings.analyze_ini_sh
-    repl_init_py = sandbox_settings.repl_init_py
-    analyze_probe = sandbox_settings.analyze_probe
-    disabled_tools: list[str] = orch.get("disabled_tools") or []
-    default_formats: list[str] = orch.get("report_formats") or ["jsonl", "tex"]
-    resolved_formats = _normalize_report_formats(report_formats, default_formats)
-
-    # Run-wide control (HITL /steer, /stop). Threaded onto every role + the consensus strategy;
-    # the command channel writes to it. A steer is read cooperatively by the ReAct loops; a stop
-    # cancels the task registered here, so it needs no cooperation from anything.
-    run_control = RunControl()
-    run_control.register_run_task(asyncio.current_task())
-    cleaned = False  # set once a stop's (or a channel failure's) cleanup has torn the run down
-    _restore_signals = _install_interrupt_signals(run_control) if install_signal_handlers else None
-
-    storage = Storage()
-    reviewer = reviewer or ReviewerAgent(monitor=run_monitor)
-    io_agent = io_agent or LibrarianIOAgent(storage=storage, monitor=run_monitor)
-    retrieval = retrieval or SqliteRetrievalBackend(storage)
-    lead = lead or AnalystLeadAgent(monitor=run_monitor)
-
-    # Build or validate worker list
-    if workers is None:
-        worker_group = resolve("analyst_worker")
-        worker_handles = worker_group.handles[:DEFAULT_WORKER_COUNT]
-        workers = [
-            AnalystWorkerAgent(
-                model=handle, monitor=run_monitor, worker_index=i,
-                human_handler=human_handler,
-            )
-            for i, handle in enumerate(worker_handles)
-        ]
-    else:
-        # Caller-supplied workers still get the resolved raise-to-human channel.
-        for worker in workers:
-            if getattr(worker, "human_handler", None) is None:
-                try:
-                    worker.human_handler = human_handler
-                except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
-                    pass
-
-    # Create per-agent workspace folders
-    analyst_keys = [f"analyst_worker_{i}" for i in range(len(workers))]
-    agent_keys = ["reviewer", "analyst_lead", "librarian_io"] + analyst_keys
-    create_run_workspace(run_id, agent_keys)
-    attach_librarian_runtime(io_agent, run_id=run_id, run_control=run_control)
-
-    # Give the reviewer and lead a read-only inspection loop (run artifacts +
-    # knowledge base), unless a caller pre-wired their own tools.
-    from auto_research.sources import WebSource
-
-    # web_search is on for the reviewer and lead (and workers, wired at the provider) so any
-    # role can confirm an authoritative-doc/science point against a primary source rather than
-    # guessing (their prompts promise it). WebSource's Tavily client is lazy; TAVILY_API_KEY is a
-    # launch preflight requirement, so construction never touches the key here.
-    web_source = WebSource()
-
-    # The reviewer and analyst lead both browse the whole research_toolkit read-only.
-    # The lead needs it to decide a tool proposal's disposition (extend an existing package
-    # vs author a new one) by reading the full lib/ source — not just the minimal skills/
-    # stubs the workers see (CLAUDE.md §9.3). The reviewer needs it to inspect the same
-    # tool source/manifests and confirm results came from correctly-parameterised tool
-    # calls. Read-only/path-confined, no shell: the runtime never writes the toolkit (§2)
-    # and this matches the §12 "read-only file-tree exploration" posture.
-    attach_reviewer_runtime(
-        reviewer,
-        run_id=run_id,
-        toolkit_root=toolkit_root,
-        retrieval=retrieval,
-        web_source=web_source,
-        human_handler=human_handler,
-    )
-
-    # V-4: a stable key + report folder for the lead's per-round adjudicated report JSONLs, its
-    # monitor, its stop channel and its read-only tools — all through the one seam, so a live
-    # drill driving a real lead outside the graph gets exactly this and cannot drift from it.
-    attach_lead_runtime(
-        lead,
-        run_id=run_id,
-        toolkit_root=toolkit_root,
-        run_monitor=run_monitor,
-        run_control=run_control,
-        retrieval=retrieval,
-        web_source=web_source,
-        human_handler=human_handler,
-    )
-
-    _attach_monitor(reviewer, run_monitor)
-    _attach_monitor(io_agent, run_monitor)
-    for worker in workers:
-        _attach_monitor(worker, run_monitor)
-
-    # HITL /steer, /stop: give every role a stable steer key (workers/lead already keyed above)
-    # and the shared RunControl its ReAct loop consults. Best-effort so duck-typed fakes are fine.
+    # From here on, what the setup opens is closed leaf to root if a later setup step fails or a
+    # stop lands mid-setup (D1d). Once the graph is built the run's own teardown (the `finally`
+    # below) owns each of them, and the stack lets go.
+    setup = contextlib.AsyncExitStack()
+    setup.push_async_callback(_close_connector, human_handler, run_monitor)
+    run_control: RunControl | None = None
+    _restore_signals = None
+    sandboxes: list[PersistentSandbox] = []
+    mcp_client: MCPToolClient | None = None
+    held = contextlib.AsyncExitStack()  # the checkpointer, open until the run returns
+    started = False  # `run.start` recorded: a failure from here on is the run's `run.error` (D1e)
     try:
-        if getattr(reviewer, "agent_key", None) is None:
-            reviewer.agent_key = "reviewer"
-        reviewer.run_control = run_control
-    except Exception:  # noqa: BLE001
-        pass
-    for worker in workers:
+        orch = load_orchestration_config()
+
+        if max_iterations is None:
+            max_iterations = int(orch.get("max_iterations", 3))
+        debate_max_rounds = int(orch.get("debate_max_rounds", 3))
+        tool_retry_cap = int(orch.get("tool_retry_cap", 3))
+        toolkit_root = Path(orch["toolkit_root"])  # required; validated by the launch preflight
+        await _reconcile_environments(toolkit_root, run_monitor)
+        sandbox_settings = SandboxSettings.from_config(orch)
+        # Every receipt names the environment it was produced in (env plan B1): in-process tools run
+        # in the orchestrator's; the analysis environment's lock is written now, the worker stamps it.
         try:
-            worker.run_control = run_control
+            from auto_research.env import env_lock_dir, host_environment
+            from auto_research.provenance.store import ReceiptStore as _Store
+            from auto_research.sandbox.envs import fingerprint_and_lock
+
+            _Store.for_run(run_dir(run_id)).default_env = fingerprint_and_lock(
+                host_environment(), env_lock_dir()
+            )
+            analysis = sandbox_settings.environment  # the same object the REPL and the shell run in
+            if analysis is not None:
+                fingerprint_and_lock(analysis, env_lock_dir())
+            env_error: Exception | None = None
+        except Exception as exc:  # noqa: BLE001 — an unreadable env leaves receipts unstamped, never the run dead
+            env_error = exc  # recorded after run.start, which opens the ledger
+        analyze_env = sandbox_settings.analyze_env
+        analyze_ini_sh = sandbox_settings.analyze_ini_sh
+        repl_init_py = sandbox_settings.repl_init_py
+        analyze_probe = sandbox_settings.analyze_probe
+        disabled_tools: list[str] = orch.get("disabled_tools") or []
+        default_formats: list[str] = orch.get("report_formats") or ["jsonl", "tex"]
+        resolved_formats = _normalize_report_formats(report_formats, default_formats)
+
+        # Run-wide control (HITL /steer, /stop). Threaded onto every role + the consensus strategy;
+        # the command channel writes to it. A steer is read cooperatively by the ReAct loops; a stop
+        # cancels the task registered here, so it needs no cooperation from anything.
+        run_control = RunControl()
+        run_control.register_run_task(asyncio.current_task())
+        cleaned = False  # set once a stop's (or a channel failure's) cleanup has torn the run down
+        _restore_signals = _install_interrupt_signals(run_control) if install_signal_handlers else None
+
+        storage = Storage()
+        reviewer = reviewer or ReviewerAgent(monitor=run_monitor)
+        io_agent = io_agent or LibrarianIOAgent(storage=storage, monitor=run_monitor)
+        retrieval = retrieval or SqliteRetrievalBackend(storage)
+        lead = lead or AnalystLeadAgent(monitor=run_monitor)
+
+        # Build or validate worker list
+        if workers is None:
+            worker_group = resolve("analyst_worker")
+            worker_handles = worker_group.handles[:DEFAULT_WORKER_COUNT]
+            workers = [
+                AnalystWorkerAgent(
+                    model=handle, monitor=run_monitor, worker_index=i,
+                    human_handler=human_handler,
+                )
+                for i, handle in enumerate(worker_handles)
+            ]
+        else:
+            # Caller-supplied workers still get the resolved raise-to-human channel.
+            for worker in workers:
+                if getattr(worker, "human_handler", None) is None:
+                    try:
+                        worker.human_handler = human_handler
+                    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
+                        pass
+
+        # Create per-agent workspace folders
+        analyst_keys = [f"analyst_worker_{i}" for i in range(len(workers))]
+        agent_keys = ["reviewer", "analyst_lead", "librarian_io"] + analyst_keys
+        create_run_workspace(run_id, agent_keys)
+        attach_librarian_runtime(io_agent, run_id=run_id, run_control=run_control)
+
+        # Give the reviewer and lead a read-only inspection loop (run artifacts +
+        # knowledge base), unless a caller pre-wired their own tools.
+        from auto_research.sources import WebSource
+
+        # web_search is on for the reviewer and lead (and workers, wired at the provider) so any
+        # role can confirm an authoritative-doc/science point against a primary source rather than
+        # guessing (their prompts promise it). WebSource's Tavily client is lazy; TAVILY_API_KEY is a
+        # launch preflight requirement, so construction never touches the key here.
+        web_source = WebSource()
+
+        # The reviewer and analyst lead both browse the whole research_toolkit read-only.
+        # The lead needs it to decide a tool proposal's disposition (extend an existing package
+        # vs author a new one) by reading the full lib/ source — not just the minimal skills/
+        # stubs the workers see (CLAUDE.md §9.3). The reviewer needs it to inspect the same
+        # tool source/manifests and confirm results came from correctly-parameterised tool
+        # calls. Read-only/path-confined, no shell: the runtime never writes the toolkit (§2)
+        # and this matches the §12 "read-only file-tree exploration" posture.
+        attach_reviewer_runtime(
+            reviewer,
+            run_id=run_id,
+            toolkit_root=toolkit_root,
+            retrieval=retrieval,
+            web_source=web_source,
+            human_handler=human_handler,
+        )
+
+        # V-4: a stable key + report folder for the lead's per-round adjudicated report JSONLs, its
+        # monitor, its stop channel and its read-only tools — all through the one seam, so a live
+        # drill driving a real lead outside the graph gets exactly this and cannot drift from it.
+        attach_lead_runtime(
+            lead,
+            run_id=run_id,
+            toolkit_root=toolkit_root,
+            run_monitor=run_monitor,
+            run_control=run_control,
+            retrieval=retrieval,
+            web_source=web_source,
+            human_handler=human_handler,
+        )
+
+        _attach_monitor(reviewer, run_monitor)
+        _attach_monitor(io_agent, run_monitor)
+        for worker in workers:
+            _attach_monitor(worker, run_monitor)
+
+        # HITL /steer, /stop: give every role a stable steer key (workers/lead already keyed above)
+        # and the shared RunControl its ReAct loop consults. Best-effort so duck-typed fakes are fine.
+        try:
+            if getattr(reviewer, "agent_key", None) is None:
+                reviewer.agent_key = "reviewer"
+            reviewer.run_control = run_control
         except Exception:  # noqa: BLE001
             pass
+        for worker in workers:
+            try:
+                worker.run_control = run_control
+            except Exception:  # noqa: BLE001
+                pass
 
-    # HITL slash-commands (Telegram/Slack): give a command-capable connector a run-scoped context
-    # — the live roster (for /help + /steer targeting), the monitor JSONL (for /status), and a
-    # light status model (LLM /status). No-op for connectors without attach_commands (cli/whatsapp,
-    # none). The connector reads run_control from the ctx so /stop unblocks a pending ask.
-    if hasattr(human_handler, "attach_commands"):
-        def _roster() -> list[tuple[str, str, str]]:
-            entries = [
-                ("reviewer", getattr(reviewer, "agent_key", None) or "reviewer",
-                 _model_label(reviewer.model) or "?"),
-                ("analyst", getattr(lead, "agent_key", None) or "analyst_lead",
-                 _model_label(lead.model) or "?"),
-            ]
-            for i, w in enumerate(workers):
-                entries.append(("analyst", getattr(w, "agent_key", None) or f"analyst_worker_{i}",
-                                _model_label(w.model) or "?"))
-            entries.append(("librarian", getattr(io_agent, "agent_key", None) or "librarian_io",
-                            _model_label(io_agent.model) or "?"))
-            return entries
+        # HITL slash-commands (Telegram/Slack): give a command-capable connector a run-scoped context
+        # — the live roster (for /help + /steer targeting), the monitor JSONL (for /status), and a
+        # light status model (LLM /status). No-op for connectors without attach_commands (cli/whatsapp,
+        # none). The connector reads run_control from the ctx so /stop unblocks a pending ask.
+        if hasattr(human_handler, "attach_commands"):
+            def _roster() -> list[tuple[str, str, str]]:
+                entries = [
+                    ("reviewer", getattr(reviewer, "agent_key", None) or "reviewer",
+                     _model_label(reviewer.model) or "?"),
+                    ("analyst", getattr(lead, "agent_key", None) or "analyst_lead",
+                     _model_label(lead.model) or "?"),
+                ]
+                for i, w in enumerate(workers):
+                    entries.append(("analyst", getattr(w, "agent_key", None) or f"analyst_worker_{i}",
+                                    _model_label(w.model) or "?"))
+                entries.append(("librarian", getattr(io_agent, "agent_key", None) or "librarian_io",
+                                _model_label(io_agent.model) or "?"))
+                return entries
 
-        # `status_monitor` is a REQUIRED role (models/registry.py), so this resolves or the run
-        # never launched — there is no optional path and no deterministic fallback behind it.
-        from auto_research.hitl.commands import CommandContext, make_status_answer
+            # `status_monitor` is a REQUIRED role (models/registry.py), so this resolves or the run
+            # never launched — there is no optional path and no deterministic fallback behind it.
+            from auto_research.hitl.commands import CommandContext, make_status_answer
 
-        jsonl_path = getattr(run_monitor, "jsonl_path", None)
-        status_answer = make_status_answer(
-            resolve("status_monitor").handles[0], jsonl_path, monitor=run_monitor
-        )
-        try:
-            human_handler.attach_commands(
-                CommandContext(
-                    run_control=run_control,
-                    roster=_roster,
-                    monitor_jsonl_path=jsonl_path,
-                    status_answer=status_answer,
-                    monitor=run_monitor,  # commands land in the ledger, like every other actor
-                    run_id=run_id,  # button payloads carry it, so another run's tap is refused
+            jsonl_path = getattr(run_monitor, "jsonl_path", None)
+            status_answer = make_status_answer(
+                resolve("status_monitor").handles[0], jsonl_path, monitor=run_monitor
+            )
+            try:
+                human_handler.attach_commands(
+                    CommandContext(
+                        run_control=run_control,
+                        roster=_roster,
+                        monitor_jsonl_path=jsonl_path,
+                        status_answer=status_answer,
+                        monitor=run_monitor,  # commands land in the ledger, like every other actor
+                        run_id=run_id,  # button payloads carry it, so another run's tap is refused
+                    )
                 )
+            except Exception:  # noqa: BLE001 — commands are optional; never block the run
+                pass
+
+        registry = ToolkitRegistry(toolkit_root, disabled_tools=disabled_tools)
+
+        # Start MCP client and index its tools into the registry.
+        # When mcp_servers is empty/unset, build the default builtin-server config
+        # using the analysis env python so bash_exec can import astropy/xspec_utils.
+        mcp_server_configs: list[dict] | None = orch.get("mcp_servers") or None
+        if not mcp_server_configs:
+            mcp_server_configs = [
+                _builtin_server_config(
+                    *_env_spelling(sandbox_settings.environment, analyze_env, analyze_ini_sh),
+                    toolkit_root,
+                    cwd=run_dir(run_id), analyze_probe=analyze_probe,
+                    # The workers' own folders only (the shell runs each command in the caller's).
+                    writable_dirs=[
+                        agent_dir(run_id, f"analyst_worker_{index}")
+                        for index, worker in enumerate(workers)
+                        if isinstance(worker, AnalystWorkerAgent)
+                    ],
+                )
+            ]
+        mcp_client = MCPToolClient(servers=mcp_server_configs)
+        setup.push_async_callback(_closed, "mcp", mcp_client.shutdown, run_monitor)  # a half-started one too
+        await mcp_client.start()
+        registry.load_mcp(mcp_client)
+
+        if consensus is None:
+            consensus = DebateToConverge(
+                max_rounds=debate_max_rounds,
+                monitor=run_monitor,
+                registry=registry,
+                tool_retry_cap=tool_retry_cap,
+                # Phase-2 step-7 authoring/resume: the lead authors missing capability into
+                # research_toolkit on the ambient `ai` branch, then workers rerun (§9.10).
+                tool_author_cap=int(orch.get("tool_author_cap", 3)),
+                toolkit_root=toolkit_root,
+                worktree_base=run_dir(run_id) / "authoring",
+                direct_branch=str(orch.get("tool_author_branch", "ai")),
+                human_handler=human_handler,
+                run_control=run_control,
             )
-        except Exception:  # noqa: BLE001 — commands are optional; never block the run
-            pass
 
-    registry = ToolkitRegistry(toolkit_root, disabled_tools=disabled_tools)
-
-    # Start MCP client and index its tools into the registry.
-    # When mcp_servers is empty/unset, build the default builtin-server config
-    # using the analysis env python so bash_exec can import astropy/xspec_utils.
-    mcp_server_configs: list[dict] | None = orch.get("mcp_servers") or None
-    if not mcp_server_configs:
-        mcp_server_configs = [
-            _builtin_server_config(
-                *_env_spelling(sandbox_settings.environment, analyze_env, analyze_ini_sh),
-                toolkit_root,
-                cwd=run_dir(run_id), analyze_probe=analyze_probe,
-                # The workers' own folders only (the shell runs each command in the caller's).
-                writable_dirs=[
-                    agent_dir(run_id, f"analyst_worker_{index}")
-                    for index, worker in enumerate(workers)
-                    if isinstance(worker, AnalystWorkerAgent)
-                ],
-            )
-        ]
-    mcp_client = MCPToolClient(servers=mcp_server_configs)
-    await mcp_client.start()
-    registry.load_mcp(mcp_client)
-
-    if consensus is None:
-        consensus = DebateToConverge(
-            max_rounds=debate_max_rounds,
-            monitor=run_monitor,
+        # Identity, memory, one persistent sandbox each and the registry — the wiring without which a
+        # worker has no tool loop. `attach_worker_runtime` is the one definition of it, so anything
+        # that drives a worker outside a full run (a probe, a benchmark) gets the same worker rather
+        # than a look-alike. It also registers each sandbox's aborter, so a human /stop cancels an
+        # in-flight tool call instead of waiting for a safe point hours away.
+        sandboxes = attach_worker_runtime(
+            workers,
+            run_id=run_id,
             registry=registry,
-            tool_retry_cap=tool_retry_cap,
-            # Phase-2 step-7 authoring/resume: the lead authors missing capability into
-            # research_toolkit on the ambient `ai` branch, then workers rerun (§9.10).
-            tool_author_cap=int(orch.get("tool_author_cap", 3)),
             toolkit_root=toolkit_root,
-            worktree_base=run_dir(run_id) / "authoring",
-            direct_branch=str(orch.get("tool_author_branch", "ai")),
-            human_handler=human_handler,
+            sandbox_settings=sandbox_settings,
+            mcp_client=mcp_client,
             run_control=run_control,
         )
+        for sandbox in sandboxes:
+            setup.push_async_callback(_closed, "sandbox", sandbox.shutdown, run_monitor)
 
-    # Identity, memory, one persistent sandbox each and the registry — the wiring without which a
-    # worker has no tool loop. `attach_worker_runtime` is the one definition of it, so anything
-    # that drives a worker outside a full run (a probe, a benchmark) gets the same worker rather
-    # than a look-alike. It also registers each sandbox's aborter, so a human /stop cancels an
-    # in-flight tool call instead of waiting for a safe point hours away.
-    sandboxes = attach_worker_runtime(
-        workers,
-        run_id=run_id,
-        registry=registry,
-        toolkit_root=toolkit_root,
-        sandbox_settings=sandbox_settings,
-        mcp_client=mcp_client,
-        run_control=run_control,
-    )
-
-    # The quick channel (E12): every graph seat on one router (the co-lead and status monitor never).
-    attach_channel(
-        (reviewer, io_agent, lead, *workers), run_id=run_id, run_control=run_control,
-        human_handler=human_handler, monitor=run_monitor,
-    )
-
-    await run_monitor.record(
-        "run",
-        "run.start",
-        level=1,
-        summary="Research run started",
-        data={
-            "run_id": run_id,
-            "request": request,
-            "max_iterations": max_iterations,
-            "tool_retry_cap": tool_retry_cap,
-            # Recorded so the end-of-run summary can point at them without rebuilding paths from
-            # config — the digest stays derivable from the ledger alone, incl. on a replay.
-            "run_dir": str(run_dir(run_id)),
-            "monitor_jsonl": str(getattr(run_monitor, "jsonl_path", "") or ""),
-        },
-    )
-    if env_error is not None:
-        await run_monitor.record(
-            "run", "env.fingerprint.error", level=3,
-            summary=f"Environment fingerprint unavailable: {env_error!r}", data={},
+        # The quick channel (E12): every graph seat on one router (the co-lead and status monitor never).
+        attach_channel(
+            (reviewer, io_agent, lead, *workers), run_id=run_id, run_control=run_control,
+            human_handler=human_handler, monitor=run_monitor,
         )
 
-    # Start all sandboxes before the graph runs
-    for sandbox in sandboxes:
-        await sandbox.start()
+        await run_monitor.record(
+            "run",
+            "run.start",
+            level=1,
+            summary="Research run started",
+            data={
+                "run_id": run_id,
+                "request": request,
+                "max_iterations": max_iterations,
+                "tool_retry_cap": tool_retry_cap,
+                # Recorded so the end-of-run summary can point at them without rebuilding paths from
+                # config — the digest stays derivable from the ledger alone, incl. on a replay.
+                "run_dir": str(run_dir(run_id)),
+                "monitor_jsonl": str(getattr(run_monitor, "jsonl_path", "") or ""),
+            },
+        )
+        started = True
+        if env_error is not None:
+            await run_monitor.record(
+                "run", "env.fingerprint.error", level=3,
+                summary=f"Environment fingerprint unavailable: {env_error!r}", data={},
+            )
 
-    # Durable resume (§12): compile the graph with a per-run sqlite checkpointer keyed by
-    # run_id (thread_id). LangGraph snapshots ResearchState after every node; durability="sync"
-    # flushes before the next node so even a hard kill leaves a valid last-node checkpoint.
-    # Real runs always attach it (no silent non-durable fallback — the preflight asserts the
-    # package is present); resume=True re-enters from the latest snapshot instead of the top.
-    initial_state: dict[str, Any] = {
-        "request": request,
-        "report": None,
-        "verdict": None,
-        "verdicts": [],
-        "arrived": "request",
-        "human_rounds": 0,
-        "lit_iterations": 0,
-        "analysis_iterations": 0,
-        "max_iterations": max_iterations,
-    }
-    config = {"configurable": {"thread_id": run_id}}
-    # The checkpoint is the run's serialized state, not its workspace — it moves with the
-    # ledger, out of the agents' reach. It is the heaviest single self-read available: the whole
-    # graph state, including every message, in one file.
-    async with open_checkpointer(checkpoint_path(ledger_dir(run_id))) as saver:
+        # Start all sandboxes before the graph runs
+        for sandbox in sandboxes:
+            await sandbox.start()
+
+        # Durable resume (§12): compile the graph with a per-run sqlite checkpointer keyed by
+        # run_id (thread_id). LangGraph snapshots ResearchState after every node; durability="sync"
+        # flushes before the next node so even a hard kill leaves a valid last-node checkpoint.
+        # Real runs always attach it (no silent non-durable fallback — the preflight asserts the
+        # package is present); resume=True re-enters from the latest snapshot instead of the top.
+        initial_state: dict[str, Any] = {
+            "request": request,
+            "report": None,
+            "verdict": None,
+            "verdicts": [],
+            "arrived": "request",
+            "human_rounds": 0,
+            "lit_iterations": 0,
+            "analysis_iterations": 0,
+            "max_iterations": max_iterations,
+        }
+        config = {"configurable": {"thread_id": run_id}}
+        # The checkpoint is the run's serialized state, not its workspace — it moves with the
+        # ledger, out of the agents' reach. It is the heaviest single self-read available: the whole
+        # graph state, including every message, in one file.
+        setup.push_async_callback(_closed, "checkpointer", held.aclose, run_monitor)
+        saver = await held.enter_async_context(
+            open_checkpointer(checkpoint_path(ledger_dir(run_id)))
+        )
         graph = build_graph(
             reviewer=reviewer,
             io_agent=io_agent,
@@ -1051,6 +1098,46 @@ async def run_research(
             checkpointer=saver,
             human_handler=human_handler,
         )
+    except BaseException as exc:
+        # First, as the run's own teardown does (D8): a stop or a signal during the closes must
+        # not cancel them and replace the setup's error with a bare cancel.
+        if run_control is not None:
+            run_control.register_run_task(None)
+        if isinstance(exc, asyncio.CancelledError) and run_control is not None and run_control.stop_requested:
+            # A stop during the setup takes a stop's path (D1e): the cleanup in this task, leaf to
+            # root, recorded, its checklist sent, the connector closed last; the signal handlers
+            # stay until it is done, as for a stop during the graph (a second signal is a no-op).
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            outer_pending = _spend_cancels(task)
+            try:
+                await _closed("checkpointer", held.aclose, run_monitor)
+                await _interrupt_cleanup(
+                    run_control, sandboxes=sandboxes, mcp_client=mcp_client,
+                    human_handler=human_handler, monitor=run_monitor, outer_pending=outer_pending,
+                )
+            finally:
+                if _restore_signals is not None:
+                    _restore_signals()
+            raise _user_interruption(run_control, run_id, run_monitor) from None
+        if _restore_signals is not None:
+            _restore_signals()
+        try:
+            if started and isinstance(exc, Exception):
+                # Recorded as a failure inside the graph is (D1e), before the closes; a ledger
+                # that cannot be written leaves the setup's error standing.
+                try:
+                    await run_monitor.record("run", "run.error", level=1, summary="Research run failed",
+                                             data={"error": repr(exc)})
+                except Exception:  # noqa: BLE001
+                    pass
+                await _record_run_summary(run_monitor)
+        finally:
+            await setup.aclose()
+        raise
+    setup.pop_all()  # the run is under way: the `finally` below closes these from here on
+    try:
 
         try:
             graph_input: Any = initial_state
@@ -1100,6 +1187,8 @@ async def run_research(
                 # Awaited in this task, not shielded into another: the cancel that delivered the
                 # failure is spent, `fail` and `interrupt` send no second one, and the MCP client
                 # (an anyio cancel scope) must be closed by the task that opened it.
+                # Set first: an outer cancel the cleanup re-raises must not run the teardown twice.
+                cleaned = True
                 await _interrupt_cleanup(
                     run_control,
                     sandboxes=sandboxes,
@@ -1109,7 +1198,6 @@ async def run_research(
                     fatal=fatal,
                     outer_pending=outer_pending,
                 )
-                cleaned = True
                 raise fatal from None
             if not run_control.stop_requested:
                 raise  # not ours: an outer cancel (kernel shutdown, a caller's timeout)
@@ -1121,6 +1209,7 @@ async def run_research(
             # that delivered the stop is spent and `interrupt` sends no second one, and the MCP
             # client — an anyio cancel scope this task opened — can only be closed here. Shielding
             # it into another task failed that close and left the server running.
+            cleaned = True  # first: an outer cancel the cleanup re-raises skips the `finally` teardown
             await _interrupt_cleanup(
                 run_control,
                 sandboxes=sandboxes,
@@ -1129,15 +1218,7 @@ async def run_research(
                 monitor=run_monitor,
                 outer_pending=outer_pending,
             )
-            cleaned = True
-            raise UserInterruptionError(
-                run_control.stop_reason,
-                by=run_control.stopped_by or "human",
-                artifacts={
-                    "run_dir": str(run_dir(run_id)),
-                    "ledger": str(run_monitor.jsonl_path or ""),
-                },
-            ) from None
+            raise _user_interruption(run_control, run_id, run_monitor) from None
         except Exception as exc:
             # The run is ending with this error: a /stop or a channel failure now must not cancel
             # its teardown and replace the error with a bare cancel (D8).
@@ -1170,8 +1251,26 @@ async def run_research(
                         data={"error": repr(exc)},
                     )
                 for sandbox in sandboxes:
-                    await sandbox.shutdown()
-                await mcp_client.shutdown()
+                    await _closed("sandbox", sandbox.shutdown, run_monitor)
+                # The toolkit, before the tools server (leaf to root, D8): a coding session whose
+                # close raised, or one still published, is closed again here (C2c).
+                leftover = [run_control.authoring_session] if run_control.authoring_session else []
+                leftover += run_control.unclosed_sessions
+                run_control.authoring_session, run_control.unclosed_sessions = None, []
+                for session in leftover:
+                    try:
+                        await asyncio.wait_for(session.aclose(), timeout=_INTERRUPT_RESET_TIMEOUT_S)
+                    except Exception as exc:  # noqa: BLE001 — recorded; the teardown goes on
+                        await run_monitor.record(
+                            "run", "run.teardown.session_error", level=2,
+                            summary=f"A coding session did not close at the run's end: {exc!r}",
+                            data={"error": repr(exc)},
+                        )
+                await _closed("mcp", mcp_client.shutdown, run_monitor)
+                # The channel last, as a stop's cleanup closes it (leaf to root, D8/D1c).
+                await _close_connector(human_handler, run_monitor)
+    finally:
+        await _closed("checkpointer", held.aclose, run_monitor)  # as the run returns
 
     verdict = final_state["verdict"]
     await run_monitor.record(
@@ -1256,11 +1355,58 @@ def _install_interrupt_signals(run_control: RunControl):
     return restore
 
 
+async def _close_connector(human_handler: Any, monitor: Any) -> None:
+    """Close the human-channel connector at a run's end or a failed launch (D1c); a close that
+    raises is recorded, never the run's outcome. A handler with no close is left as it is."""
+    closer = (getattr(human_handler, "aclose", None) or getattr(human_handler, "shutdown", None)
+              or getattr(human_handler, "close", None))
+    if closer is None:
+        return
+    try:
+        closed = closer()
+        if asyncio.iscoroutine(closed) or isinstance(closed, asyncio.Future):
+            # Bounded as a stop's cleanup bounds it (a Telegram updater's stop can wait on one
+            # last `getUpdates`).
+            await asyncio.wait_for(closed, timeout=_INTERRUPT_STEP_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — the run's own outcome stands
+        try:
+            await monitor.record("run", "run.teardown.connector_error", level=2,
+                                 summary=f"The human-channel connector did not close: {exc!r}",
+                                 data={"error": repr(exc)})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _closed(what: str, close: Any, monitor: Any) -> None:
+    """One teardown close (D1e): a close that raises is recorded as ``run.teardown.<what>_error``
+    and never replaces the run's own outcome."""
+    try:
+        result = close()
+        if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+            await result
+    except Exception as exc:  # noqa: BLE001 — the run's own outcome stands
+        try:
+            await monitor.record("run", f"run.teardown.{what}_error", level=2,
+                                 summary=f"The run's {what} did not close: {exc!r}",
+                                 data={"error": repr(exc)})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _user_interruption(run_control: RunControl, run_id: str, monitor: Any) -> UserInterruptionError:
+    """What a stopped run raises to its caller: the reason, who stopped it, and its artifacts."""
+    return UserInterruptionError(
+        run_control.stop_reason,
+        by=run_control.stopped_by or "human",
+        artifacts={"run_dir": str(run_dir(run_id)), "ledger": str(monitor.jsonl_path or "")},
+    )
+
+
 async def _interrupt_cleanup(
     run_control: RunControl,
     *,
     sandboxes: Sequence[PersistentSandbox],
-    mcp_client: MCPToolClient,
+    mcp_client: MCPToolClient | None,
     human_handler: HumanHandler | None,
     monitor: RunMonitor,
     fatal: BaseException | None = None,
@@ -1366,25 +1512,59 @@ async def _interrupt_cleanup(
     if session is not None:
         run_control.authoring_session = None  # idempotent: never reset twice
         mark = _ledger_mark(monitor)
-        if await _step("authoring branch reset", "authoring_reset", session.aclose(),
-                       timeout=_INTERRUPT_RESET_TIMEOUT_S):
+        raised: list[BaseException] = []
+
+        async def _close() -> None:
+            try:
+                await session.aclose()
+            except Exception as exc:
+                raised.append(exc)
+                raise
+
+        closed = await _step("authoring branch reset", "authoring_reset", _close(),
+                             timeout=_INTERRUPT_RESET_TIMEOUT_S)
+        new = _ledger_since(monitor, mark)
+        # `aclose` raises a failed disconnect only after its reset ran (C2b), so the reset and the
+        # disconnect are two facts on the checklist (C2d). The reset line is read from the ledger
+        # only when the close ran through: it returned, or it raised that disconnect error itself
+        # (a timeout or a cancel mid-close keeps the step's own failure).
+        dropped = [e for e in new if e.get("event") == "coder.disconnect.error"]
+        through = closed or bool(
+            raised and dropped and repr(raised[-1]) == (dropped[-1].get("data") or {}).get("error")
+        )
+        if through:
             # `aclose` reports a failed reset as an event, never a raise: read what it recorded.
-            new = _ledger_since(monitor, mark)
             failed = [e for e in new if e.get("event", "").endswith(".error")
-                      and e.get("event", "").startswith("coder.")]
+                      and e.get("event", "").startswith("coder.") and e not in dropped]
             patches = [e["data"]["patch"] for e in new
                        if e.get("event") == "coder.tree_reset" and (e.get("data") or {}).get("patch")]
+            unsaved = [e for e in new if e.get("event") == "coder.tree_reset"
+                       and (e.get("data") or {}).get("save_error")]
             if failed:
                 steps[-1] = (steps[-1][0], False, failed[-1].get("summary", "reset failed"))
+            elif unsaved:  # the tree was reset; its patch could not be saved (C2c)
+                steps[-1] = (steps[-1][0], True, "reset; saving its patch failed")
             elif patches:
                 steps[-1] = (steps[-1][0], True, f"patch saved: `{patches[-1]}`")
             elif not any(e.get("event") == "coder.tree_reset" for e in new):
                 steps[-1] = (steps[-1][0], True, "nothing to reset: no unbanked changes")
+            else:
+                steps[-1] = (steps[-1][0], True, "")
+        if dropped:
+            steps.append(("coder disconnected", False, dropped[-1].get("summary", "disconnect failed")))
     else:
         await _skipped("authoring branch reset", "authoring_reset", "no tool was being authored")
+    # Sessions whose close raised earlier (C2c): closed again, each its own bounded step.
+    leftover, run_control.unclosed_sessions = run_control.unclosed_sessions, []
+    for index, left in enumerate(leftover):
+        await _step(f"unclosed coding session {index} closed", f"close_unclosed_{index}",
+                    left.aclose(), timeout=_INTERRUPT_RESET_TIMEOUT_S)
 
     # 4 — the tools server (the shell): closed by this task, which opened it.
-    await _step("MCP closed", "mcp_shutdown", mcp_client.shutdown())
+    if mcp_client is not None:
+        await _step("MCP closed", "mcp_shutdown", mcp_client.shutdown())
+    else:  # a stop during the setup, before the tools server was made (D1e)
+        await _skipped("MCP closed", "mcp_shutdown", "this run started no tools server")
 
     # 5 — the record, then the checklist to the human while the channel is still open.
     if fatal is not None:

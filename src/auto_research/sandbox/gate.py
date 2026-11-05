@@ -10,7 +10,8 @@ Two layers:
   Layer A (generic, domain-blind)  — the no-fabrication scan, structural checks,
                                      determinism (same per-test outcomes across two
                                      runs), provenance.
-  Layer B (the tool's own tests)   — run pytest in the worktree.
+  Layer B (the tool's own tests)   — run pytest in the worktree; then the toolkit's
+                                     earlier fast tests once (``layer_b.regression``).
 
 The no-fabrication scan is split into precision tiers so it stays high-precision on
 real toolkit code (which is full of legitimate hardcoded numeric arrays — XSPEC
@@ -393,6 +394,16 @@ def _is_placeholder_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return False
 
 
+def _obsid_exempt(rel_path: str, cfg: dict) -> list[re.Pattern]:
+    """The ObsID tokens whose lines the vocabulary scan skips, for a file under a package's
+    ``tests/`` only: a test builds its marked synthetic fixture there (user ruling 2026-11-04),
+    while a synthetic ObsID written into a tool's own code (``lib/``, ``skills/``) is exactly what
+    the scan exists for."""
+    if Path(rel_path).parts[1:2] != ("tests",):  # <package>/tests/…
+        return []
+    return [re.compile(p) for p in cfg.get("allowlist_obsid_tokens") or []]
+
+
 def scan_python_source(
     rel_path: str,
     source: str,
@@ -419,7 +430,7 @@ def scan_python_source(
     finding_cfg = set(cfg.get("finding_code_patterns") or [])
     finding_detectors = finding_cfg & _FINDING_DETECTORS
     finding_code_patterns = sorted(finding_cfg - _FINDING_DETECTORS)
-    allow_res = [re.compile(p) for p in cfg.get("allowlist_obsid_tokens") or []]
+    allow_res = _obsid_exempt(rel_path, cfg)
 
     hard: list[CheckResult] = []
     findings: list[CheckResult] = []
@@ -562,7 +573,7 @@ def scan_text_source(
     cfg = config if config is not None else _code_gate_config()
     vocab = [v.lower() for v in cfg.get("hard_fail_vocabulary") or []]
     finding_vocab = [v.lower() for v in cfg.get("finding_vocabulary") or []]
-    allow_res = [re.compile(p) for p in cfg.get("allowlist_obsid_tokens") or []]
+    allow_res = _obsid_exempt(rel_path, cfg)
 
     hard: list[CheckResult] = []
     findings: list[CheckResult] = []
@@ -895,7 +906,8 @@ def check_structural(
         detail="" if not unchecked else (
             "; ".join(unchecked) + ". Each args_schema property declares \"kind\": \"data\" (another "
             "tool's output, passed by reference), \"parameter\" (a number that changes the science; "
-            "an optional one declares \"default\"), \"path\" or \"setting\"."
+            "an optional one declares \"default\"), \"path\", \"setting\", or \"output\" (where the "
+            "tool writes what it returns, with its \"shape\": folder, file or prefix)."
         ),
     ))
     return out
@@ -1193,12 +1205,21 @@ def _bounded_pytest_output(out: str) -> str:
     Under the cap the output is returned whole; over it, two thirds from the front and one third
     from the back, with a marker naming what was dropped so nothing looks complete when it is not.
     """
-    cap = _layer_b_output_cap()
-    if len(out) <= cap:
-        return out
+    return _bounded_text(out, _layer_b_output_cap())
+
+
+def _bounded_text(text: str, cap: int) -> str:
+    """``text`` whole under ``cap``; over it, two thirds from the front and one third from the
+    back, with a marker naming what was dropped."""
+    if len(text) <= cap:
+        return text
     head, tail = (cap * 2) // 3, cap // 3
-    dropped = len(out) - head - tail
-    return f"{out[:head]}\n\n[... {dropped} characters of pytest output elided ...]\n\n{out[-tail:]}"
+    dropped = len(text) - head - tail
+    return f"{text[:head]}\n\n[... {dropped} characters elided ...]\n\n{text[len(text) - tail:]}"
+
+
+#: How many failing earlier tests ``layer_b.regression`` shows with their output; the rest are named.
+_REGRESSION_SHOWN = 10
 
 
 def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[bool, str]:
@@ -1224,10 +1245,16 @@ def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[boo
     return True, ""
 
 
+#: The toolkit's fast tests (its root ``conftest.py``: unmarked; ``slow`` and ``live`` are marked),
+#: as a pytest ``-m`` expression. The marker names are a toolkit-contract item; this is their one
+#: place on our side.
+FAST_TESTS = "not slow and not live"
+
+
 async def _default_test_runner(
     worktree: Path, test_paths: list[str], *, timeout_s: int = 900,
     returns_tools: dict[str, tuple[str, str]] | None = None, masked: Path | None = None,
-    environment: Any | None = None,
+    environment: Any | None = None, regression: list[str] | tuple[str, ...] = (),
 ) -> dict:
     """Run the worktree's tests twice and compare **per-test outcomes** for determinism.
 
@@ -1278,14 +1305,14 @@ async def _default_test_runner(
         extra_ro = tuple(str(p) for p in (environment.prefix,
                                           *((environment.activate.parent,) if environment.activate else ())))
 
-    def _run(junit_path: str) -> tuple[int, str, dict[str, str]]:
+    def _run(junit_path: str, paths: list[str] | None = None) -> tuple[int, str, dict[str, str]]:
         # The return check's recorder (G15) loads in both runs, so the two argvs stay identical for
         # the determinism compare; each run records into its own directory beside its JUnit file.
         plugin_args, run_env = returns.install(
             Path(junit_path).with_suffix(".returns"), returns_tools or {}, env,
         )
         argv = [python_exec, "-m", "pytest", "-p", "no:cacheprovider", *plugin_args, "-q",
-                f"--junitxml={junit_path}", *test_paths]
+                f"--junitxml={junit_path}", *(test_paths if paths is None else paths)]
         if environment is not None:
             # A clean start in the environment, inside the jail below (the shared launcher).
             import shlex
@@ -1336,19 +1363,68 @@ async def _default_test_runner(
     # JUnit reports go to a throwaway dir outside the worktree, so they never pollute the
     # changeset (collect_targets) or survive a later git clean.
     with tempfile.TemporaryDirectory() as td:
-        rc1, out1, map1 = _run(str(Path(td) / "junit1.xml"))
+        rc1, out1, map1 = _run(str(Path(td) / "junit1.xml")) if test_paths else (0, "", {})
         # Run 1's pytest scratch goes before run 2 (human ruling 2026-10-06): a toolkit suite can
         # leave tens of GB there (measured: 65 GB in 10 min), and two runs' worth filled the disk.
         for scratch in _gate_private_tmp(str(Path(td) / "junit1.xml")).glob("pytest-of-*"):
             shutil.rmtree(scratch, ignore_errors=True)
-        _rc2, _out2, map2 = _run(str(Path(td) / "junit2.xml"))
+        _rc2, _out2, map2 = _run(str(Path(td) / "junit2.xml")) if test_paths else (0, "", {})
         return_checks, return_findings = (
-            returns.judge(Path(td) / "junit1.returns", returns_tools) if returns_tools else ([], [])
+            returns.judge(Path(td) / "junit1.returns", returns_tools) if returns_tools and test_paths else ([], [])
         )
+        regression_checks: list[CheckResult] = []
+        if regression:
+            # The toolkit's earlier fast tests, once, for regression (user rules 2026-11-04): one
+            # pytest call per package (two packages' test files may share a name), outside the
+            # determinism maps; the recorder judges only the watched tools they happen to call.
+            ignored = [f"--ignore={path}" for path in test_paths]
+            failing: dict[str, str] = {}  # test id -> what it returned
+            unfinished: list[tuple[str, str]] = []  # (what happened, pytest output)
+            seen = {(c.name, c.detail) for c in return_checks}
+            for index, folder in enumerate(regression):
+                junit3 = Path(td) / f"junit_regression{index}.xml"
+                # junit_logging=all: each failure's captured output travels with it in the report.
+                rc3, out3, map3 = _run(str(junit3), ["-m", FAST_TESTS, "-o", "junit_logging=all", *ignored, folder])
+                texts = _junit_failures(junit3)
+                broken = [t for t, outcome in map3.items() if outcome not in ("PASSED", "SKIPPED")]
+                failing.update({t: texts.get(t, "") for t in broken})
+                if rc3 == 2 and broken:
+                    unfinished.append((f"pytest stopped at a collection error in {folder}, so its other tests "
+                                       "ran no further", ""))
+                elif rc3 not in (0, 5) and not broken:  # 5: no earlier fast test in this package
+                    unfinished.append((f"the earlier fast tests in {folder} did not finish within {timeout_s}s"
+                                       if rc3 == 124 else
+                                       f"the earlier fast tests in {folder} ended with pytest exit code {rc3}", out3))
+                # The recorder loads when a test reaches its call; a run where none did has nothing to judge.
+                if returns_tools and any(outcome in ("PASSED", "FAILED") for outcome in map3.values()):
+                    watched_checks, _unobserved = returns.judge(junit3.with_suffix(".returns"), returns_tools)
+                    for c in watched_checks:
+                        if not c.passed and (c.name, c.detail) not in seen:
+                            seen.add((c.name, c.detail))
+                            regression_checks.append(c)
+            names = sorted(failing)
+            shown = names[:_REGRESSION_SHOWN]
+            share = _layer_b_output_cap() // max(1, len(shown) + sum(1 for _what, out in unfinished if out))
+            parts = [f"an earlier test that fails with this change: {t}\n{_bounded_text(failing[t], share)}"
+                     for t in shown]
+            rest = names[len(shown):]
+            if rest:
+                parts.append(f"and {len(rest)} more earlier tests that fail with this change: "
+                             + ", ".join(rest[:20]) + (f" and {len(rest) - 20} more" if len(rest) > 20 else ""))
+            parts += [what + (":\n" + _bounded_text(out, share) if out else ".") for what, out in unfinished]
+            ok = not (failing or unfinished)
+            regression_checks.insert(0, CheckResult(
+                name="layer_b.regression", layer="B", passed=ok,
+                detail="" if ok else "\n\n".join(
+                    parts + ["Make the change keep every earlier fast test of the toolkit passing."]),
+            ))
 
-    passed, detail = _layer_b_verdict(rc1, map1, out1)
-    results = [CheckResult(name="layer_b.pytest", layer="B", passed=passed, detail=detail)]
+    results: list[CheckResult] = []
+    if test_paths:
+        passed, detail = _layer_b_verdict(rc1, map1, out1)
+        results.append(CheckResult(name="layer_b.pytest", layer="B", passed=passed, detail=detail))
     results.extend(return_checks)
+    results.extend(regression_checks)
     deterministic, detail = _outcomes_determinism(map1, map2)
     return {
         "results": results,
@@ -1400,8 +1476,12 @@ def _jailed_pytest(
         e for e in (*base.ro, *base.rw)
         if Path(e).resolve() != host_tmp and (tree is None or Path(e).resolve() != tree)
     )
+    # Real observation data the toolkit's own tests read, for this run only (never the workers'
+    # allow-list): `gate_readonly_roots`, each that exists.
+    gate_ro = tuple(str(r) for r in (_orchestration_config().get("gate_readonly_roots") or ())
+                    if Path(str(r)).is_dir())
     policy = JailPolicy(
-        ro=(*others, *extra_ro),
+        ro=(*others, *extra_ro, *gate_ro),
         rw=(str(Path(junit_path).parent), *((str(worktree),) if worktree else ()), str(home)),
         network=False,
         home=str(home),
@@ -1413,6 +1493,31 @@ def _jailed_pytest(
         masked=(str(masked),) if masked is not None else (),
     )
     return wrap(argv, policy)
+
+
+def _junit_failures(junit_path: Path) -> dict[str, str]:
+    """``{test_id: what it returned}`` for each failed or erroring test of a ``--junitxml`` report:
+    the ``<failure>``/``<error>`` element's message and pytest's report text, then the test's
+    captured output when the report carries it (``junit_logging``); a test reported twice (a
+    failure, then a teardown error) keeps both. Ids as in :func:`_parse_junit_outcomes`. ``{}``
+    when the report is absent or unparseable."""
+    try:
+        root = ET.parse(str(junit_path)).getroot()
+    except (OSError, ET.ParseError):
+        return {}
+    texts: dict[str, str] = {}
+    for case in root.iter("testcase"):
+        failed = [c for c in case if c.tag in ("failure", "error")]
+        if not failed:
+            continue
+        body = (failed[0].text or "").strip()
+        message = failed[0].get("message", "")
+        parts = [body if message and message in body else "\n".join(filter(None, (message, body)))]
+        parts += [f"[captured {c.tag}]\n{c.text.strip()}" for c in case
+                  if c.tag in ("system-out", "system-err") and (c.text or "").strip()]
+        test_id = f"{case.get('classname', '')}::{case.get('name', '')}"
+        texts[test_id] = "\n\n".join(filter(None, (texts.get(test_id), *parts)))
+    return texts
 
 
 def _parse_junit_outcomes(junit_path: Path) -> dict[str, str]:
@@ -1686,19 +1791,30 @@ async def _run_layer_b(
     conda dir (``agent_conda_dir()/gate``: never listed, reused while the definition is unchanged);
     tests of a package naming none run as before. The groups' outcomes are merged into one. With
     ``watched`` (the default runner's return recorder), each group watches only its own
-    environment's tools: another environment's may not even import there."""
+    environment's tools: another environment's may not even import there.
+
+    With the default runner (``watched`` given), each group also runs, once, the toolkit's earlier
+    fast tests (:data:`FAST_TESTS`) of every package naming that environment, for regression (user
+    rule 2026-11-04): :func:`_earlier_tests`. An injected runner keeps its ``(worktree,
+    test_paths)`` call."""
     groups: dict[str | None, list[str]] = {}
     for path in test_paths:
         env = _package_env(export / path.split("/", 1)[0])
         groups.setdefault(env, []).append(path)
-    if list(groups) == [None]:
+    earlier: dict[str | None, list[str]] = {}
+    if watched is not None:
+        for path in _earlier_tests(export):
+            earlier.setdefault(_package_env(export / path.split("/", 1)[0]), []).append(path)
+            groups.setdefault(_package_env(export / path.split("/", 1)[0]), [])
+    if list(groups) == [None] and not earlier:
         return await test_runner(export, test_paths)
 
     def own(env_id):
         if watched is None:
             return {}
         return {"returns_tools": {k: v for k, v in watched.items()
-                                  if _package_env(export / v[0].split(".", 1)[0]) == env_id}}
+                                  if _package_env(export / v[0].split(".", 1)[0]) == env_id},
+                "regression": earlier.get(env_id, [])}
     merged: dict = {"results": [], "findings": [], "deterministic": True, "determinism_detail": ""}
     for env_id, paths in groups.items():
         if env_id is None:
@@ -1708,7 +1824,9 @@ async def _run_layer_b(
             if environment is None:
                 outcome = {"results": [CheckResult(
                     name=f"layer_b.env.{env_id}", layer="B", passed=False,
-                    detail=f"envs/{env_id} did not build, so its package's tests could not run: {error}",
+                    detail=f"envs/{env_id} did not build, so "
+                           + ("its package's tests" if paths else "the earlier fast tests of the packages naming it")
+                           + f" could not run: {error}",
                 )], "deterministic": True}
             else:
                 outcome = await test_runner(export, paths, environment=environment, **own(env_id))
@@ -1721,10 +1839,17 @@ async def _run_layer_b(
     return merged
 
 
+def _earlier_tests(export: Path) -> list[str]:
+    """The toolkit's test folders, relative to ``export``: every ``*_utils`` package's ``tests/``
+    (the toolkit's layout). The runner selects their fast tests (:data:`FAST_TESTS`) and leaves out
+    the change's own test files, which ran already."""
+    return sorted(f"{p.parent.name}/tests" for p in export.glob("*_utils/tests") if p.is_dir())
+
+
 async def _gate_environment(export: Path, env_id: str) -> tuple[Any | None, str]:
     """The environment ``envs/<env_id>`` of the judged files, built for the gate; or why not."""
     from auto_research.env import agent_conda_dir, analysis_environment, conda_executable, declared_externals
-    from auto_research.sandbox.env_build import StoppableRunner, build, read_definition
+    from auto_research.sandbox.env_build import PACKAGE_ARCHIVE, StoppableRunner, build, read_definition
     from auto_research.sandbox.jail import jail_enabled
 
     import time
@@ -1754,9 +1879,12 @@ async def _gate_environment(export: Path, env_id: str) -> tuple[Any | None, str]
                     pass
             conda_dir.mkdir(parents=True, exist_ok=True)
             os.utime(conda_dir)
+        # The gate still builds the judged definition itself; the shared archive only spares the
+        # downloads, each archived file checked by conda against the judged lock (D3b, [F30]).
         return build(definition, conda_dir=conda_dir,
                      conda_exe=conda_executable(), base_envs={human.name: human} if human else {},
-                     externals=declared_externals(), jailed=jail_enabled(), runner=runner), conda_dir
+                     externals=declared_externals(), jailed=jail_enabled(), runner=runner,
+                     package_archive=agent_conda_dir() / PACKAGE_ARCHIVE), conda_dir
     def _reachable(built):
         # A derived environment with no activation of its own sources its base's, the human's init
         # script, which may lie where the jail binds nothing (this repository): a copy inside this

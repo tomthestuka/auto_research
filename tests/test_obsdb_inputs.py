@@ -202,3 +202,111 @@ def test_a_call_naming_no_observation_records_the_catalog_it_reads(tmp_path, mis
     store = ReceiptStore(tmp_path / "receipts")
     (entry,) = _call(tmp_path, store, {"obs_db_path": str(mission)}).inputs
     assert entry.basis == "content" and entry.path == (mission / "catalog.json").resolve()
+
+
+@pytest.fixture
+def tree(tmp_path, monkeypatch):
+    """A mission folder laid out as HEASARC's archive (H2): ``ixpe/data/obs/<prefix>/<obsid>``."""
+    from auto_research.sandbox import fs_guard
+
+    monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
+    root = tmp_path / "ixpe"
+    (root / "reduced" / "01002901").mkdir(parents=True)  # a product kept elsewhere; the level-2 event wins
+    for prefix, obsid in (("01", "01002901"), ("02", "02001901")):
+        (root / "data" / "obs" / prefix / obsid / "event_l2").mkdir(parents=True)
+        (root / "data" / "obs" / prefix / obsid / "event_l2" / "evt2.fits").write_bytes(obsid.encode())
+    (root / "catalog.json").write_text(json.dumps({"mission": "ixpe", "entries": {
+        # Recorded: the folder is read from the product path. Recorded outside the mission folder
+        # (a `..` or an absolute path): the tree rule finds it.
+        "01002901": {"obsid": "01002901", "max_level": 2, "products": [
+            {"kind": "pha", "path": "reduced/01002901/x.pha"},
+            {"kind": "pha", "path": "../elsewhere/01002901/x.pha"},
+            {"kind": "level2_evt", "path": "reduced/01002901/old_evt2.fits", "created_at": "2025-01-01"},
+            {"kind": "level2_evt", "path": "data/obs/01/01002901/event_l2/evt2.fits",
+             "created_at": "2026-11-04"}]},
+        "02001901": {"obsid": "02001901", "max_level": 2, "products": [
+            {"kind": "level2_evt", "path": "../elsewhere/02001901/evt2.fits"},
+            {"kind": "level2_evt", "path": str(tmp_path / "elsewhere/02001901/evt2.fits")}]},
+    }}))
+    (tmp_path / "elsewhere" / "02001901").mkdir(parents=True)
+    monkeypatch.setattr(react, "_observation_path_args", lambda: {"ixpe_path": str(root)})
+    return root
+
+
+def test_an_obsid_under_heasarcs_tree_is_found_by_its_record_and_by_the_tree_rule(tmp_path, tree):
+    store = ReceiptStore(tmp_path / "receipts")
+    receipt = _call(tmp_path, store, {"obsids": ["01002901", "02001901"]})
+    assert [(i.basis, i.path) for i in receipt.inputs] == [
+        ("obsdb", (tree / "data/obs/01/01002901").resolve()),
+        ("obsdb", (tree / "data/obs/02/02001901").resolve())]
+    first = receipt.inputs[0].sha256
+    (tree / "data/obs/01/01002901/event_l2/pcube.fits").write_bytes(b"new product")
+    assert _call(tmp_path, store, {"obsid": "01002901"}).inputs[0].sha256 != first  # the tree folder's listing
+
+
+def test_an_uncatalogued_tree_folder_is_a_listing_and_a_doubled_obsid_records_nothing(tmp_path, tree):
+    store = ReceiptStore(tmp_path / "receipts")
+    (tree / "data/obs/03/03002599/event_l2").mkdir(parents=True)
+    (entry,) = _call(tmp_path, store, {"obsid": "03002599"}).inputs
+    assert entry.basis == "listing" and entry.path == (tree / "data/obs/03/03002599").resolve()
+    (tree / "data/obs/99/02001901").mkdir(parents=True)  # the tree rule now finds it twice
+    assert _call(tmp_path, store, {"obsid": "02001901"}).inputs == []
+    (tree / "data/obs/99/01002901").mkdir(parents=True)  # twice too, but its catalog records where
+    (entry,) = _call(tmp_path, store, {"obsid": "01002901"}).inputs
+    assert entry.path == (tree / "data/obs/01/01002901").resolve()
+
+
+def test_an_obsid_folder_names_its_mission_under_either_layout(tmp_path):
+    from auto_research.observations import obsid_mission
+
+    assert obsid_mission(tmp_path / "ixpe/data/obs/01/01002901") == "ixpe"
+    assert obsid_mission(tmp_path / "nustar/data/obs/80/9/80902318002") == "nustar"
+    assert obsid_mission(tmp_path / "chandra/data/byobsid/2/12345") == "chandra"
+    assert obsid_mission(tmp_path / "IXPE/01002901") == "IXPE"
+    assert obsid_mission(tmp_path / "XMM/0123456789") == "XMM"
+
+
+def test_a_symlinked_mission_folder_keeps_its_missions_tree_rule(tmp_path, tree, monkeypatch):
+    """The mission is the folder's name as configured; resolving the link must not lose it."""
+    store_dir = tmp_path / "IXPE_store"
+    tree.rename(store_dir)
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root" / "ixpe").symlink_to(store_dir)
+    monkeypatch.setattr(react, "_observation_path_args", lambda: {"ixpe_path": str(tmp_path / "root" / "ixpe")})
+    (store_dir / "data/obs/03/03002599").mkdir(parents=True)
+    (entry,) = _call(tmp_path, ReceiptStore(tmp_path / "receipts"), {"obsid": "03002599"}).inputs
+    assert entry.basis == "listing" and entry.path == store_dir.resolve() / "data/obs/03/03002599"
+
+
+def test_a_folder_a_record_names_outside_the_tree_names_its_mission(tmp_path, tree):
+    from auto_research.observations import obsid_mission
+
+    assert obsid_mission(tree / "reduced" / "01002901") == "ixpe"
+
+
+@pytest.mark.skipif(not __import__("tests.test_observations", fromlist=["x"])._toolkit_pkg_available("obsdb_catalog"),
+                    reason="obsdb_catalog not in toolkit_root (unprovisioned machine)")
+def test_the_runtime_finds_each_obsid_where_the_toolkits_locate_does(tmp_path, tree, monkeypatch):
+    """`observations.OBSID_TREES` / `obsid_folder` mirror `obsdb_catalog`: the same table, the same folder."""
+    import sys
+
+    from auto_research.observations import OBSID_TREES, obsid_folder
+    from auto_research.provenance.store import _catalog_entries
+    from tests.test_observations import TOOLKIT_ROOT
+
+    monkeypatch.syspath_prepend(str(TOOLKIT_ROOT))
+    for name in [m for m in sys.modules if m.split(".")[0] == "obsdb_catalog"]:
+        monkeypatch.delitem(sys.modules, name)
+    from obsdb_catalog import _domain
+    from obsdb_catalog.locate import locate
+
+    assert OBSID_TREES == _domain.TREES
+    (tree / "data/obs/03/03002599").mkdir(parents=True)
+    entries = _catalog_entries(tree / "catalog.json")
+    for obsid in ("01002901", "02001901", "03002599"):
+        assert obsid_folder(tree, obsid, entries.get(obsid)) == locate(tmp_path, "ixpe", obsid), obsid
+    (tree / "data/obs/99/02001901").mkdir(parents=True)
+    with pytest.raises(LookupError):
+        locate(tmp_path, "ixpe", "02001901")
+    with pytest.raises(LookupError):
+        obsid_folder(tree, "02001901", entries.get("02001901"))

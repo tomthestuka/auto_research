@@ -36,6 +36,7 @@ maintained one is a liability, so Anthropic, OpenAI and DeepSeek are deliberatel
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from auto_research.models.types import RoleModelConfig
 
@@ -100,20 +101,8 @@ class Leg:
     colead_model: str | None = None
     """Exact co-lead model, when the leg pins one rather than taking the role's first member."""
 
-    colead_vision: bool = True
-    """Whether the pinned co-lead's member is declared vision-capable.
-
-    A declaration, and it has to be able to be false: the co-lead is never sent an image (its
-    review passes none and its tool set excludes the knowledge-base tools), so a text-only vendor
-    is eligible to review, and declaring vision on a member its vendor will not serve would be a
-    false statement of capability. `deepseek-v4-pro` is the case that needs it."""
-
     lead_provider: str | None = None
     lead_model: str | None = None
-    lead_vision: bool = True
-    """Whether the pinned lead's member is declared vision-capable. The lead IS sent figures (the
-    accumulated per-worker catalog), so this is true for every lead the grid can legally use, and
-    exists so a vision-less lead fails a test rather than a trial."""
     """The analyst lead this leg runs under. ``None`` takes the configured role, which is the
     campaign default and every panel-(a) row.
 
@@ -173,7 +162,6 @@ class Leg:
             harness=self.harness,
             base_url=self.base_url,
             key_env=self.key_env,
-            vision=True,
             priceMTk=dict(_PRICES.get(self.model, {})),
             parameters=dict(_PARAMETERS.get(self.model, {})),
         )
@@ -356,12 +344,13 @@ CURATED: tuple[Leg, ...] = (
 # **Why the axes are unequal.** The lead is sent figures (the accumulated per-worker catalog) and
 # the co-lead is not, by construction -- its review passes no images and its tool set excludes the
 # knowledge-base tools -- so vision binds the lead axis alone (audited 2026-08-25, CLAUDE.md §6).
-# DeepSeek is text-only under the policy of the same date, so it reviews without leading. Google
-# is out of both axes: its second tool call in any loop is a hard 400 (handoff [I8]), so it cannot
+# DeepSeek is not on the lead axis (the grid's design, run under the 2026-08-25 text-only policy,
+# since retired; its co-lead `deepseek-v4-pro` is text-only by its vendor), so it reviews without
+# leading. Google is out of both axes: its second tool call in any loop is a hard 400 (handoff [I8]), so it cannot
 # run a ReAct role at all.
 #
-# **The shape's one virtue and one cost.** Because the author is DeepSeek and DeepSeek cannot
-# lead, author-correlation and lead-correlation never coincide, so each is estimable free of the
+# **The shape's one virtue and one cost.** Because the author is DeepSeek and DeepSeek is not on
+# the lead axis, author-correlation and lead-correlation never coincide, so each is estimable free of the
 # other -- these are the four arms §8.5 records as not existing. The cost is that the
 # doubly-correlated cell is unreachable, so no interaction term is estimable, which the manuscript
 # has to state rather than leave to a reader.
@@ -380,7 +369,10 @@ GRID_AUTHOR = {
 
 @dataclass(frozen=True)
 class GridMember:
-    """One coordinate on a grid axis: the vendor and model a role is pinned to."""
+    """One coordinate on a grid axis: the vendor and model a role is pinned to.
+
+    What the member may be sent is its model's entry in ``config/model_capabilities.yaml``
+    (``auto_research.models.providers.media_capability``), never a roster flag."""
 
     slug: str
     """Short vendor tag; one half of a generated leg's slug."""
@@ -388,40 +380,39 @@ class GridMember:
     provider: str
     model: str
 
-    vision: bool = True
-    """Whether this member is declared vision-capable, per that vendor's own documentation.
-
-    False only for DeepSeek, and by policy rather than by absent capability: the vendor documents
-    `deepseek-v4-flash-vision-exp`, and this project declines a multimodal path its vendor labels
-    experimental (ruling 2026-08-25). It is why DeepSeek can review but cannot lead.
-    """
-
     max_concurrency: int | None = None
     """A ceiling this vendor imposes on *any* role, not only on an author. Z.AI throttled 87 to 97
     per cent of turns above two in flight, and a throttled lead or reviewer stalls a trial exactly
     as a throttled author does."""
 
 
-#: The lead axis. Every entry must be vision-capable, since the lead is sent figures.
-GRID_LEADS: tuple[GridMember, ...] = (
-    GridMember("anthropic", "anthropic", "claude-opus-5"),
-    GridMember("openai", "openai", "gpt-5.6-sol"),
-    GridMember("zai", "zai", "glm-5.3", max_concurrency=2),
-    GridMember("qwen", "dashscope", "qwen3.8-max"),
-)
+def _grid_axis(name: str) -> tuple[GridMember, ...]:
+    """One axis of the grid, read from ``grid.yaml`` beside this module (user ruling 2026-11-04:
+    model choices are configuration, never code)."""
+    import yaml
 
-#: The co-lead axis: the lead axis plus DeepSeek, which reviews without vision.
-#: `deepseek-v4-pro` rather than the author's Flash, for two reasons. It is the stronger reviewer
-#: on the axis that matters here -- independent testing puts it at 77 against Flash's 60, with
-#: Flash's win confined to agentic tool use, which a reviewer barely exercises -- and it keeps the
-#: author-correlated column same-provider-different-model, which is the shape of the one
+    data = yaml.safe_load((Path(__file__).with_name("grid.yaml")).read_text(encoding="utf-8"))
+    return tuple(GridMember(**member) for member in data[name])
+
+
+#: The lead axis. Every entry must take images, since the lead is sent figures: Z.AI's lead is
+#: `glm-5.3-flash`, the one current GLM its pages document with image input; the flagship `glm-5.3`
+#: is text-only. The 2026-08-26 grid batch (20260826T022253Z, not reported in the manuscript) ran
+#: its Z.AI-lead cells with `glm-5.3`; its slugs are unchanged, so resuming it under this roster
+#: would run Z.AI-lead trials with another model.
+GRID_LEADS: tuple[GridMember, ...] = _grid_axis("leads")
+
+#: The co-lead axis: every lead, so the lead-correlated diagonal is same-model in all four cells
+#: (Z.AI's co-lead is `glm-5.3-flash`, user ruling 2026-11-04), plus DeepSeek, which reviews without
+#: vision. `deepseek-v4-pro` rather than the author's Flash, for two reasons. It is the stronger
+#: reviewer on the axis that matters here -- independent testing puts it at 77 against Flash's 60,
+#: with Flash's win confined to agentic tool use, which a reviewer barely exercises -- and it keeps
+#: the author-correlated column same-provider-different-model, which is the shape of the one
 #: author-correlated arm already measured (`claude-sonnet-5` authored, `claude-opus-5` reviewed).
 #: A Flash co-lead would make that column same-*model* and not comparable to it.
 #: Live-probed 2026-08-25: nine of nine real schemas, tools declared, `tool_choice="none"`, so Pro
 #: honours every DeepSeek descriptor flag that had been measured on Flash alone.
-GRID_COLEADS: tuple[GridMember, ...] = GRID_LEADS + (
-    GridMember("deepseek", "deepseek", "deepseek-v4-pro", vision=False),
-)
+GRID_COLEADS: tuple[GridMember, ...] = _grid_axis("coleads")
 
 
 def _grid_legs() -> tuple[Leg, ...]:
@@ -446,10 +437,8 @@ def _grid_legs() -> tuple[Leg, ...]:
                     base_url=GRID_AUTHOR["base_url"],
                     lead_provider=lead.provider,
                     lead_model=lead.model,
-                    lead_vision=lead.vision,
                     colead_provider=colead.provider,
                     colead_model=colead.model,
-                    colead_vision=colead.vision,
                     trials=5,
                     max_concurrency=min(ceilings) if ceilings else 4,
                     # Kept out of a bare batch: naming `grid` runs the twenty together, so the

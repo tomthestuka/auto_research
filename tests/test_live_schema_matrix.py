@@ -10,7 +10,7 @@ Since 2026-08-06 a terminal compose also declares its tools (`tool_choice="none"
 of these schemas now travels **alongside a tools array** — a combination no test had ever sent.
 That is the pairing under test here: schema × provider × tools-declared.
 
-    AUTO_RESEARCH_LIVE_MODEL_TESTS=1 pytest tests/test_live_schema_matrix.py -s
+    pytest tests/test_live_schema_matrix.py --live -s
 """
 
 from __future__ import annotations
@@ -46,10 +46,7 @@ from auto_research.schemas import (
 from auto_research.storage import MemoryRecord
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_MODEL_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_MODEL_TESTS=1 to spend provider tokens",
-)
+pytestmark = pytest.mark.live
 
 # Every schema reachable from `roles.py`; the ones marked COMPOSE also ride the terminal
 # compose, which is the path that now declares tools.
@@ -84,14 +81,13 @@ PROVIDERS = [
     # whether `strict` constrains anything, and because a compatibility layer is exactly where a
     # large real schema diverges from a two-field toy.
     ("deepseek", DeepSeekProvider(), "deepseek-v4-flash"),
-    # Z.AI reaches the same guarantee by the forced-tool route rather than `text.format`
+    # Z.AI reaches the same guarantee by the emit-tool route under `auto` rather than `text.format`
     # (`ResponsesVendor.schema_via_tool`), so it belongs in this matrix on equal terms: what
     # matters to a caller is that a valid instance comes back, not which mechanism produced it.
     ("zai", ZaiProvider(), "glm-5.3"),
     # Qwen joined on 2026-08-24, once Model Studio was activated on the account. It reaches a
-    # schema by the same forced-tool route as Z.AI, except that it refuses a *named* tool_choice
-    # while thinking (Anthropic's documented rule, enforced here too), so the emit tool is
-    # offered under `auto` instead.
+    # schema by the same emit-tool route under `auto` as Z.AI: it refuses a *named* tool_choice
+    # while thinking (Anthropic's documented rule, enforced here too).
     ("dashscope", DashscopeProvider(), "qwen3.8-max"),
     # Keep the balanced tier in the identical fixture shape: same adapter, schema matrix and
     # trajectory tests, with only the model id changing. This catches model-specific behaviour
@@ -112,7 +108,7 @@ QWEN_MATRIX_REASONING_EFFORT = "minimal"
 
 #: Vendors that cannot be handed a schema by any route this adapter supports, or whose account
 #: cannot be exercised. They still have to reach, authenticate and call tools, which is what the
-#: check below covers. Z.AI and Qwen left this list on 2026-08-24 when their forced-tool route
+#: check below covers. Z.AI and Qwen left this list on 2026-08-24 when their emit-tool route
 #: was live-verified.
 SCHEMALESS_PROVIDERS: list[tuple[str, object, str]] = [
     # Empty since 2026-08-24: every configured vendor reaches a schema by one route or the
@@ -168,8 +164,6 @@ def _config(
         name="probe",
         provider=provider_name,
         model=model,
-        vision=True,
-        documents=True,
         # Anthropic budgets output with `max_tokens`; every Responses-dialect vendor uses
         # `max_output_tokens`, which DeepSeek and Z.AI both document as supported.
         parameters=parameters,
@@ -566,7 +560,7 @@ def test_live_schemaless_vendor_reaches_and_calls_a_tool(provider_name, provider
 def test_live_schemaless_vendor_sends_its_schema_by_the_route_it_supports(
     provider_name, provider, model
 ):
-    """These vendors ignore `text.format`, so the schema must ride as a forced tool call.
+    """These vendors ignore `text.format`, so the schema must ride as an emit tool call.
 
     Checked against the real adapter, and without spending a call: what could regress is the
     *request*, and a vendor whose account cannot answer still lets us assert how we would ask.

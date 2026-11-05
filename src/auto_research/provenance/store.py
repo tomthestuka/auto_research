@@ -70,6 +70,7 @@ NOT_EVIDENCE_NAMES = {
     "text_search": "a search result", "web_search": "a search result", "web_fetch": "a web page",
     "mcp.builtin.bash_exec": "shell output", "mcp.builtin.read_file": "a file you read",
     "mcp.builtin.list_dir": "a directory listing", "dispatch": "a task brief",
+    "toolspec": "a tool brief",
     "human_reply": "a file the human sent", "report_renderer": "an earlier published report",
     "search_literature": "a search result",
     "list_env": "an environment listing",
@@ -458,25 +459,32 @@ class ReceiptStore:
         return entry
 
     def hash_obsdb_entry(
-        self, mission_dir: Path, obsid: str, *, entries: dict | None = None
+        self, mission_dir: Path, obsid: str, *, entries: dict | None = None,
+        mission: str | None = None, index: Callable[[], dict] | None = None,
     ) -> InputFile | None:
         """An observation a tool locates itself from its ObsID (user ruling 2026-10-16: record what
-        it is and a hash, never a copy): ``<mission_dir>/<obsid>``, hashed over its catalog entry
+        it is and a hash, never a copy): its folder under ``mission_dir``
+        (:func:`auto_research.observations.obsid_folder`: the catalog entry's record, then the
+        mission's HEASARC tree rule), hashed over its catalog entry
         (``catalog.json``) and the listing of its folder (name, size, mtime), basis ``obsdb``. An
         ObsID-like name (it holds a digit) the catalog does not list but that names a folder there
         is that folder's ``listing``; a mission folder (one holding a catalog) never is. ``None``
         otherwise. Read fresh on every call: a reduction can add products to the folder mid-run.
-        ``entries``: the mission's catalog entries, when the caller already read them.
+        ``entries``: the mission's catalog entries, when the caller already read them; ``mission``:
+        the mission the folder holds (default its name: a resolved symlink names its target);
+        ``index``: the folder's tree index, built once for every name a call holds
+        (``obsid_folder``).
         """
-        from auto_research.observations import CATALOG_FILENAME
+        from auto_research.observations import CATALOG_FILENAME, obsid_folder
 
         if entries is None:
             entries = _catalog_entries(Path(mission_dir) / CATALOG_FILENAME)
-        folder = Path(mission_dir).resolve() / obsid
         entry = entries.get(obsid)
+        if entry is None and not re.search(r"\d", obsid):
+            return None  # no ObsID: nothing to look up
+        folder = obsid_folder(Path(mission_dir).resolve(), obsid, entry, mission=mission, index=index)
         if entry is None:
-            if (not re.search(r"\d", obsid) or not folder.is_dir()
-                    or (folder / CATALOG_FILENAME).exists()):
+            if not folder.is_dir() or (folder / CATALOG_FILENAME).exists():
                 return None
             return InputFile(path=folder, sha256=sha256_bytes(_listing(folder)), basis="listing")
         listing = _listing(folder) if folder.is_dir() else b""

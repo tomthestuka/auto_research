@@ -139,6 +139,13 @@ def build_diff_bundle(worktree: Path) -> str:
 # ----------------------------------------------------------------------------
 
 
+class ReviewSetupError(RuntimeError):
+    """The co-lead review could not be set up — a configuration fault (no co-lead role, no member
+    decorrelated from the author, an injected co-lead sharing the author's provider, a web source
+    that cannot be built). Raised as what it is, never as an unreadable changeset (C3c), so it
+    ends the run like any configuration fault."""
+
+
 def make_review_hook(
     colead: Any | None = None,
     *,
@@ -178,24 +185,27 @@ def make_review_hook(
         from auto_research.sources import WebSource
 
         agent = colead
-        if agent is None:
-            from auto_research.models import resolve
+        try:
+            if agent is None:
+                from auto_research.models import resolve
 
-            group = resolve("analyst_colead")
-            handle = (
-                group.handles[0] if allow_correlated
-                else select_decorrelated_member(group, author_provider)
-            )
-            agent = AnalystColeadAgent(model=handle, monitor=monitor)
-        else:
-            prov = getattr(getattr(agent, "model", None), "config", None)
-            prov = getattr(prov, "provider", None)
-            if prov is not None and prov == author_provider and not allow_correlated:
-                raise ValueError(
-                    "injected co-lead shares the author's provider "
-                    f"{author_provider!r}; the review must be provider-decorrelated (§9.3). "
-                    "A measurement that deliberately correlates them passes allow_correlated=True."
+                group = resolve("analyst_colead")
+                handle = (
+                    group.handles[0] if allow_correlated
+                    else select_decorrelated_member(group, author_provider)
                 )
+                agent = AnalystColeadAgent(model=handle, monitor=monitor)
+            else:
+                prov = getattr(getattr(agent, "model", None), "config", None)
+                prov = getattr(prov, "provider", None)
+                if prov is not None and prov == author_provider and not allow_correlated:
+                    raise ValueError(
+                        "injected co-lead shares the author's provider "
+                        f"{author_provider!r}; the review must be provider-decorrelated (§9.3). "
+                        "A measurement that deliberately correlates them passes allow_correlated=True."
+                    )
+        except Exception as exc:
+            raise ReviewSetupError(f"choosing the co-lead failed: {type(exc).__name__}: {exc}") from exc
 
         if allow_correlated:
             reviewer = getattr(getattr(agent, "model", None), "config", None)
@@ -214,11 +224,14 @@ def make_review_hook(
                           "reviewer_model": getattr(reviewer, "model", None)},
                 )
 
-        tools = ReadOnlyToolProvider(
-            roots=[Path(worktree)],
-            web_source=web_source or WebSource(),
-            include_text_search=False,  # the papers KB is irrelevant to code review
-        )
+        try:
+            tools = ReadOnlyToolProvider(
+                roots=[Path(worktree)],
+                web_source=web_source or WebSource(),
+                include_text_search=False,  # the papers KB is irrelevant to code review
+            )
+        except Exception as exc:
+            raise ReviewSetupError(f"building the co-lead's tools failed: {type(exc).__name__}: {exc}") from exc
         diff = build_diff_bundle(Path(worktree))
         return await agent.review_tool(
             tool_spec, diff=diff, gate=gate, tools=tools,

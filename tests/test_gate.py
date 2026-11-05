@@ -98,8 +98,22 @@ def test_vocabulary_whole_word_avoids_collisions():
 
 def test_synth_obsid_line_is_allowlisted():
     src = 'def test_g():\n    load("synth240611-abcdef")  # synthetic fixture\n    assert True\n'
-    hard, _ = scan_python_source("tests/test_x.py", src)
+    hard, _ = scan_python_source("demo_utils/tests/test_x.py", src)
     assert hard == [], [c.detail for c in hard]
+
+
+@pytest.mark.parametrize("rel", ["demo_utils/lib/x.py", "demo_utils/skills/x.py", "demo_utils/lib/tests/x.py",
+                                 "tests/x.py"])
+def test_a_synthetic_obsid_in_tool_code_is_scanned_like_any_line(rel):
+    """User ruling 2026-11-04: the ObsID exemption holds under a package's `tests/` only, where a
+    test builds its marked synthetic fixture; in a tool's own code the line is scanned."""
+    src = 'def g():\n    return load("synth240611-abcdef")  # mock data for the fit\n'
+    hard, _ = scan_python_source(rel, src)
+    assert any("mock data" in c.detail for c in hard), [c.detail for c in hard]
+    tested, _ = scan_python_source("demo_utils/tests/test_x.py", src)
+    assert tested == [], [c.detail for c in tested]
+    text_hard, _ = scan_text_source(rel.replace(".py", ".sh"), 'run synth240611-abcdef  # mock data\n')
+    assert any("mock data" in c.detail for c in text_hard)
 
 
 def test_incompleteness_markers_are_findings_not_hard_fails():
@@ -321,7 +335,7 @@ def test_text_scan_banned_vocabulary_hard_fails():
 
 def test_text_scan_synth_obsid_line_allowlisted():
     src = "#!/bin/bash\n# load synth240611-abcdef (synthetic fixture)\ncp data $OUT\n"
-    hard, _ = scan_text_source("lib/reduce.sh", src)
+    hard, _ = scan_text_source("demo_utils/tests/reduce.sh", src)
     assert hard == []
 
 
@@ -1740,3 +1754,40 @@ def test_each_environment_group_watches_only_its_own_tools(tmp_path, monkeypatch
     assert not [f for f in report.findings if f.name == "finding.returns_unobserved"]
     watched = [c for c in report.layer_b if c.name.startswith("layer_b.returns")]
     assert len(watched) == 2 and all(c.passed for c in watched), watched
+
+
+def test_the_gates_readonly_roots_reach_its_test_run_only(tmp_path, monkeypatch):
+    """H1(3): `gate_readonly_roots` are bound read-only into Layer B's jail; the workers' analysis
+    policy never lists them."""
+    from auto_research.sandbox import gate as gate_module, jail
+
+    old_tree = tmp_path / "old_obsdb"
+    old_tree.mkdir()
+    seen = []
+    monkeypatch.setattr(gate_module, "_orchestration_config", lambda: {"gate_readonly_roots": [str(old_tree),
+                                                                                              str(tmp_path / "absent")]})
+    monkeypatch.setattr(jail, "wrap", lambda argv, policy: seen.append(policy) or argv)
+    gate_module._jailed_pytest(["python"], junit_path=str(tmp_path / "j" / "junit.xml"), worktree=tmp_path)
+    assert str(old_tree) in seen[0].ro and str(old_tree) not in seen[0].rw
+    assert str(tmp_path / "absent") not in seen[0].ro
+    # The workers' side reads the same orchestration.yaml, naming the root: none of it is bound or allowed.
+    import shutil
+    import yaml
+
+    from auto_research.config_paths import config_dir
+    from auto_research.sandbox import fs_guard
+
+    cfg_dir = tmp_path / "config"
+    shutil.copytree(config_dir(), cfg_dir)
+    orch = yaml.safe_load((cfg_dir / "orchestration.yaml").read_text())
+    orch.update(gate_readonly_roots=[str(old_tree)], agent_os_jail=True)
+    (cfg_dir / "orchestration.yaml").write_text(yaml.safe_dump(orch))
+    monkeypatch.setenv("AUTO_RESEARCH_CONFIG_DIR", str(cfg_dir))
+    from auto_research.graph.runtime import load_orchestration_config
+
+    assert load_orchestration_config().get("gate_readonly_roots") == [str(old_tree)]  # the config is read
+    worker = jail.analysis_policy(label="w", toolkit_root=tmp_path / "tk", writable=(str(tmp_path / "w"),),
+                                  tmp=tmp_path / "t", home=tmp_path / "h")
+    base = jail.policy_from_config()
+    assert str(old_tree) not in (*worker.ro, *worker.rw, *base.ro, *base.rw)
+    assert old_tree.resolve() not in fs_guard.load_fs_allowlist()

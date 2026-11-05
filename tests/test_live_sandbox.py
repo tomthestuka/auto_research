@@ -1,6 +1,6 @@
 """Opt-in live sandbox tests.
 
-Activate with: AUTO_RESEARCH_LIVE_SANDBOX_TESTS=1
+Activate with: pytest tests/test_live_sandbox.py --live
 
 Test 1 — xspec_utils on local Cyg X-1 observations:
   Analyst agents self-direct to use xspec_utils from research_toolkit,
@@ -19,14 +19,12 @@ Logs: logs/dev/step-11/
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-LIVE = os.getenv("AUTO_RESEARCH_LIVE_SANDBOX_TESTS") == "1"
-skip_live = pytest.mark.skipif(not LIVE, reason="Set AUTO_RESEARCH_LIVE_SANDBOX_TESTS=1 to run")
+pytestmark = pytest.mark.live
 
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "step-11"
 
@@ -53,7 +51,6 @@ def _monitor_paths(name: str) -> tuple[Path, Path]:
     return jsonl, jsonl.with_suffix(".md")
 
 
-@skip_live
 def test_xspec_local() -> None:
     """Analyst agents fit the Cyg X-1 X-ray continuum for one self-selected epoch.
 
@@ -90,7 +87,6 @@ def test_xspec_local() -> None:
     assert verdict is not None, "Expected a ReviewVerdict"
 
 
-@skip_live
 def test_heasarc_selfcorrect() -> None:
     """Analyst agents retrieve NICER Cyg X-1 observations from HEASARC since 2024-01-01.
 

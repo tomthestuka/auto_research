@@ -59,7 +59,7 @@ and `usage.py` (cumulative spend rollup CLI).
   `--runs`); sums each event's stored `total_cost_usd` (so it is correct regardless of whether
   litellm is installed at rollup time).
 - Live LangSmith verification is opt-in:
-  `AUTO_RESEARCH_LIVE_LANGSMITH_TESTS=1 pytest tests/test_live_langsmith.py -s`.
+  `pytest tests/test_live_langsmith.py --live -s`.
   It sends a short poem prompt to each unique configured model call, creates
   LangSmith traces, installs a meter over a throwaway monitor, prints the `cost.call` rows it
   produced, and writes timestamped response/cost logs under `logs/dev/step-3/`.
@@ -109,3 +109,4 @@ Compacted 2026-08-05, again 2026-09-24 and 2026-10-19 (every entry); detail in g
   `load_cost_records`, `CostMeter.seed_from_ledger`; `_rates_from_litellm` ignores zero rates.
 - 2026-09-09 -> 2026-10-06 — N6 `traced_model_call` keeps `billed_usage`; F22 `usage.default_sources`.
 - 2026-10-18 — [B5] `costs.context_window_for(config)`.
+- 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire.

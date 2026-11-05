@@ -7,14 +7,13 @@ back on ``ModelResponse.context_edits``.
 then an invalid API key through 2026-07-27). ``context_mgmt_enabled`` was flipped true on the
 strength of this run; re-run it whenever the beta identifiers move::
 
-    AUTO_RESEARCH_LIVE_MODEL_TESTS=1 pytest tests/test_live_context_editing.py -s
+    pytest tests/test_live_context_editing.py --live -s
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
@@ -32,10 +31,7 @@ from auto_research.models.types import (
 )
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_MODEL_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_MODEL_TESTS=1 to spend provider tokens",
-)
+pytestmark = pytest.mark.live
 
 _LOW_TRIGGER = ContextEditingConfig(
     enabled=True,
@@ -57,7 +53,6 @@ def _cfg() -> RoleModelConfig:
         name="worker",
         provider="anthropic",
         model="claude-sonnet-5",
-        vision=False,
         parameters={"thinking": {"type": "adaptive"}, "max_tokens": 4096},
     )
 
@@ -124,7 +119,7 @@ def test_live_context_editing_clears_and_reports(monkeypatch):
 
 # ── B5 (2026-10-18): the retuned edit — inputs cleared, report/channel/tool-search uses kept ──
 #
-#     AUTO_RESEARCH_LIVE_MODEL_TESTS=1 pytest tests/test_live_context_editing.py -k retuned -s
+#     pytest tests/test_live_context_editing.py --live -k retuned -s
 #
 # What it measures, on the configured worker model (claude-sonnet-5, ~4 calls, est. < $0.30):
 #   1. the model discovers a deferred tool through tool search and calls it (a real discovery

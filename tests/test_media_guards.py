@@ -48,7 +48,7 @@ _ANTHROPIC_LIKE = MediaLimits(
     strict_block_threshold=20,
     strict_max_edge=2000,
     max_edge=8000,
-    max_image_bytes=10 * 1024 * 1024,
+    max_image_encoded_bytes=10 * 1024 * 1024,
     max_request_bytes=32 * 1024 * 1024,
     max_pdf_pages=100,
 )
@@ -232,6 +232,18 @@ def test_unsupported_image_mime_never_reaches_the_image_channel(tmp_path):
     assert "not an image type" in (resolved.note or "")
 
 
+def test_a_withheld_figure_with_a_receipt_is_named_by_its_handle(tmp_path):
+    """A3 prelude: a figure the plan withholds (here for its type) is named by its receipt handle,
+    so a peer can open it with `view_receipt`; a figure with none keeps its file name."""
+    pdf = tmp_path / "not-an-image.pdf"
+    pdf.write_bytes(b"%PDF-1.5\n" + b"0" * 1024)
+    figure = _figure(pdf, mime="application/pdf").model_copy(
+        update={"receipt": "analyst_worker_0:f2"})
+
+    note = plan_media(iter_media([_turn_with([figure])]), _ANTHROPIC_LIKE).resolve(figure).note
+    assert (note or "").startswith("[withheld] analyst_worker_0:f2 (not-an-image.pdf): ")
+
+
 def test_pdf_over_the_page_limit_is_withheld_with_its_page_count(tmp_path):
     """Anthropic caps PDFs at 100 pages for our sub-1M-context models."""
     pypdf = pytest.importorskip("pypdf")
@@ -303,7 +315,7 @@ def test_anthropic_adapter_resizes_a_many_image_request(tmp_path, monkeypatch):
     monkeypatch.setattr(anthropic, "AsyncAnthropic", _CaptureAnthropic)
     figures = [_figure(_png(tmp_path / f"a{i}.png", (2677, 1554))) for i in range(21)]
     convo = [ModelMessage(role="user", content="review these"), _turn_with(figures)]
-    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake", vision=True)
+    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake")
 
     asyncio.run(AnthropicProvider().call(convo, cfg))
 
@@ -453,7 +465,7 @@ def test_a_document_changed_after_its_receipt_is_sent_with_a_note_in_the_request
     document = _document(pdf)
     pdf.write_bytes(pdf_bytes("swapped after the receipt"))
     convo = [ModelMessage(role="user", content="read this")]
-    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake", vision=True)
+    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake")
 
     asyncio.run(AnthropicProvider().call(convo, cfg, documents=[document]))
 
@@ -480,8 +492,7 @@ def test_anthropic_nests_a_document_in_the_tool_result_that_opened_it(tmp_path, 
         ToolResultMessage(results=[ToolResultPart(
             tool_call_id="c1", name="read_paper", content="attached", documents=[document])]),
     ]
-    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake", vision=True,
-                          documents=True)
+    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake")
     asyncio.run(AnthropicProvider().call(convo, cfg))
     messages = _CaptureAnthropic.store["request"]["messages"]
     assert messages[0]["content"] == "read it" or messages[0]["content"][0]["type"] == "text", (
@@ -512,27 +523,6 @@ def test_nested_and_message_documents_count_against_the_request_ceiling(tmp_path
     plan = plan_media(items, _ANTHROPIC_LIKE)
     assert not plan.resolve(second).dropped, "the newest fits the ceiling alone"
     assert plan.resolve(first).dropped, "the nested one counted: together they pass 32 MB"
-
-
-def test_a_member_without_documents_refuses_a_nested_or_carried_document(tmp_path, monkeypatch):
-    from auto_research.models.types import ModelHandle, ToolResultPart
-    from tests.test_models import FakeProvider
-
-    monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
-    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
-    pdf = tmp_path / "p.pdf"
-    pdf.write_bytes(pdf_bytes("p"))
-    document = _document(pdf)
-    handle = ModelHandle(
-        role="analyst_worker",
-        config=RoleModelConfig(name="fake", provider="openai", model="fake", vision=True),
-        provider=FakeProvider(),
-    )
-    nested = ToolResultMessage(results=[ToolResultPart(tool_call_id="c1", name="read",
-                                                       content="ok", documents=[document])])
-    for convo in ([nested], [ModelMessage(role="user", content="x", documents=[document])]):
-        with pytest.raises(ValueError, match="not configured for document"):
-            asyncio.run(handle.call(convo))
 
 
 def test_google_renders_a_nested_document_after_the_function_response(tmp_path):
@@ -602,3 +592,249 @@ def test_a_mislabelled_image_is_sent_as_what_its_bytes_are_and_only_decodable_im
     limits = MediaLimits(image_mimes=_ANTHROPIC_LIKE.image_mimes, max_images=2)
     plan = plan_media(iter_media([_turn_with(figures)]), limits)
     assert [plan.resolve(f).dropped for f in figures] == [False, True, False]
+
+
+def test_zai_takes_the_image_types_and_sizes_its_docs_state(tmp_path):
+    """Z1b: docs.z.ai's Chat Completions image rules ("under 5M per image, with pixels not exceeding
+    6000*6000 ... Supports jpg, png, jpeg formats") are what the Z.AI adapter's media plan enforces."""
+    from PIL import Image
+
+    from auto_research.models.providers.zai import ZAI_VENDOR
+
+    limits = ZAI_VENDOR.limits
+    webp = tmp_path / "plot.webp"
+    Image.new("RGB", (64, 64), (30, 60, 90)).save(webp, format="WEBP")
+    wide = _figure(_png(tmp_path / "wide.png", (7000, 700)))
+    heavy = _figure(_png(tmp_path / "heavy.png", (1400, 1400), noisy=True))  # ~5.9 MB of noise
+    small = _figure(_png(tmp_path / "small.png", (800, 600)))
+    figures = [_figure(webp, mime="image/webp"), wide, heavy, small]
+    plan = plan_media(iter_media([_turn_with(figures)]), limits)
+
+    withheld = plan.resolve(figures[0])
+    assert withheld.dropped and "image/jpeg, image/png" in withheld.note
+    assert max(_dimensions(plan.resolve(wide).data)) == 6000
+    # Over the encoded-size cap at an edge already inside the edge cap: downscaled until it fits
+    # (Z1c), and the note names the limit that applied, not the edge.
+    heavy_sent = plan.resolve(heavy)
+    assert 4 * ((len(heavy_sent.data) + 2) // 3) <= 5_000_000 < 4 * ((heavy.path.stat().st_size + 2) // 3)
+    assert heavy_sent.note.startswith("[downscaled]") and "per-image limit (base64-encoded)" in heavy_sent.note
+    assert "px long-edge" not in heavy_sent.note
+    assert "6000 px long-edge limit" in plan.resolve(wide).note
+    assert plan.resolve(small).data == small.path.read_bytes()
+
+
+def test_the_per_image_cap_is_on_the_base64_size_the_vendor_states(tmp_path):
+    """Z1c: Anthropic's "10 MB (base64-encoded)" is compared on the encoded size. An image whose raw
+    bytes fit under the cap but whose base64 form does not is downscaled; one whose encoded form
+    fits is sent unchanged."""
+    import dataclasses
+
+    over = _figure(_png(tmp_path / "over.png", (1000, 1000), noisy=True))
+    size = over.path.stat().st_size  # ~3 MB raw, ~4 MB encoded
+    encoded = 4 * ((size + 2) // 3)
+    limits = dataclasses.replace(_ANTHROPIC_LIKE, max_image_encoded_bytes=(size + encoded) // 2)
+    plan = plan_media(iter_media([_turn_with([over])]), limits)
+    sent = plan.resolve(over)
+    assert size < limits.max_image_encoded_bytes < encoded
+    assert sent.note.startswith("[downscaled]") and 4 * ((len(sent.data) + 2) // 3) <= limits.max_image_encoded_bytes
+
+    roomy = dataclasses.replace(_ANTHROPIC_LIKE, max_image_encoded_bytes=encoded)
+    assert plan_media(iter_media([_turn_with([over])]), roomy).resolve(over).data == over.path.read_bytes()
+
+
+def test_an_image_that_cannot_fit_the_cap_is_withheld_saying_what_was_tried(tmp_path):
+    """Z1c: below the smallest legible size the image is withheld, and the note says how small it
+    went and which limit it still exceeded."""
+    import dataclasses
+
+    heavy = _figure(_png(tmp_path / "heavy.png", (1200, 1200), noisy=True))
+    tiny_cap = dataclasses.replace(_ANTHROPIC_LIKE, max_image_encoded_bytes=1000)
+    resolved = plan_media(iter_media([_turn_with([heavy])]), tiny_cap).resolve(heavy)
+    assert resolved.dropped
+    assert "at 256x256, the smallest size tried" in resolved.note
+    assert "per-image limit (base64-encoded)" in resolved.note
+
+
+def test_an_image_resized_for_its_edge_that_grows_past_the_cap_names_both_limits(tmp_path):
+    """Review finding (Z1c): a block-patterned PNG compresses well at its own size and badly once
+    resampled, so fitting the edge pushes it over the byte cap; the further shrink is named."""
+    import dataclasses
+    import io
+    import os
+
+    from PIL import Image
+
+    blocks = Image.frombytes("RGB", (200, 200), os.urandom(200 * 200 * 3)).resize((1600, 1600), Image.NEAREST)
+    path = tmp_path / "blocks.png"
+    blocks.save(path, format="PNG")
+    figure = _figure(path)
+    limits = dataclasses.replace(_ANTHROPIC_LIKE, strict_max_edge=0, strict_block_threshold=0,
+                                 max_edge=1100, max_image_encoded_bytes=4 * ((path.stat().st_size + 2) // 3) + 4)
+    at_edge = io.BytesIO()
+    blocks.resize((1100, 1100), Image.LANCZOS).save(at_edge, format="PNG")
+    assert 4 * ((len(at_edge.getvalue()) + 2) // 3) > limits.max_image_encoded_bytes  # it grows
+
+    resolved = plan_media(iter_media([_turn_with([figure])]), limits).resolve(figure)
+    assert resolved.note.startswith("[downscaled]")
+    assert "1100 px long-edge limit and" in resolved.note and "per-image limit (base64-encoded)" in resolved.note
+    assert max(_dimensions(resolved.data)) < 1100
+
+
+def test_a_small_image_over_the_cap_is_withheld_saying_it_is_not_downscaled(tmp_path):
+    import dataclasses
+
+    small = _figure(_png(tmp_path / "small.png", (200, 200), noisy=True))
+    limits = dataclasses.replace(_ANTHROPIC_LIKE, max_image_encoded_bytes=1000)
+    resolved = plan_media(iter_media([_turn_with([small])]), limits).resolve(small)
+    assert resolved.dropped and "at 256 px or less it is sent as it is or not at all" in resolved.note
+    assert "smallest size tried" not in resolved.note
+
+
+def test_dashscope_holds_its_documented_image_count_and_request_body(tmp_path):
+    """Z1f: "When passed as Base64-encoded strings: Up to 250 images" and "DashScope domains limit
+    the request body to 16 MiB" (alibabacloud.com/help/en/model-studio/vision)."""
+    from auto_research.models.providers.dashscope import DASHSCOPE_VENDOR
+
+    limits = DASHSCOPE_VENDOR.limits
+    many = [_figure(_png(tmp_path / f"m{i}.png", (16, 16))) for i in range(251)]
+    plan = plan_media(iter_media([_turn_with(many)]), limits)
+    assert plan.resolve(many[0]).dropped and "maximum of 250 images" in plan.resolve(many[0]).note
+    assert not plan.resolve(many[-1]).dropped
+
+    heavy = [_figure(_png(tmp_path / f"h{i}.png", (1400, 1400), noisy=True)) for i in range(3)]
+    budget = plan_media(iter_media([_turn_with(heavy)]), limits)  # ~7.9 MB encoded each
+    assert budget.resolve(heavy[0]).dropped and "16 MB request ceiling" in budget.resolve(heavy[0]).note
+    assert not budget.resolve(heavy[-1]).dropped
+
+
+def test_anthropic_budgets_media_against_its_current_128_mb_request_ceiling(tmp_path):
+    """Z1f: "Maximum request size | 128 MB on the first-party Claude API" (pdf-support): a 40 MB
+    request the old 32 MB reading evicted is now sent whole."""
+    from auto_research.models.providers.anthropic import _LIMITS
+
+    heavy = [_figure(_png(tmp_path / f"h{i}.png", (1400, 1400), noisy=True)) for i in range(5)]
+    plan = plan_media(iter_media([_turn_with(heavy)]), _LIMITS)
+    assert not any(plan.resolve(figure).dropped for figure in heavy)
+
+
+def _image(path, size, fmt):
+    from PIL import Image
+
+    Image.new("RGB", size, (30, 60, 90)).save(path, format=fmt)
+    return path
+
+
+def test_dashscope_refuses_what_its_vision_page_refuses(tmp_path):
+    """Z1g: "both be greater than 10 pixels", "must not exceed 200:1", and "between 4K (3840x2160)
+    and 8K (7680x4320), only the JPEG, JPG, and PNG formats are supported"."""
+    from auto_research.models.providers.dashscope import DASHSCOPE_VENDOR
+
+    tiny = _figure(_image(tmp_path / "tiny.png", (10, 40), "PNG"))
+    sliver = _figure(_image(tmp_path / "sliver.png", (4020, 20), "PNG"))
+    big_webp = _figure(_image(tmp_path / "big.webp", (4000, 1000), "WEBP"), mime="image/webp")
+    small_webp = _figure(_image(tmp_path / "small.webp", (800, 600), "WEBP"), mime="image/webp")
+    figures = [tiny, sliver, big_webp, small_webp]
+    plan = plan_media(iter_media([_turn_with(figures)]), DASHSCOPE_VENDOR.limits)
+
+    assert plan.resolve(tiny).dropped and "under this provider's 11 px minimum" in plan.resolve(tiny).note
+    assert plan.resolve(sliver).dropped and "200:1 side ratio" in plan.resolve(sliver).note
+    sent = plan.resolve(big_webp)
+    assert sent.mime == "image/png" and sent.data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert sent.note.startswith("[re-encoded]") and "sent as PNG" in sent.note
+    assert plan.resolve(small_webp).data == small_webp.path.read_bytes()  # below 4K: as it is
+
+
+def test_anthropic_counts_pdf_pages_across_the_whole_request(tmp_path):
+    """Z1g: "Maximum pages per request | 600 (100 when the request's context window is under 1M
+    tokens)": two 60-page PDFs exceed 100 together though each fits alone; the older goes."""
+    from auto_research.models.providers.anthropic import _LIMITS
+
+    def pages_pdf(path, pages):
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        for _ in range(pages):
+            writer.add_blank_page(width=200, height=200)
+        with path.open("wb") as handle:
+            writer.write(handle)
+        return path
+
+    older = _document(pages_pdf(tmp_path / "older.pdf", 60))
+    newer = _document(pages_pdf(tmp_path / "newer.pdf", 60))
+    plan = plan_media(iter_media([], documents=[older, newer]), _LIMITS)
+    assert plan.resolve(older).dropped and "100-page limit for a request" in plan.resolve(older).note
+    assert not plan.resolve(newer).dropped
+    alone = plan_media(iter_media([], documents=[older]), _LIMITS)
+    assert not alone.resolve(older).dropped
+
+
+def test_an_image_withheld_for_its_shape_pushes_no_sendable_one_out(tmp_path):
+    """Z1g review: like a wrong type, a too-small image does not count toward the image limit."""
+    import dataclasses
+
+    good = _figure(_image(tmp_path / "good.png", (100, 100), "PNG"))
+    tiny = _figure(_image(tmp_path / "tiny.png", (5, 5), "PNG"))
+    limits = dataclasses.replace(_ANTHROPIC_LIKE, max_images=1, min_side=11)
+    plan = plan_media(iter_media([_turn_with([good, tiny])]), limits)
+    assert not plan.resolve(good).dropped
+    assert plan.resolve(tiny).dropped and "11 px minimum" in plan.resolve(tiny).note
+
+
+def test_a_pdf_withheld_for_pages_keeps_its_reason_when_the_byte_budget_also_runs(tmp_path):
+    """Z1g review: the byte budget passes over what the page budget already withheld."""
+    import dataclasses
+
+    from pypdf import PdfWriter
+
+    def pdf(path, pages, pad):
+        writer = PdfWriter()
+        for _ in range(pages):
+            writer.add_blank_page(width=200, height=200)
+        writer.add_metadata({"/Pad": "x" * pad})
+        with path.open("wb") as handle:
+            writer.write(handle)
+        return _document(path)
+
+    d1, d2, d3 = (pdf(tmp_path / f"d{i}.pdf", pages, 300_000) for i, pages in ((1, 60), (2, 60), (3, 10)))
+    encoded = [d.path.stat().st_size * 4 // 3 for d in (d2, d3)]  # as the request budget counts
+    limits = dataclasses.replace(_ANTHROPIC_LIKE, max_pdf_pages=100, max_request_bytes=sum(encoded) - 1)
+    plan = plan_media(iter_media([], documents=[d1, d2, d3]), limits)
+    assert "100-page limit for a request" in plan.resolve(d1).note  # its own reason, kept
+    assert plan.resolve(d2).dropped and "request ceiling" in plan.resolve(d2).note
+    assert not plan.resolve(d3).dropped
+
+
+def test_a_downscaled_image_still_holds_the_side_ratio(tmp_path):
+    """Z1g review: "for both original and scaled images must not exceed 200:1" — a byte-cap
+    downscale that rounds the short side down is held to the ratio too."""
+    import dataclasses
+    import os
+
+    from PIL import Image
+
+    path = tmp_path / "strip.png"
+    Image.frombytes("RGB", (4000, 20), os.urandom(4000 * 20 * 3)).save(path, format="PNG")
+    strip = _figure(path)
+    limits = dataclasses.replace(_ANTHROPIC_LIKE, max_aspect=200, max_image_encoded_bytes=100_000,
+                                 strict_max_edge=0, strict_block_threshold=0)
+    resolved = plan_media(iter_media([_turn_with([strip])]), limits).resolve(strip)
+    if resolved.dropped:
+        assert "200:1 side ratio" in resolved.note
+    else:
+        width, height = _dimensions(resolved.data)
+        assert max(width, height) / min(width, height) <= 200
+
+
+def test_deepseek_holds_the_image_limits_its_vision_page_states(tmp_path):
+    """Z1h: "8192 px per side; drops to 4096 px per side when a request contains 15 or more images"
+    (the stricter edge from the first send) and "Max images per request | 600"."""
+    from auto_research.models.providers.deepseek import DEEPSEEK_VENDOR
+
+    wide = _figure(_png(tmp_path / "wide.png", (5000, 500)))
+    plan = plan_media(iter_media([_turn_with([wide])]), DEEPSEEK_VENDOR.limits)
+    sent = plan.resolve(wide)
+    assert max(_dimensions(sent.data)) == 4096 and sent.note.startswith("[downscaled]")
+
+    many = [_figure(_png(tmp_path / f"m{i}.png", (16, 16))) for i in range(601)]
+    crowded = plan_media(iter_media([_turn_with(many)]), DEEPSEEK_VENDOR.limits)
+    assert crowded.resolve(many[0]).dropped and "maximum of 600 images" in crowded.resolve(many[0]).note

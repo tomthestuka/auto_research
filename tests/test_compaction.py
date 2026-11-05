@@ -406,7 +406,7 @@ class _Plotter:
 
     def __init__(self, calls):
         self.config = RoleModelConfig(name="m", provider="anthropic", model="m",
-                                      context_tokens=200_000, vision=True)
+                                      context_tokens=200_000)
         self.sent: list[list] = []
         self.script = [ModelResponse(tool_calls=[ToolCall(id=f"p{i}", name="plot")],
                                      usage=ModelUsage(input_tokens=5_000)) for i in range(calls)]
@@ -510,7 +510,7 @@ class _Script:
 
     def __init__(self, batches):
         self.config = RoleModelConfig(name="m", provider="anthropic", model="m",
-                                      context_tokens=200_000, vision=True, documents=True)
+                                      context_tokens=200_000)
         self.sent: list[list] = []
         self.script = [ModelResponse(tool_calls=[ToolCall(id=f"c{i}_{k}", name=n)
                                                  for k, n in enumerate(batch)],
@@ -580,11 +580,18 @@ def test_media_the_cut_cannot_remove_never_refires_the_boundary(tmp_path, monkey
 
 
 def test_the_bytes_trigger_fires_without_waiting_out_the_back_off(tmp_path, monkeypatch):
-    """Two 9 MB documents (24 MB as base64) pass 70% of Anthropic's 32 MB request ceiling one
-    call after a cut: the boundary runs at once rather than four calls later."""
+    """Two 9 MB documents (24 MB as base64) pass 70% of a 32 MiB request ceiling one call after a
+    cut: the boundary runs at once rather than four calls later. The ceiling is pinned at 32 MiB so
+    the documents stay small (Anthropic's own is 128 MB since Z1f)."""
+    import dataclasses
     from datetime import UTC, datetime
 
+    from auto_research.models.providers import anthropic
     from auto_research.schemas import DocumentRef
+
+    ceiling = 32 * 1024 * 1024
+    monkeypatch.setattr(anthropic, "_LIMITS",
+                        dataclasses.replace(anthropic._LIMITS, max_request_bytes=ceiling))
 
     class _Big(_Plots):
         def tool_definitions(self):
@@ -610,7 +617,7 @@ def test_the_bytes_trigger_fires_without_waiting_out_the_back_off(tmp_path, monk
     assert triggers == ["media", "media"], "the second cut came one call after the first"
     from auto_research.models.providers._media import media_load
 
-    assert all(media_load(sent)[1] < 0.7 * 32 * 1024 * 1024 for sent in model.sent), (
+    assert all(media_load(sent)[1] < 0.7 * ceiling for sent in model.sent), (
         "no request went past the line")
 
 
@@ -666,3 +673,60 @@ def test_the_pin_names_only_this_seats_receipts_never_a_handle_quoted_in_a_text(
     fit = next(r["data"]["history"]["result_receipt"] for r in rows
                if r["data"].get("tool") == "tk_fit" and "history" in r["data"])
     assert fit in pin
+
+
+def test_a_member_sent_the_parse_has_no_media_cut_for_document_bytes(tmp_path):
+    """Z1f review: a Qwen seat is sent a paper as its local parse, so the paper's bytes never reach
+    the provider and cannot trigger a media boundary; images still do."""
+    from datetime import UTC, datetime
+
+    import hashlib
+
+    from auto_research.agents.roles import _media_trigger
+    from auto_research.models.types import ModelMessage, RoleModelConfig, ToolResultMessage, ToolResultPart
+    from auto_research.schemas import DocumentRef, FigureRef
+
+    qwen = RoleModelConfig(name="q", provider="dashscope", model="fake-model")
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n" + b"p" * (12 * 1024 * 1024))  # ~16 MB encoded, over 70% of 16 MiB
+    document = DocumentRef(path=pdf, title="paper", mime_type="application/pdf",
+                           created_at=datetime.now(UTC), sha256=hashlib.sha256(pdf.read_bytes()).hexdigest())
+    papers = [ToolResultMessage(results=[ToolResultPart(tool_call_id="c", name="open", content="ok",
+                                                        documents=[document])])]
+    assert _media_trigger(qwen, papers, [ModelMessage(role="user", content="task")]) is None
+
+    png = tmp_path / "noise.png"
+    from PIL import Image
+    import os
+
+    Image.frombytes("RGB", (1400, 1400), os.urandom(1400 * 1400 * 3)).save(png, format="PNG")
+    figure = FigureRef(path=png, caption="c", mime_type="image/png", produced_by="t",
+                       created_at=datetime.now(UTC), sha256=hashlib.sha256(png.read_bytes()).hexdigest())
+    plots = [ToolResultMessage(results=[ToolResultPart(tool_call_id=f"c{i}", name="plot", content="ok",
+                                                       figures=[figure])]) for i in range(2)]
+    assert _media_trigger(qwen, plots, [ModelMessage(role="user", content="task")]) == "media"
+
+
+def test_a_member_that_takes_no_images_has_no_media_cut_for_them(tmp_path):
+    """Z1h review: a text-only member is sent no images (the sanitiser withholds them), so they
+    cannot trigger its media boundary."""
+    import hashlib
+    from datetime import UTC, datetime
+
+    from auto_research.agents.roles import _media_trigger
+    from auto_research.models.types import ModelMessage, RoleModelConfig, ToolResultMessage, ToolResultPart
+    from auto_research.schemas import FigureRef
+
+    png = tmp_path / "f.png"
+    from PIL import Image
+
+    Image.new("RGB", (64, 64), (1, 2, 3)).save(png, format="PNG")
+    figure = FigureRef(path=png, caption="c", mime_type="image/png", produced_by="t",
+                       created_at=datetime.now(UTC), sha256=hashlib.sha256(png.read_bytes()).hexdigest())
+    plots = [ToolResultMessage(results=[ToolResultPart(tool_call_id=f"c{i}", name="plot", content="ok",
+                                                       figures=[figure])]) for i in range(500)]
+    task = [ModelMessage(role="user", content="task")]
+    text_only = RoleModelConfig(name="p", provider="deepseek", model="deepseek-v4-pro")
+    vision = RoleModelConfig(name="f", provider="deepseek", model="deepseek-flash")
+    assert _media_trigger(text_only, plots, task) is None
+    assert _media_trigger(vision, plots, task) == "media"  # 500 of 600 images, past 80%

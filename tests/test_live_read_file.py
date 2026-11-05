@@ -1,8 +1,8 @@
-"""Env-gated LIVE test: the real analyst lead can read a long toolkit source file end-to-end
+"""Opt-in LIVE test: the real analyst lead can read a long toolkit source file end-to-end
 through the read-by-line ``read_file`` tool (F8), paging until it reaches the last line.
 
 Activate with:
-    AUTO_RESEARCH_LIVE_READ_FILE_TESTS=1 pytest tests/test_live_read_file.py -q
+    pytest tests/test_live_read_file.py --live -q
 
 What it proves: we build the actual ``analyst_lead`` model + its ``ReadOnlyToolProvider`` over
 ``toolkit_root`` and ask it to read the whole of ``xspec_utils/lib/xspec_help.py`` (≈1.5k lines,
@@ -14,7 +14,6 @@ and stopping. Writes a JSONL + Markdown summary under ``logs/dev/read_file/``.
 
 import asyncio
 import json
-import os
 import re
 import time
 from pathlib import Path
@@ -27,10 +26,7 @@ from auto_research.agents.roles import AnalystLeadAgent
 from auto_research.graph.runtime import load_orchestration_config
 from auto_research.models import ModelMessage, load_registry
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_READ_FILE_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_READ_FILE_TESTS=1 to run the live read_file test (spends tokens)",
-)
+pytestmark = pytest.mark.live
 
 _LINE_NO = re.compile(r"^\s*(\d+)\t")
 _FOOTER_TOTAL = re.compile(r"of (\d+)[;\]]")

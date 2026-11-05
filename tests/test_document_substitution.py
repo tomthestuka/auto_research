@@ -1,4 +1,4 @@
-"""A vendor with no usable file channel receives a document as text plus figure crops.
+"""A vendor with no usable file channel receives a document as text plus figure crops (A2).
 
 Anthropic and OpenAI both ingest a PDF as text *and* a rendered image per page, per their own
 docs. Alibaba publishes no route we can use — `input_file` takes a public `file_url` only, and PDF
@@ -10,27 +10,29 @@ seat. These tests pin the properties that make the substitution honest rather th
 * the substituted figures pass through the **media plan**, so they are counted, budgeted and
   evicted like any other image rather than bypassing the guard that exists because run `8c75990e`
   died on an unbudgeted image request;
-* the substituted text is added to the request's non-media **reserve**, since it is request weight
-  the plan cannot see;
-* a parse failure says the document is UNREAD, never lets it look empty.
+* the substituted text counts in the request's non-media **reserve**, since it is request weight;
+* a parse failure names the document unread, so it reads as unread rather than empty.
 
-Docling itself is not exercised here — the parse is stubbed, so these run without the dependency
-and without a 40-second conversion. The live end-to-end parse has its own gated test.
+The substitution is the model-input sanitiser's (`models.sanitise`, inside `ModelHandle.call`), so
+every case drives `ModelHandle.call` over the real adapter with the vendor's client faked. Docling
+itself is not exercised here — the parse is stubbed, so these run without the dependency and
+without a 40-second conversion. The live end-to-end parse has its own gated test.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from auto_research.models.providers import _responses
+from auto_research.models.providers import _doc_parse, _responses
 from auto_research.models.providers._doc_parse import ParsedDocument
-from auto_research.models.types import ModelMessage, RoleModelConfig
+from auto_research.models.types import ModelHandle, ModelMessage, RoleModelConfig
 from auto_research.schemas import DocumentRef, FigureRef
 from tests.media_files import pdf_bytes
 
@@ -89,19 +91,20 @@ class _CaptureResponses:
         )
 
 
-def _parts(provider_cls, provider_name, document, monkeypatch) -> list[dict]:
-    """Drive one document through a real adapter and return the content parts it emitted."""
+def _call(provider_cls, provider_name, messages, monkeypatch, **kwargs) -> None:
+    """One `ModelHandle.call` over the real adapter, the vendor's client faked."""
     import openai
 
     monkeypatch.setattr(openai, "AsyncOpenAI", _CaptureResponses)
-    cfg = RoleModelConfig(
-        name="m", provider=provider_name, model="fake", vision=True, documents=True
-    )
-    asyncio.run(
-        provider_cls().call(
-            [ModelMessage(role="user", content="review this")], cfg, documents=[document]
-        )
-    )
+    cfg = RoleModelConfig(name="m", provider=provider_name, model="fake")
+    handle = ModelHandle(role="reviewer", config=cfg, provider=provider_cls())
+    asyncio.run(handle.call(messages, **kwargs))
+
+
+def _parts(provider_cls, provider_name, document, monkeypatch) -> list[dict]:
+    """Drive one document through `ModelHandle.call` and return the content parts emitted."""
+    _call(provider_cls, provider_name, [ModelMessage(role="user", content="review this")],
+          monkeypatch, documents=[document])
     return [
         part
         for item in _CaptureResponses.store["request"]["input"]
@@ -111,7 +114,7 @@ def _parts(provider_cls, provider_name, document, monkeypatch) -> list[dict]:
 
 
 def _stub_parse(monkeypatch, parsed: ParsedDocument | None):
-    monkeypatch.setattr(_responses, "parse_document", lambda document: parsed)
+    monkeypatch.setattr(_doc_parse, "parse_document", lambda document: parsed)
 
 
 # ── the fork ──────────────────────────────────────────────────────────────────────
@@ -143,17 +146,17 @@ def test_alibaba_gets_text_and_figures_where_openai_gets_the_pdf(tmp_path, monke
     assert not [p for p in served if "extracted document" in (p.get("text") or "")]
 
 
-def test_only_alibaba_declines_inline_documents():
-    """The declaration is the whole blast radius. Every other vendor keeps today's behaviour,
-    because a behaviour change on a vendor whose reference we have not read is a guess."""
+def test_the_vendors_without_a_documented_file_channel_decline_inline_documents():
+    """Each declaration cites its vendor's reference: Alibaba takes `file_url` only, DeepSeek
+    states file input is unsupported, Z.AI documents no route over this dialect (A1/A2)."""
     from auto_research.models.providers.dashscope import DASHSCOPE_VENDOR
     from auto_research.models.providers.deepseek import DEEPSEEK_VENDOR
     from auto_research.models.providers.openai import OPENAI_VENDOR
     from auto_research.models.providers.zai import ZAI_VENDOR
 
-    assert DASHSCOPE_VENDOR.accepts_inline_documents is False
-    for vendor in (OPENAI_VENDOR, DEEPSEEK_VENDOR, ZAI_VENDOR):
-        assert vendor.accepts_inline_documents is True, vendor.name
+    for vendor in (DASHSCOPE_VENDOR, DEEPSEEK_VENDOR, ZAI_VENDOR):
+        assert vendor.accepts_inline_documents is False, vendor.name
+    assert OPENAI_VENDOR.accepts_inline_documents is True
 
 
 # ── the substitution stays inside the guards ──────────────────────────────────────
@@ -162,8 +165,8 @@ def test_only_alibaba_declines_inline_documents():
 def test_substituted_figures_pass_through_the_media_plan(tmp_path, monkeypatch):
     """A crop that the plan refuses is withheld with a note instead of being sent.
 
-    This is the property worth pinning: the figures are added *before* planning, so an image
-    that bypasses the plan cannot exist. A figure carrying a mime this vendor does not accept is
+    This is the property worth pinning: the sanitiser adds the crops to the request *before* the
+    adapter plans it, so an image that bypasses the plan cannot exist. A figure carrying a mime this vendor does not accept is
     the cheapest way to prove the plan actually ran on them.
     """
     from auto_research.models.providers.dashscope import DashscopeProvider
@@ -215,7 +218,7 @@ def test_a_failed_parse_reports_the_document_unread_not_empty(tmp_path, monkeypa
     text = "\n".join(p.get("text") or "" for p in parts)
 
     assert "unavailable" in text
-    assert "UNREAD" in text
+    assert "treat it as unread" in text
     assert not [p for p in parts if p.get("type") in {"input_file", "input_image"}]
 
 
@@ -229,7 +232,7 @@ def test_a_document_with_no_recoverable_figures_says_so(tmp_path, monkeypatch):
     parts = _parts(DashscopeProvider, "dashscope", document, monkeypatch)
     text = "\n".join(p.get("text") or "" for p in parts)
 
-    assert "No figures could be recovered" in text
+    assert "It yielded no figure crops" in text
 
 
 # ── R2: a document nested in the tool result that opened it ───────────────────────
@@ -249,12 +252,7 @@ def _opened(document: DocumentRef) -> list:
 
 
 def _request(provider_cls, provider_name, messages, monkeypatch) -> list:
-    import openai
-
-    monkeypatch.setattr(openai, "AsyncOpenAI", _CaptureResponses)
-    cfg = RoleModelConfig(name="m", provider=provider_name, model="fake", vision=True,
-                          documents=True)
-    asyncio.run(provider_cls().call(messages, cfg))
+    _call(provider_cls, provider_name, messages, monkeypatch)
     return _CaptureResponses.store["request"]["input"]
 
 
@@ -271,8 +269,8 @@ def test_a_nested_document_follows_its_result_on_openai(tmp_path, monkeypatch):
 
 
 def test_alibaba_reads_a_nested_document_through_the_substitution(tmp_path, monkeypatch):
-    """The residual: Alibaba's substitution runs on call-time documents, so a nested one moves
-    there and is read as extracted text, never sent as a file it cannot take."""
+    """A nested document is read as extracted text at the result that opened it (A2: the R2
+    residual of re-sending it at the end of every call is gone), never sent as a file."""
     from auto_research.models.providers.dashscope import DashscopeProvider
 
     document = _document(tmp_path / "paper.pdf")
@@ -281,4 +279,5 @@ def test_alibaba_reads_a_nested_document_through_the_substitution(tmp_path, monk
     parts = [p for i in items if isinstance(i, dict) for p in (i.get("content") or [])
              if isinstance(p, dict)]
     assert not [p for p in parts if p.get("type") == "input_file"]
-    assert any("PD = 4.01 %" in (p.get("text") or "") for p in parts)
+    (output,) = [i for i in items if isinstance(i, dict) and i.get("type") == "function_call_output"]
+    assert "PD = 4.01 %" in json.dumps(output), "the parse sits at the result that opened it"

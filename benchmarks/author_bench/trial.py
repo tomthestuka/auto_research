@@ -77,10 +77,8 @@ def build_pinned_lead(leg: Leg, monitor: Any | None) -> Any:
         name=f"sweep_lead_{leg.slug}",
         provider=leg.lead_provider,
         model=leg.lead_model,
-        # Declared by the roster, not assumed here. The lead IS sent figures, so a vision-less
-        # lead is a configuration error the roster tests catch rather than a mid-trial failure.
-        vision=leg.lead_vision,
-        documents=True,
+        # What it may be sent is its model's capability-table entry (Z1d). The lead IS sent figures, so a
+        # lead without image input is a roster error, which the grid-lead test records.
         parameters=dict(_PINNED_COLEAD_PARAMETERS.get(leg.lead_provider, {})),
     )
     handle = ModelHandle(
@@ -104,11 +102,8 @@ def build_pinned_colead(leg: Leg, monitor: Any | None) -> Any:
         name=f"sweep_colead_{leg.slug}",
         provider=leg.colead_provider,
         model=leg.colead_model,
-        # A text-only reviewer is legitimate -- the co-lead is never sent an image -- so this is
-        # declared by the roster rather than assumed true. Declaring vision on a member whose
-        # vendor will not serve it would be a false statement of capability.
-        vision=leg.colead_vision,
-        documents=leg.colead_vision,
+        # A text-only reviewer is legitimate -- the co-lead is never sent an image; its adapter
+        # declares what it takes (A1).
         parameters=dict(_PINNED_COLEAD_PARAMETERS.get(leg.colead_provider, {})),
     )
     handle = ModelHandle(

@@ -155,3 +155,46 @@ def test_heal_refuses_a_base_ref_the_branch_never_passed_through(tmp_path):
 
     assert not res.healed and "not an ancestor" in res.reason
     assert _git(root, "rev-parse", "HEAD") == before
+
+
+def test_a_heal_whose_reset_fails_keeps_the_saved_patch_in_its_result(tmp_path, monkeypatch):
+    """C2c: the patch is written, then `git reset --hard` fails; the result names the patch the
+    resume records, so the killed attempt's work stays findable."""
+    root = tmp_path / "toolkit"
+    _init_repo(root)
+    (root / "f.txt").write_text("dirty\n")
+    real_git = mf._git_in
+
+    def git(repo, *args, **kwargs):     # git itself fails; the heal around it is real
+        if args[:2] == ("reset", "--hard"):
+            raise RuntimeError("git reset --hard: index.lock exists")
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(mf, "_git_in", git)
+    base = _git(root, "rev-parse", "HEAD")
+    _persist_base_ref(tmp_path / "run", base)
+    res = heal_toolkit_branch_if_dirty(tmp_path / "run", root=root, branch="ai")
+    assert not res.healed and res.reason.startswith("error: TreeResetFailed")
+    assert res.patch_path is not None and "dirty" in res.patch_path.read_text()
+    assert res.base_ref == base, "the error result keeps the base ref (C2d)"
+
+
+def test_a_heal_whose_patch_could_not_be_saved_is_still_a_heal(tmp_path, monkeypatch):
+    """C2d: saving the patch fails and the reset after it works: the tree is healed, and the
+    result says so with a note about the missing patch."""
+    root = tmp_path / "toolkit"
+    base = _init_repo(root)
+    _persist_base_ref(tmp_path / "run", base)
+    (root / "f.txt").write_text("dirty\n")
+    real_git = mf._git_in
+
+    def git(repo, *args, **kwargs):     # git itself fails; the heal around it is real
+        if args[:2] == ("diff", "--cached"):
+            raise RuntimeError("git diff --cached: index.lock exists")
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(mf, "_git_in", git)
+    res = heal_toolkit_branch_if_dirty(tmp_path / "run", root=root, branch="ai")
+    assert res.healed and res.reason == "healed" and res.base_ref == base
+    assert res.patch_path is None and "could not be saved" in res.note
+    assert (root / "f.txt").read_text() == "v1\n", "the tree was reset"

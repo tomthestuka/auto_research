@@ -15,8 +15,6 @@ roles:
       - name: gpt_5_6_sol
         provider: openai
         model: gpt-5.6-sol
-        vision: true
-        documents: true
         priceMTk: {input: 5.0, output: 30.0}
         parameters:
           max_output_tokens: 16384
@@ -24,8 +22,6 @@ roles:
       - name: gpt_5_6_terra
         provider: openai
         model: gpt-5.6-terra
-        vision: true
-        documents: true
         priceMTk: {input: 5.0, output: 30.0}
         parameters:
           max_output_tokens: 16384
@@ -33,8 +29,6 @@ roles:
       - name: gpt_5_6_luna
         provider: openai
         model: gpt-5.6-luna
-        vision: false
-        documents: false
         priceMTk: {input: 0.5, output: 4.0}
         parameters:
           max_output_tokens: 16384
@@ -42,8 +36,6 @@ roles:
       - name: claude_opus_5
         provider: anthropic
         model: claude-opus-5
-        vision: true
-        documents: true
         priceMTk: {input: 5.0, output: 25.0}
         parameters:
           max_tokens: 21000  # shares budget with adaptive thinking; 21333 non-streaming ceiling
@@ -51,8 +43,6 @@ roles:
       - name: claude_sonnet_5
         provider: anthropic
         model: claude-sonnet-5
-        vision: true
-        documents: true
         priceMTk: {input: 3.0, output: 15.0}
         parameters:
           max_tokens: 21000
@@ -64,33 +54,27 @@ roles:
       # every cell reviews its own authoring session and no two reviewers ever see the same code.
       # This roster is where that is settled: one fixed corpus, planted defects, matched controls.
       #
-      # Prices are omitted where litellm carries the model (checked 2026-08-26: it prices
-      # `qwen3.8-max` and `deepseek-v4-pro`, and returns a zero-rate config stub for `glm-5.3`),
+      # Prices are omitted where litellm carries the model (re-checked 2026-11-04: it prices
+      # `qwen3.8-max`, `deepseek-v4-pro`, and `zai/glm-5.3` at the vendor's 1.4 / 4.4 / 0.26),
       # since a hand-copied rate that shadows a maintained one is a liability.
       #
       # `reasoning: {effort: high}` and `max_output_tokens: 16384` mirror the OpenAI members, so a
       # swap compares models rather than configurations. This review is text-only (the harness
-      # sends no images or documents), so the media flags are capability declarations rather than
-      # functional requirements.
+      # sends no images or documents); media capability comes from each adapter.
       - name: glm_5_3
         provider: zai
         model: glm-5.3
-        vision: true
-        documents: false
-        priceMTk: {input: 1.4, output: 4.4, cache_read: 0.26}   # Z.AI's own page; litellm has no entry
         parameters:
           max_output_tokens: 16384
           reasoning: {effort: high}
       - name: qwen3_8_max
         provider: dashscope
         model: qwen3.8-max
-        vision: true
-        documents: false
         parameters:
           max_output_tokens: 16384
           reasoning: {effort: high}
-      # DeepSeek is declared text-only by the standing policy of 2026-08-25 (its only multimodal
-      # model is experimental and this project declines it), not by absent vendor capability.
+      # `deepseek-v4-pro` is text-only by its vendor (pricing table: Vision "Not supported"); the
+      # 2026-08-25 project policy that made every DeepSeek model text-only is retired (2026-11-04).
       # NOTE: in the grid this member failed 5 of 20 reviews with "provider returned no structured
       # output for ToolReviewVerdict" -- a 25 per cent hard failure on long ReAct trajectories that
       # a nine-schema probe on short conversations did not reveal. A gate_bench review is a shorter
@@ -98,8 +82,6 @@ roles:
       - name: deepseek_v4_pro
         provider: deepseek
         model: deepseek-v4-pro
-        vision: false
-        documents: false
         parameters:
           max_output_tokens: 16384
           reasoning: {effort: high}

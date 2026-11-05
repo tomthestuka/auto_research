@@ -1,7 +1,7 @@
 """Opt-in live check for step-10 orchestration.
 
 Run with:
-    AUTO_RESEARCH_LIVE_GRAPH_TESTS=1 pytest tests/test_live_graph.py -s
+    pytest tests/test_live_graph.py --live -s
 
 Drives the compiled LangGraph end-to-end on one real research request with the
 default configured roles. Writes per-call traces under ``logs/dev/step-10/``.
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
@@ -30,10 +29,7 @@ from auto_research.storage import Storage
 from tests.dev_logs import dev_log_path, summarize_graph_log
 
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_GRAPH_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_GRAPH_TESTS=1 to spend provider tokens",
-)
+pytestmark = pytest.mark.live
 
 
 SAMPLE_QUESTION = (

@@ -70,7 +70,15 @@ _KIND_NOTES = {
         ' Pass {"$ref": "<handle>#/<key>"} (one of your results) or {"value": <the value>, '
         '"reason": "<why this value>"}'
     ),
-    "path": ' A path as text, or {"$ref": "<handle>"} of a file a tool of yours wrote.',
+    "path": ' A path as text, or {"$ref": "<handle>"} of a file a tool of yours returned.',
+}
+#: What an ``output`` argument adds, by its shape: the runtime places it in the call's own folder.
+_OUTPUT_NOTES = {
+    "folder": " The runtime gives this call its own folder here; leave it out.",
+    "file": (" A file name: the runtime places it in this call's own folder, keeping the name alone "
+             "(leave it out for {default})."),
+    "prefix": (" A file-name prefix: the runtime places it in this call's own folder, keeping the "
+               "name alone (leave it out for {default})."),
 }
 #: The same, for a call path that takes typed values only (the lead's in-process catalog read).
 _TYPED_NOTES = {"path": " A path as text."}
@@ -81,10 +89,13 @@ def provider_schema(schema: dict | None, *, references: bool = True) -> dict:
     runtime's keys, which some vendors' strict schemas refuse) and said in each description; a data
     argument takes no type (a reference, or a list of them), nor does a parameter (a reference,
     or a value with its reason, whose shape the schema keeps under ``value``), nor a path (text,
-    or a reference to a file). ``references=False``: a call path that takes typed values only, so
+    or a reference to a file). An ``output`` argument loses its ``shape`` key and leaves ``required``:
+    the runtime fills it in the call's own folder, and its description says so. ``references=False``: a call path that takes typed values only, so
     no description offers a reference (the lead's in-process ``data_catalog``)."""
     import copy
     import json
+
+    from auto_research.provenance.inputs import OUTPUT_SHAPE_KEY, output_name
 
     out = copy.deepcopy(schema or {"type": "object", "properties": {}})
     properties = out.get("properties") or {}
@@ -93,8 +104,15 @@ def provider_schema(schema: dict | None, *, references: bool = True) -> dict:
             continue
         prop = dict(prop)
         kind = prop.pop("kind", None)
+        shape = prop.pop(OUTPUT_SHAPE_KEY, None) if kind == "output" else None
         has_default, default = "default" in prop, prop.pop("default", None)
         note = (_KIND_NOTES if references else _TYPED_NOTES).get(kind, "")
+        if kind == "output":
+            named = output_name(default) if has_default else ""
+            fallback = json.dumps(named) if named else ("the argument's name" if shape == "file" else "the tool's name")
+            note, has_default = _OUTPUT_NOTES.get(shape, "").format(default=fallback), False
+            if isinstance(out.get("required"), (list, tuple)):
+                out["required"] = [r for r in out["required"] if r != name]
         if kind == "parameter":
             note += f", or leave it out for the default, {json.dumps(default)}." if has_default else "."
         elif has_default:

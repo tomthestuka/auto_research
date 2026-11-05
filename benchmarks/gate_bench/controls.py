@@ -171,15 +171,21 @@ def _ctl_bound_row_clamp(pkg: Path) -> None:
     patch(
         pkg / "skills" / "__init__.py",
         '''                "min_total_counts": {
+                    "kind": "parameter",
                     "type": "number",
+                    "default": 0.0,
                     "description": "Exclude rows whose two bands sum below this count.",
                 },''',
         '''                "min_total_counts": {
+                    "kind": "parameter",
                     "type": "number",
+                    "default": 0.0,
                     "description": "Exclude rows whose two bands sum below this count.",
                 },
                 "max_rows": {
+                    "kind": "parameter",
                     "type": "integer",
+                    "default": None,
                     "description": (
                         "Keep at most this many of the retained rows, counted from the first. "
                         "Omit to use every retained row; a negative value is rejected."
@@ -464,7 +470,7 @@ _BESPOKE = {
 }
 
 
-# Every ledger-derived entry is the same honest changeset with one anchor edited, so its
+# Every ledger-derived (and output-class) entry is an honest changeset with one anchor edited, so its
 # matched control is that changeset with no edit: a pair differs only at the defect, which is
 # the property that makes a rejection evidence of discrimination rather than of suspicion.
 def _ledger_bespoke() -> dict:
@@ -473,10 +479,15 @@ def _ledger_bespoke() -> dict:
         honest_edit as codex_honest_edit,
         ledger_codex_corpus,
     )
+    from benchmarks.gate_bench.mutants_outputs import (
+        honest_scaffold as outputs_scaffold,
+        outputs_corpus,
+    )
 
     return {
         **{m.id: honest_scaffold for m in ledger_corpus()},
         **{m.id: codex_honest_edit for m in ledger_codex_corpus()},
+        **{m.id: outputs_scaffold(m.id) for m in outputs_corpus()},
     }
 
 
@@ -513,6 +524,7 @@ def paired_controls(mutants) -> list[Mutant]:
             pairs_with=mutant.id,
             author=mutant.author,
             attested=mutant.attested,
+            catalog_writer=mutant.catalog_writer,  # the same base as its defect
             notes="matched" if matched else "clean-base repeat",
         ))
     return out

@@ -39,7 +39,7 @@ Two ways in, and they compose:
     against any seat assignment with no edit to that test::
 
         AUTO_RESEARCH_SEATS='analyst_lead=openai:gpt-5.6-terra,reviewer=dashscope:qwen3.8-max' \
-            AUTO_RESEARCH_LIVE_FIGURE_TESTS=1 pytest tests/test_live_figure_vision.py -s
+            pytest tests/test_live_figure_vision.py --live -s
 
 Parameters travel with the seat, and by default they are the **sweep's pinned settings** rather
 than a vendor default, because a probe of a batch's condition has to send the batch's request: the
@@ -68,17 +68,18 @@ SEATS_ENV = "AUTO_RESEARCH_SEATS"
 
 #: The configuration files a directory must hold to configure a process. ``models.yaml`` is the
 #: one an override rewrites; the rest are copied so nothing else about the run differs.
-_CONFIG_FILES = ("orchestration.yaml", "models.yaml", "observations.yaml", "code_gate.yaml")
+_CONFIG_FILES = (
+    "orchestration.yaml", "models.yaml", "observations.yaml", "code_gate.yaml", "model_capabilities.yaml",
+)
 
 
 @dataclass(frozen=True)
 class SeatOverride:
-    """One model, and what it may be sent — a ``models.yaml`` member waiting to be written."""
+    """One model — a ``models.yaml`` member waiting to be written. What it may be sent is its
+    adapter's declaration (A1), never a flag here."""
 
     provider: str
     model: str
-    vision: bool = True
-    documents: bool = True
     parameters: dict[str, Any] = field(default_factory=dict)
     priceMTk: dict[str, float] = field(default_factory=dict)
     harness: str | None = None
@@ -96,8 +97,6 @@ class SeatOverride:
             "name": name or "probe",
             "provider": self.provider,
             "model": self.model,
-            "vision": self.vision,
-            "documents": self.documents,
         }
         if self.parameters:
             entry["parameters"] = dict(self.parameters)
@@ -128,8 +127,6 @@ def seat(
     provider: str,
     model: str,
     *,
-    vision: bool = True,
-    documents: bool = True,
     parameters: Mapping[str, Any] | None = None,
     **extra: Any,
 ) -> SeatOverride:
@@ -137,20 +134,16 @@ def seat(
     return SeatOverride(
         provider=provider,
         model=model,
-        vision=vision,
-        documents=documents,
         parameters=dict(parameters) if parameters is not None else pinned_parameters(provider),
         **extra,
     )
 
 
 def from_seat(sweep_seat: Any) -> SeatOverride:
-    """A :class:`benchmarks.science_bench.arms.Seat` as an override, flags and prices included."""
+    """A :class:`benchmarks.science_bench.arms.Seat` as an override, prices included."""
     return SeatOverride(
         provider=sweep_seat.provider,
         model=sweep_seat.model,
-        vision=sweep_seat.vision,
-        documents=sweep_seat.documents,
         parameters=sweep_seat.parameters(),
         priceMTk=sweep_seat.price(),
     )
@@ -165,9 +158,8 @@ def parse_seats(spec: str) -> dict[str, list[SeatOverride]]:
         analyst_worker=anthropic:claude-sonnet-5|dashscope:qwen3.7-plus
 
     Commas separate roles; ``|`` separates the members of one role, so a two-member group such as
-    the analyst-worker pair is expressible. A trailing ``!novision`` or ``!nodocs`` on a member
-    clears that flag, since a member's declared capability is what the call-time guard reads and a
-    probe of a text-only model must be able to say so.
+    the analyst-worker pair is expressible. What a member may be sent is its adapter's
+    declaration (A1), so a member carries no capability flag.
     """
     overrides: dict[str, list[SeatOverride]] = {}
     for clause in (part.strip() for part in spec.split(",")):
@@ -183,24 +175,16 @@ def parse_seats(spec: str) -> dict[str, list[SeatOverride]]:
         for member in (m.strip() for m in members.split("|")):
             if not member:
                 raise ValueError(f"seat spec has an empty member: {clause!r}")
-            flags = member.split("!")
-            body = flags[0].strip()
-            if ":" not in body:
-                raise ValueError(f"seat member needs provider:model, got {body!r}")
-            provider, model = (piece.strip() for piece in body.split(":", 1))
-            if not provider or not model:
-                raise ValueError(f"seat member needs provider:model, got {body!r}")
-            unknown = {flag.strip() for flag in flags[1:]} - {"novision", "nodocs"}
-            if unknown:
-                raise ValueError(f"unknown seat flags {sorted(unknown)} in {member!r}")
-            parsed.append(
-                seat(
-                    provider,
-                    model,
-                    vision="novision" not in flags[1:],
-                    documents="nodocs" not in flags[1:],
+            if "!" in member:
+                raise ValueError(
+                    f"seat flags are retired (a member's adapter declares what it takes): {member!r}"
                 )
-            )
+            if ":" not in member:
+                raise ValueError(f"seat member needs provider:model, got {member!r}")
+            provider, model = (piece.strip() for piece in member.split(":", 1))
+            if not provider or not model:
+                raise ValueError(f"seat member needs provider:model, got {member!r}")
+            parsed.append(seat(provider, model))
         overrides[role] = parsed
     if not overrides:
         raise ValueError(f"seat spec named no roles: {spec!r}")
@@ -227,7 +211,7 @@ def write_config_dir(
 ) -> Path:
     """Build a configuration directory at ``destination`` with the seats overridden.
 
-    The three files that are not ``models.yaml`` are copied byte for byte: an override varies who
+    The files that are not ``models.yaml`` are copied byte for byte: an override varies who
     sits in a seat and nothing else, which is also what keeps the value-caching configuration
     readers correct in a process that has already read them.
     """

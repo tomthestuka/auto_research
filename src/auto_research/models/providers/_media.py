@@ -57,11 +57,6 @@ class MediaLimits:
 
     image_mimes: frozenset[str]
     doc_mimes: frozenset[str] = frozenset()
-    images_accepted: bool = True
-    """Whether *this model* accepts image input at all. Unlike the fields below, this is not a
-    volume limit but a per-model capability: a vendor may serve vision on only part of its
-    lineup, and an image sent to the wrong model is refused outright rather than ignored. An
-    adapter narrows its vendor limits per call (``ResponsesVendor.limits_for``)."""
     max_images: int = 0
     """Image blocks per request (0 = undocumented)."""
     strict_block_threshold: int = 0
@@ -69,10 +64,23 @@ class MediaLimits:
     strict_max_edge: int = 0
     max_edge: int = 0
     """Long-edge cap that applies regardless of block count (0 = undocumented)."""
-    max_image_bytes: int = 0
+    max_image_encoded_bytes: int = 0
+    """Per-image cap on the **base64-encoded** size (0 = undocumented): every adapter sends an image
+    inline as base64, and the vendors that state a per-image size state it that way (Anthropic:
+    "10 MB (base64-encoded)"). An image over it is downscaled until it fits (Z1c)."""
     max_doc_bytes: int = 0
     max_request_bytes: int = 0
     max_pdf_pages: int = 0
+    """PDF pages per **request**, summed over every PDF it carries (0 = undocumented)."""
+    min_side: int = 0
+    """The smallest width or height accepted (0 = undocumented); a smaller image is withheld."""
+    max_aspect: float = 0
+    """The largest long-to-short side ratio accepted (0 = undocumented); a longer image is withheld."""
+    large_box: tuple[int, int] = (0, 0)
+    large_image_mimes: frozenset[str] = frozenset()
+    """An image that does not fit inside ``large_box`` (long side, short side) in either orientation
+    is taken only as one of these types ((0, 0) = no such rule); another type is re-encoded as PNG
+    when PNG is one of them, else withheld."""
 
 
 @dataclass
@@ -83,6 +91,13 @@ class MediaItem:
     is_image: bool
     path: Path
     mime: str
+
+    @property
+    def label(self) -> str:
+        """How a note names the item: its receipt handle when it has one, so a peer can open it
+        with ``view_receipt``, then its file name."""
+        receipt = getattr(self.ref, "receipt", None)
+        return f"{receipt} ({self.path.name})" if receipt else self.path.name
 
 
 @dataclass
@@ -169,44 +184,27 @@ def iter_media(
     return items
 
 
-def hoist_documents(
-    messages: Sequence[ConversationMessage],
-) -> tuple[list[ConversationMessage], list[DocumentRef]]:
-    """``(messages without their nested documents, those documents in order)``.
-
-    For a vendor that reads a document only as locally extracted text (``_doc_parse``): its
-    substitution runs on call-time documents, so documents nested in tool results move there.
-    """
-    out: list[ConversationMessage] = []
-    hoisted: list[DocumentRef] = []
-    for message in messages:
-        if isinstance(message, ToolResultMessage) and any(p.documents for p in message.results):
-            hoisted.extend(d for p in message.results for d in p.documents)
-            message = message.model_copy(update={"results": [
-                p.model_copy(update={"documents": []}) for p in message.results
-            ]})
-        elif isinstance(message, ModelMessage) and message.documents:
-            hoisted.extend(message.documents)
-            message = message.model_copy(update={"documents": []})
-        out.append(message)
-    return out, hoisted
-
-
-def media_load(messages: Sequence[ConversationMessage]) -> tuple[int, int]:
+def media_load(
+    messages: Sequence[ConversationMessage], *, documents: bool = True, images: bool = True
+) -> tuple[int, int]:
     """``(image blocks, media bytes as base64)`` the conversation carries, from the files on disk.
 
     An upper bound on what a request sends (an image the guard downscales sends fewer bytes); a
-    file that cannot be read counts no bytes.
+    file that cannot be read counts no bytes. ``documents=False`` leaves documents out: a member
+    that is sent their local parse carries none of their bytes (Z1f); ``images=False`` leaves images
+    out, for a member that is sent none.
     """
-    images = 0
+    count = 0
     size = 0
     for item in iter_media(messages):
-        images += item.is_image
+        if (item.is_image and not images) or (not item.is_image and not documents):
+            continue
+        count += item.is_image
         try:
             size += item.path.stat().st_size
         except OSError:
             continue
-    return images, (size * 4 + 2) // 3
+    return count, (size * 4 + 2) // 3
 
 
 def plan_media(
@@ -214,9 +212,9 @@ def plan_media(
 ) -> MediaPlan:
     """Decide, for the request as a whole, what to send, shrink, or drop.
 
-    Order of application: mime routing, then the per-item caps (pages, bytes, dimensions — the
-    dimension cap tightens once the block count crosses the provider's threshold), then the
-    whole-request payload budget, which evicts oldest-first until the request fits alongside
+    Order of application: mime routing, then the per-item caps (pages, bytes, dimensions, shape,
+    type above a size — the dimension cap tightens once the block count crosses the provider's
+    threshold), then the request's PDF-page budget, then the whole-request payload budget, which evicts oldest-first until the request fits alongside
     ``reserved_bytes`` of non-media content (see :func:`_apply_request_budget`).
     """
     plan = MediaPlan()
@@ -232,13 +230,15 @@ def plan_media(
 
     # Past the provider's image count the OLDEST images are withheld, so the current turn's
     # evidence is what the model sees (it used to be the newest that went, run 32814459 review).
-    # Only images the provider takes count: one withheld for its type or for a text-only model is
-    # gone already and must not push a sendable one out.
+    # Only images the provider takes count: one withheld for its type is gone already and must
+    # not push a sendable one out. (A text-only member's images never reach here: the model-input
+    # sanitiser withholds them, `models.sanitise`.)
     # An image that does not decode is withheld too, so it must not push a decodable one out.
     sendable = [
-        item.is_image and limits.images_accepted
+        item.is_image
         and (not limits.image_mimes or item.mime in limits.image_mimes)
         and (item.mime in _UNCHECKED_IMAGE_MIMES or _decodes_path(item))
+        and _shape_ok(item, limits)  # one withheld for its shape must not push a sendable one out
         for item in items
     ]
     image_count = sum(sendable)
@@ -252,8 +252,35 @@ def plan_media(
         if not resolved.dropped:
             kept.append((item, resolved))
 
+    _apply_page_budget(kept, limits)
     _apply_request_budget(kept, limits, reserved_bytes)
     return plan
+
+
+def _shape_problem(width: int, height: int, limits: MediaLimits) -> str | None:
+    """Why ``width``x``height`` is refused by its shape (minimum side, side ratio), or ``None``."""
+    if not (width and height):
+        return None
+    if limits.min_side and min(width, height) < limits.min_side:
+        return f"a side under this provider's {limits.min_side} px minimum"
+    if limits.max_aspect and max(width, height) / min(width, height) > limits.max_aspect:
+        return f"longer than this provider's {limits.max_aspect:g}:1 side ratio"
+    return None
+
+
+def _shape_ok(item: MediaItem, limits: MediaLimits) -> bool:
+    if not (limits.min_side or limits.max_aspect):
+        return True
+    try:
+        width, height = _dimensions(item.path.read_bytes())
+    except OSError:
+        return True
+    return _shape_problem(width, height, limits) is None
+
+
+def _is_large(width: int, height: int, limits: MediaLimits) -> bool:
+    long_box, short_box = limits.large_box
+    return bool(long_box) and (max(width, height) > long_box or min(width, height) > short_box)
 
 
 def _decodes_path(item: MediaItem) -> bool:
@@ -268,18 +295,8 @@ def _resolve_one(
     item: MediaItem, limits: MediaLimits, max_edge: int, image_index: int | None, overflow: int = 0
 ) -> Resolved:
     """Per-item checks: mime, count, pages, bytes, dimensions."""
-    name = item.path.name
+    name = item.label
     if item.is_image:
-        if not limits.images_accepted:
-            # Some vendors serve vision on only part of their lineup, and sending an image to
-            # the wrong model is a 400 rather than a degraded answer (DeepSeek: "Only vision
-            # models accept images; other models return a 400 error"). Withholding here keeps
-            # that a model-visible note instead of a dead request.
-            return Resolved(
-                None,
-                item.mime,
-                f"[withheld] {name}: this model does not accept image input.",
-            )
         if limits.image_mimes and item.mime not in limits.image_mimes:
             # Closes [V-3]: an unsupported mime must never enter the image channel, where every
             # provider 400s on it.
@@ -319,7 +336,7 @@ def _read_item(item: MediaItem) -> tuple[bytes | None, str | None]:
     try:
         read = read_receipted(item.path, getattr(item.ref, "sha256", None), label=item.path.name)
     except OSError as exc:
-        return None, f"[withheld] {item.path.name}: unreadable ({exc})."
+        return None, f"[withheld] {item.label}: unreadable ({exc})."
     return read.data, read.note
 
 
@@ -341,41 +358,125 @@ def _resolve_image_bytes(item: MediaItem, data: bytes, limits: MediaLimits, max_
     if item.mime not in _UNCHECKED_IMAGE_MIMES:
         decodes, actual, reason = _image_verdict(data)
         if not decodes:
-            return Resolved(None, item.mime, undecodable_note(item.path.name, "an image", reason))
+            return Resolved(None, item.mime, undecodable_note(item.label, "an image", reason))
         if actual and actual != item.mime:
             # A tool declared one type for bytes of another; a provider refuses the mismatch.
             if limits.image_mimes and actual not in limits.image_mimes:
                 return Resolved(None, item.mime, undecodable_note(
-                    item.path.name, "an image", f"its bytes are {actual}, which this provider does not take"))
+                    item.label, "an image", f"its bytes are {actual}, which this provider does not take"))
             item = replace(item, mime=actual)
     width, height = _dimensions(data)
+    shape = _shape_problem(width, height, limits)
+    if shape:
+        return Resolved(None, item.mime, f"[withheld] {item.label}: {width}x{height}, {shape}.")
+    if width and height and _is_large(width, height, limits) and item.mime not in limits.large_image_mimes:
+        png = _as_png(data) if "image/png" in limits.large_image_mimes else None
+        if png is None:
+            return Resolved(None, item.mime, (
+                f"[withheld] {item.label}: {width}x{height} {item.mime}, a type this provider takes "
+                "only at smaller sizes, and it could not be re-encoded."))
+        sent = _resolve_image_bytes(replace(item, mime="image/png"), png, limits, max_edge)
+        if sent.dropped:
+            return _with_note(sent, f"{item.label} was re-encoded as PNG for its size, then:")
+        return _with_note(sent, (
+            f"[re-encoded] {item.label}: {width}x{height} {item.mime} sent as PNG, the type this "
+            "provider takes at this size. The stored artifact is unchanged."))
+    cap = limits.max_image_encoded_bytes
     too_wide = bool(max_edge) and max(width, height) > max_edge
-    too_big = bool(limits.max_image_bytes) and len(data) > limits.max_image_bytes
+    too_big = bool(cap) and _encoded_size(len(data)) > cap
     if not (too_wide or too_big):
         return Resolved(data, item.mime)
 
-    target = max_edge or max(width, height)
-    shrunk, new_size = _resize(data, item.mime, target)
-    if shrunk is None:
+    edge_limit = f"{max_edge} px long-edge limit"
+    byte_limit = f"{_size_text(cap)} per-image limit (base64-encoded)"
+    if max(width, height) <= _MIN_EDGE and not too_wide:
+        # Over the byte cap at a size this guard does not downscale below (e.g. a large animated GIF).
         return Resolved(
             None,
             item.mime,
-            f"[withheld] {item.path.name}: {width}x{height} exceeds this provider's limit and "
+            f"[withheld] {item.label}: {_encoded_size(len(data)) / _MB:.1f} MB encoded at "
+            f"{width}x{height}, over this provider's {byte_limit}; at {_MIN_EDGE} px or less it is "
+            "sent as it is or not at all.",
+        )
+
+    # The edge first, then smaller steps until the encoded size fits the per-image cap (Z1c): an
+    # image over the cap at an edge already inside it is downscaled, as an over-wide one is. Each
+    # step is sized from the re-encoded output at the current edge, so a lossy source does not
+    # make the first step overshoot.
+    edge = max_edge if too_wide else max(width, height)
+    shrunk, new_size = _resize(data, item.mime, edge, reencode=True)
+    by_bytes = too_big
+    while shrunk is not None and cap and _encoded_size(len(shrunk)) > cap and edge > _MIN_EDGE:
+        by_bytes = True
+        ratio = (cap / _encoded_size(len(shrunk))) ** 0.5
+        edge = max(_MIN_EDGE, min(edge - 1, int(edge * ratio * 0.97)))
+        shrunk, new_size = _resize(data, item.mime, edge, reencode=True)
+    if shrunk is None:
+        exceeded = " and ".join(p for p, a in ((edge_limit, too_wide), (byte_limit, too_big)) if a)
+        return Resolved(
+            None,
+            item.mime,
+            f"[withheld] {item.label}: {width}x{height} exceeds this provider's {exceeded} and "
             "could not be resized.",
         )
-    if limits.max_image_bytes and len(shrunk) > limits.max_image_bytes:
+    applied = " and ".join(p for p, a in ((edge_limit, too_wide), (byte_limit, by_bytes)) if a)
+    if (scaled := _shape_problem(*new_size, limits)):
+        # "for both original and scaled images" (Alibaba): the size actually sent is held too.
+        return Resolved(None, item.mime, (
+            f"[withheld] {item.label}: {width}x{height} fits this provider's {applied} only at "
+            f"{new_size[0]}x{new_size[1]}, {scaled}."))
+    if cap and _encoded_size(len(shrunk)) > cap:
         return Resolved(
             None,
             item.mime,
-            f"[withheld] {item.path.name}: {len(shrunk) / _MB:.1f} MB after resizing, over the "
-            f"provider's {limits.max_image_bytes / _MB:.0f} MB per-image limit.",
+            f"[withheld] {item.label}: still {_encoded_size(len(shrunk)) / _MB:.1f} MB encoded at "
+            f"{new_size[0]}x{new_size[1]}, the smallest size tried ({_MIN_EDGE} px long edge), over "
+            f"this provider's {byte_limit}.",
+        )
+    if new_size == (width, height):  # re-encoding alone brought it under the cap
+        return Resolved(
+            shrunk,
+            item.mime,
+            f"[re-encoded] {item.label}: re-encoded at {width}x{height} to fit this provider's "
+            f"{applied}. The stored artifact is unchanged.",
         )
     return Resolved(
         shrunk,
         item.mime,
-        f"[downscaled] {item.path.name}: {width}x{height} -> {new_size[0]}x{new_size[1]} to fit "
-        "this provider's image size limit. The stored artifact is unchanged.",
+        f"[downscaled] {item.label}: {width}x{height} -> {new_size[0]}x{new_size[1]} to fit "
+        f"this provider's {applied}. The stored artifact is unchanged.",
     )
+
+
+#: The smallest long edge an image is downscaled to while fitting a byte cap; below it a chart is
+#: no longer legible, so the image is withheld instead.
+_MIN_EDGE = 256
+
+
+def _as_png(data: bytes) -> bytes | None:
+    """``data`` re-encoded as PNG at its own size, or ``None`` when it cannot be."""
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            out = io.BytesIO()
+            image.save(out, format="PNG")
+            return out.getvalue()
+    except Exception:  # noqa: BLE001 — the caller withholds with a note
+        return None
+
+
+def _encoded_size(raw: int) -> int:
+    """Bytes of the base64 string ``raw`` bytes become: what an inline image weighs in a request."""
+    return 4 * ((raw + 2) // 3)
+
+
+def _size_text(limit: int) -> str:
+    """A byte limit as its vendor writes it: whole (binary or decimal) megabytes, else bytes."""
+    for unit in (_MB, 1_000_000):
+        if limit % unit == 0:
+            return f"{limit // unit} MB"
+    return f"{limit:,} bytes"
 
 
 def _resolve_document(item: MediaItem, limits: MediaLimits) -> Resolved:
@@ -387,12 +488,12 @@ def _resolve_document(item: MediaItem, limits: MediaLimits) -> Resolved:
 
 def _resolve_document_bytes(item: MediaItem, data: bytes, limits: MediaLimits) -> Resolved:
     if item.mime == "application/pdf" and not _pdf_page_count(data):
-        return Resolved(None, item.mime, undecodable_note(item.path.name, "a PDF"))
+        return Resolved(None, item.mime, undecodable_note(item.label, "a PDF"))
     if limits.max_doc_bytes and len(data) > limits.max_doc_bytes:
         return Resolved(
             None,
             item.mime,
-            f"[withheld] {item.path.name}: {len(data) / _MB:.1f} MB, over this provider's "
+            f"[withheld] {item.label}: {len(data) / _MB:.1f} MB, over this provider's "
             f"{limits.max_doc_bytes / _MB:.0f} MB per-document limit. Cite it from its "
             "text_search metadata instead of attaching it.",
         )
@@ -402,11 +503,31 @@ def _resolve_document_bytes(item: MediaItem, data: bytes, limits: MediaLimits) -
             return Resolved(
                 None,
                 item.mime,
-                f"[withheld] {item.path.name}: {pages} pages, over this provider's "
+                f"[withheld] {item.label}: {pages} pages, over this provider's "
                 f"{limits.max_pdf_pages}-page limit. Cite it from its text_search metadata "
                 "instead of attaching it.",
             )
     return Resolved(data, item.mime)
+
+
+def _apply_page_budget(kept: list[tuple[MediaItem, Resolved]], limits: MediaLimits) -> None:
+    """Evict PDFs oldest-first, in place, until the request's pages fit ``max_pdf_pages``: the
+    limit is per request (Anthropic: "Maximum pages per request"), summed over every PDF (Z1g)."""
+    if not limits.max_pdf_pages:
+        return
+    pdfs = [(item, res, _pdf_page_count(res.data)) for item, res in kept
+            if not item.is_image and item.mime == "application/pdf" and res.data is not None]
+    total = sum(pages for _, _, pages in pdfs)
+    for item, res, pages in pdfs:
+        if total <= limits.max_pdf_pages:
+            return
+        res.note = (
+            f"[withheld] {item.label}: its {pages} pages do not fit this provider's "
+            f"{limits.max_pdf_pages}-page limit for a request once the other PDFs it carries are "
+            "counted; the most recent were kept. Cite it from its text_search metadata."
+        )
+        res.data = None
+        total -= pages
 
 
 def _apply_request_budget(
@@ -432,13 +553,14 @@ def _apply_request_budget(
     if not limits.max_request_bytes:
         return
     ceiling = max(0, limits.max_request_bytes - max(0, reserved))
-    encoded = [(item, res, len(res.data or b"") * 4 // 3) for item, res in kept]
+    # Only what is still sent: a PDF the page budget withheld keeps its own note (Z1g review).
+    encoded = [(item, res, len(res.data) * 4 // 3) for item, res in kept if res.data is not None]
     total = sum(size for _, _, size in encoded)
     for item, res, size in encoded:
         if total <= ceiling:
             return
         res.note = (
-            f"[withheld] {item.path.name}: {size / _MB:.1f} MB does not fit the "
+            f"[withheld] {item.label}: {size / _MB:.1f} MB does not fit the "
             f"{ceiling / _MB:.1f} MB left for media under the provider's "
             f"{limits.max_request_bytes / _MB:.0f} MB request ceiling once the rest of this "
             "request is counted; the most recent media was kept."
@@ -501,8 +623,11 @@ def _dimensions(data: bytes) -> tuple[int, int]:
         return (0, 0)
 
 
-def _resize(data: bytes, mime: str, max_edge: int) -> tuple[bytes | None, tuple[int, int]]:
-    """Scale the long edge down to ``max_edge``, preserving aspect ratio.
+def _resize(
+    data: bytes, mime: str, max_edge: int, *, reencode: bool = False
+) -> tuple[bytes | None, tuple[int, int]]:
+    """Scale the long edge down to ``max_edge``, preserving aspect ratio; ``reencode`` re-encodes an
+    image already inside it (the byte-cap path sizes its steps from the encoder's own output).
 
     LANCZOS because the content is charts: axis labels and thin error bars have to stay legible.
     """
@@ -513,9 +638,9 @@ def _resize(data: bytes, mime: str, max_edge: int) -> tuple[bytes | None, tuple[
         with Image.open(io.BytesIO(data)) as image:
             image.load()
             width, height = image.size
-            if max(width, height) <= max_edge:
+            if max(width, height) <= max_edge and not reencode:
                 return data, (width, height)
-            scale = max_edge / max(width, height)
+            scale = min(1.0, max_edge / max(width, height))
             size = (max(1, int(width * scale)), max(1, int(height * scale)))
             out = io.BytesIO()
             image.resize(size, Image.LANCZOS).save(out, format=fmt.get(mime, "PNG"))

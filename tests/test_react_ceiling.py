@@ -105,7 +105,7 @@ def _worker(tmp_path, adapter, monitor, *, missing_figure: bool = True) -> Analy
     worker = AnalystWorkerAgent(
         model=ModelHandle(
             role="analyst_worker",
-            config=RoleModelConfig(name="fake", provider="anthropic", model="fake", vision=True),
+            config=RoleModelConfig(name="fake", provider="anthropic", model="fake"),
             provider=adapter,
         ),
         prompt="p",
@@ -205,7 +205,7 @@ def test_an_unfiled_draft_is_never_the_leads_decision(tmp_path):
     lead = AnalystLeadAgent(
         model=ModelHandle(
             role="analyst_lead",
-            config=RoleModelConfig(name="fake", provider="anthropic", model="fake", vision=True),
+            config=RoleModelConfig(name="fake", provider="anthropic", model="fake"),
             provider=_WritesThenRefuses(lead=True),
         ),
         prompt="p",

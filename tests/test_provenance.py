@@ -528,18 +528,25 @@ def test_a_file_resolving_outside_the_allow_list_is_never_receipted(store, tmp_p
     planted = allowed / "result.csv"
     planted.symlink_to(secret)
     honest = allowed / "honest.csv"
+    honest.write_text("a,b\n")
+    beyond = tmp_path / "outside" / "folder"  # a products folder the allow-list leaves out
+    beyond.mkdir()
+    (beyond / "t.csv").write_text("a\n")
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [allowed.resolve()])
 
-    state = capture.CallInputs(started_ns=0)
-    honest.write_text("a,b\n")
-    out = capture.receipt_call(
-        store, source="analyst_worker_0", produced_by="research_toolkit.x_utils.t",
-        args={}, text=f"wrote {planted} and {honest}", failed=False, state=state,
-    )
+    def mint(folder, *paths):
+        declared, _ = capture.parse_products([{"path": str(p), "caption": p.name} for p in paths])
+        return capture.receipt_call(
+            store, source="analyst_worker_0", produced_by="research_toolkit.x_utils.t",
+            args={}, text="wrote", failed=False, products=declared, products_dir=folder,
+        )
+
+    out = mint(allowed, planted, honest)
     receipted = {str(r.path) for r in out.products}
-    assert str(secret.resolve()) not in receipted
-    assert str(honest.resolve()) in receipted
-    assert any("outside the allow-list" in note for note in out.notes)
+    assert receipted == {str(honest.resolve())}
+    assert any("result.csv" in note and "through a link" in note for note in out.notes)
+    out = mint(beyond, beyond / "t.csv")
+    assert out.products == [] and any("outside the allow-list" in note for note in out.notes)
 
 
 def test_a_figure_that_is_a_symlink_is_dropped_not_receipted(store, tmp_path, monkeypatch):
@@ -556,8 +563,8 @@ def test_a_figure_that_is_a_symlink_is_dropped_not_receipted(store, tmp_path, mo
                                     "produced_by": "t", "created_at": "2026-10-06T00:00:00Z",
                                     "sha256": "0" * 64})
     out = capture.receipt_call(store, source="w", produced_by="research_toolkit.x_utils.t",
-                               args={}, text="ok", failed=False, figures=[fig])
-    assert out.figures == [] and any("allow-list" in n for n in out.notes)
+                               args={}, text="ok", failed=False, figures=[fig], products_dir=tmp_path)
+    assert out.figures == [] and any("through a link" in n for n in out.notes)
 
 
 def test_a_receipted_file_is_read_once_checked_and_a_change_is_sent_with_an_alert(tmp_path):

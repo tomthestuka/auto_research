@@ -25,6 +25,7 @@ co-lead's ``commit_summary``. The runtime never touches master; a human merges o
 from __future__ import annotations
 
 import asyncio
+import difflib
 import inspect
 import json
 import os
@@ -301,8 +302,9 @@ def _build_structure_context(workdir: Path) -> str:
     if obs:
         lines = "\n".join(f"- {mission}: {path}" for mission, path in obs.items())
         parts.append(
-            "# Mission observation paths — your validation ObsIDs live under these absolute "
-            "directories (synthetic fixtures are marked `synth…` ObsIDs, never toolkit code):\n"
+            "# Mission observation paths — your real validation ObsIDs live under these absolute "
+            "directories, read-only to the gate (a synthetic one is a marked `synth<YYMMDD>-<hex>` "
+            "ObsID your tests build in their fixture obs-db):\n"
             + lines
         )
     environments = _environment_context(workdir)
@@ -723,6 +725,15 @@ def approve_edit(
     return _git_in(worktree, "rev-parse", "HEAD").strip()
 
 
+class TreeReset(NamedTuple):
+    """What :func:`_reset_direct_tree` did: the patch it saved, whether the tree was reset, and
+    the error saving the patch raised (None when the save worked or was not attempted)."""
+
+    patch: Path | None
+    cleared: bool
+    save_error: str | None = None
+
+
 async def _reset_direct_tree(
     toolkit_root: Path,
     *,
@@ -730,7 +741,7 @@ async def _reset_direct_tree(
     artifact_dir: Path | None,
     monitor: Any | None = None,
     tool_spec: Any | None = None,
-) -> None:
+) -> TreeReset:
     """Reset the direct-branch toolkit checkout to ``base_ref`` after a **non-committed**
     authoring attempt (CLAUDE.md §9.9). The only place besides :func:`approve_edit` the runtime
     touches the toolkit tree — its counterpart on the failure path: a failed attempt leaves the
@@ -743,8 +754,12 @@ async def _reset_direct_tree(
     holds. Falls back to ``HEAD`` when ``base_ref`` is unset. Before discarding, the attempt's
     full diff against ``base_ref`` (tracked edits, new untracked content, **and** any coder
     commit) is saved as a ``.patch`` under ``artifact_dir`` (the run's authoring dir, outside the
-    toolkit) so the rejected work stays inspectable. Best-effort: any failure is logged and
-    swallowed — cleanup must never mask the caller's result or re-raise.
+    toolkit) so the rejected work stays inspectable. Returns a :class:`TreeReset`: the patch's path
+    (None when nothing was saved) and whether the tree was reset. A reset that failed after the
+    patch was saved still returns the patch (C2b), so the lead can be told where the work is and
+    that the tree may still hold it; a save that failed before a reset that worked is returned as
+    ``save_error`` (C2c). Best-effort: any failure is logged and swallowed — cleanup
+    must never mask the caller's result or re-raise.
     """
     toolkit_root = Path(toolkit_root)
     reset_to = base_ref or "HEAD"
@@ -759,12 +774,37 @@ async def _reset_direct_tree(
             summary=f"reset {toolkit_root.name} to {reset_to[:10]} after a non-committed authoring attempt",
             data={"patch": str(patch_path) if patch_path else None},
         )
+        return TreeReset(patch_path, True)
     except Exception as exc:  # noqa: BLE001 — cleanup must never mask the caller's result
+        if isinstance(exc, PatchSaveFailed):
+            # The tree was reset; only its patch is missing (C2c), so this is no failed reset.
+            await _emit(
+                monitor, "coder.tree_reset", level=3,
+                summary=f"reset {toolkit_root.name} to {reset_to[:10]}; saving its patch failed: "
+                        f"{type(exc).__name__}: {exc}",
+                data={"patch": None, "save_error": repr(exc)},
+            )
+            return TreeReset(None, True, f"{type(exc).__name__}: {exc}")
+        # Any other error leaves the tree's state unknown, so it counts as a failed reset (C2d).
+        patch_path = exc.patch if isinstance(exc, TreeResetFailed) else None
         await _emit(
             monitor, "coder.tree_reset.error", level=3,
             summary=f"working-tree reset failed: {type(exc).__name__}: {exc}",
-            data={"error": repr(exc)},
+            data={"error": repr(exc), "patch": str(patch_path) if patch_path else None},
         )
+        return TreeReset(patch_path, False)
+
+
+class PatchSaveFailed(RuntimeError):
+    """Saving the patch in :func:`_save_diff_and_reset` failed; the reset after it worked (C2d)."""
+
+
+class TreeResetFailed(RuntimeError):
+    """The reset in :func:`_save_diff_and_reset` failed; ``patch`` is the patch saved before it."""
+
+    def __init__(self, message: str, *, patch: Path | None) -> None:
+        super().__init__(message)
+        self.patch = patch
 
 
 def _save_diff_and_reset(
@@ -782,10 +822,14 @@ def _save_diff_and_reset(
     The shared core of the failed-attempt reset (:func:`_reset_direct_tree`) and the resume-time
     heal (:func:`heal_toolkit_branch_if_dirty`). Everything is staged first so the diff captures
     new untracked files (and any coder commit, diffed against ``reset_to``); the reset unstages
-    it. Raises on a git failure — the caller decides whether to swallow it.
+    it. Raises on a git failure — the caller decides whether to swallow it; a failure of the
+    reset itself raises :class:`TreeResetFailed`, carrying the patch already saved, and a failed
+    save before a reset that worked raises :class:`PatchSaveFailed` (C2d), so a caller can tell a
+    reset tree from a dirty one.
     """
     toolkit_root = Path(toolkit_root)
     patch_path: Path | None = None
+    save_error: Exception | None = None
     try:
         if artifact_dir is not None:
             artifact_dir = Path(artifact_dir)
@@ -795,8 +839,11 @@ def _save_diff_and_reset(
                 diff = _git_in(toolkit_root, "diff", "--cached", reset_to)
                 if diff.strip():
                     artifact_dir.mkdir(parents=True, exist_ok=True)
-                    patch_path = artifact_dir / f"{patch_prefix}_{spec_id}_{uuid.uuid4().hex[:8]}.patch"
-                    patch_path.write_text(diff, encoding="utf-8", errors="surrogateescape")
+                    path = artifact_dir / f"{patch_prefix}_{spec_id}_{uuid.uuid4().hex[:8]}.patch"
+                    path.write_text(diff, encoding="utf-8", errors="surrogateescape")
+                    patch_path = path  # named only once written, so no caller cites a missing file
+    except Exception as exc:  # noqa: BLE001 — raised below as PatchSaveFailed, once the reset ran
+        save_error = exc
     finally:
         # The reset runs whatever happened to the patch: keeping the rejected work inspectable
         # never outranks removing it from the tree workers import. Folders first made the owner's
@@ -811,11 +858,16 @@ def _save_diff_and_reset(
             purge_bytecode(toolkit_root)
         except Exception:  # noqa: BLE001 — the reset below reports what it still cannot undo
             pass
-        _git_in(toolkit_root, "reset", "--hard", reset_to)
-        _git_in(toolkit_root, "clean", "-ffd")  # -ff: a nested repository a coder left goes too
-        # An error here reaches `_reset_direct_tree`'s handler and its monitor event; workers read
-        # no in-tree bytecode anyway (PYTHONPYCACHEPREFIX).
-        purge_bytecode(toolkit_root)
+        try:
+            _git_in(toolkit_root, "reset", "--hard", reset_to)
+            _git_in(toolkit_root, "clean", "-ffd")  # -ff: a nested repository a coder left goes too
+            # An error here reaches `_reset_direct_tree`'s handler and its monitor event; workers
+            # read no in-tree bytecode anyway (PYTHONPYCACHEPREFIX).
+            purge_bytecode(toolkit_root)
+        except Exception as exc:
+            raise TreeResetFailed(f"{type(exc).__name__}: {exc}", patch=patch_path) from exc
+    if save_error is not None:
+        raise PatchSaveFailed(f"{type(save_error).__name__}: {save_error}") from save_error
     return patch_path
 
 
@@ -993,6 +1045,7 @@ class BranchHealResult(NamedTuple):
     reason: str  # "clean" | "healed" | "not_git" | "wrong_branch" | "error: <repr>"
     base_ref: str | None = None
     patch_path: Path | None = None
+    note: str | None = None  # e.g. a healed tree whose patch could not be saved (C2d)
 
 
 def committed_environments(toolkit_root: Path, manifest: dict[str, str]) -> list[str]:
@@ -1022,16 +1075,90 @@ def deleted_environments(toolkit_root: Path, manifest: dict[str, str]) -> list[s
     return sorted(i for i in ids if not (Path(toolkit_root) / "envs" / i / "env.yaml").exists())
 
 
+#: Said with a build that failed over a build of an earlier definition put back in use (D3b).
+PREVIOUS_IN_USE = " The previous build stays in use; its results are flagged untested env."
+
+
+def earlier_build_in_use(env_id: str, digest: str | None) -> bool:
+    """Whether ``ar-<env_id>`` is a build of another definition than ``digest`` (``None``: the
+    definition does not read or validate) that stays in the catalogue, read as superseded (D3c)."""
+    from auto_research.env import agent_conda_dir
+    from auto_research.sandbox.env_build import build_record
+
+    prefix = agent_conda_dir() / "envs" / f"ar-{env_id}"
+    record = build_record(agent_conda_dir(), prefix)
+    return bool(record) and record.get("definition_sha256") != digest and (
+        record.get("base") is not None or prefix.is_dir())
+
+
+def restored_summary(result: dict[str, Any]) -> str:
+    """The one line a kept build put back is logged as (D3c)."""
+    return f"restored kept build {result['restored']} as {result['name']} (built earlier from this definition)"
+
+#: Seconds between ``env.build.progress`` events while environment builds run (D1/D1b ruling: 5 min).
+BUILD_HEARTBEAT_S = 300.0
+
+
+async def run_builds(builds: Any, *, record: Any, runner: Any) -> Any:
+    """``builds(on_start)`` in a worker thread, with the ledger told what it builds (D1/D1b).
+
+    ``on_start(env_id, cause)`` (called from the thread as a fresh build begins) records
+    ``env.build.start``; every :data:`BUILD_HEARTBEAT_S` the build still running records
+    ``env.build.progress``. Both are best effort: a progress note never changes what is built.
+    ``record(event, *, level, summary, data)`` is the caller's ledger. A cancel (a /stop) stops
+    ``runner``'s commands and re-raises; the builds' own exception propagates.
+    """
+    loop = asyncio.get_running_loop()
+    building: dict[str, Any] = {}  # the latest build started: its env, cause and start time
+
+    def on_start(env_id: str, cause: str | None) -> None:
+        building.update(env=env_id, cause=cause, since=time.monotonic())
+        try:
+            asyncio.run_coroutine_threadsafe(record(
+                "env.build.start", level=2, summary=f"Building ar-{env_id} ({cause})",
+                data={"env": env_id, "cause": cause},
+            ), loop)
+        except Exception:  # noqa: BLE001
+            pass
+
+    task = asyncio.ensure_future(asyncio.to_thread(builds, on_start))
+    started = time.monotonic()
+    try:
+        while not (await asyncio.wait({task}, timeout=BUILD_HEARTBEAT_S))[0]:
+            env_id = building.get("env")
+            minutes = (time.monotonic() - started) / 60
+            try:
+                await record(
+                    "env.build.progress", level=2,
+                    summary=(f"Environment builds still running ({minutes:.0f} min)"
+                             + (f"; the latest build started was ar-{env_id}, "
+                                f"{(time.monotonic() - building['since']) / 60:.0f} min ago"
+                                if env_id else "")),
+                    data={"env": env_id, "cause": building.get("cause"),
+                          "seconds": round(time.monotonic() - started, 1)},
+                )
+            except Exception:  # noqa: BLE001 — a progress note never decides the builds
+                pass
+    except asyncio.CancelledError:
+        runner.stop()
+        task.cancel()
+        raise
+    return task.result()
+
+
 def build_committed_environments(
-    toolkit_root: Path, env_ids: list[str], *, runner: Any = None,
+    toolkit_root: Path, env_ids: list[str], *, runner: Any = None, on_start: Any = None,
 ) -> list[dict[str, Any]]:
     """Build each committed definition into the runtime's agent conda dir (``ar-<env_id>``), as
     the catalogue and ``use_env`` read them; a rebuild moves the previous build aside. One result
-    per id: ``ok``, the environment name, its definition digest, seconds, or the error. Blocking."""
+    per id: ``ok``, the environment name, its definition digest, seconds, or the error, and
+    ``fresh`` (the reason, :func:`env_build.build`'s ``on_build``) when a fresh build started rather
+    than an intact prefix being reused — set as it starts, so a failed build carries it too. Blocking. ``on_start(env_id, reason)``, when given, is called from
+    this thread as a fresh build begins (D1/D1b)."""
     from auto_research.env import agent_conda_dir, analysis_environment, conda_executable, declared_externals
     import subprocess as _subprocess
 
-    from auto_research.sandbox.env_build import build, read_definition
+    from auto_research.sandbox.env_build import PACKAGE_ARCHIVE, build, read_definition
     from auto_research.sandbox.jail import jail_enabled
 
     runner = runner or _subprocess.run
@@ -1044,20 +1171,33 @@ def build_committed_environments(
             break  # a stop ends the remaining builds before any moves its predecessor aside
         started = time.monotonic()
         entry: dict[str, Any] = {"env": env_id}
+
+        def on_build(reason: str, env_id: str = env_id, entry: dict[str, Any] = entry) -> None:
+            entry["fresh"] = reason
+            if on_start is not None:
+                on_start(env_id, reason)
+
         try:
             definition = read_definition(Path(toolkit_root) / "envs" / env_id)
             entry["definition_sha256"] = definition.digest()
             environment = build(definition, conda_dir=agent_conda_dir(), conda_exe=conda_executable(),
-                                base_envs=bases, externals=externals, jailed=jail_enabled(), runner=runner)
+                                base_envs=bases, externals=externals, jailed=jail_enabled(), runner=runner,
+                                on_build=on_build, package_archive=agent_conda_dir() / PACKAGE_ARCHIVE,
+                                on_restore=lambda kept, entry=entry: entry.update(restored=kept))
             entry.update(ok=True, name=environment.name, prefix=str(environment.prefix))
         except Exception as exc:  # noqa: BLE001 — a failed build is reported; the commit stands
             entry.update(ok=False, error=f"{type(exc).__name__}: {str(exc)[-600:]}")
+            # A build of an earlier definition put back in use (D3b): said wherever this is.
+            if earlier_build_in_use(env_id, entry.get("definition_sha256")):
+                entry["previous_in_use"] = True
         entry["seconds"] = round(time.monotonic() - started, 1)
         results.append(entry)
     return results
 
 
-def reconcile_environments(toolkit_root: Path, *, runner: Any = None) -> list[dict[str, Any]]:
+def reconcile_environments(
+    toolkit_root: Path, *, runner: Any = None, on_start: Any = None,
+) -> list[dict[str, Any]]:
     """Every environment definition on the toolkit branch against its build, at launch (B3c-5).
 
     - a definition that does not validate → ``failed``; its build is left as it is;
@@ -1073,9 +1213,13 @@ def reconcile_environments(toolkit_root: Path, *, runner: Any = None) -> list[di
       admits is redone);
     - a built environment whose declared externals' stamps changed → reported and recorded.
 
-    One result per definition (``status``: ``ok``, ``built``, ``drift``, ``external_changed``,
-    ``failed``), plus ``tainted`` when an unjailed build ran in the conda dir and the jail is on.
-    Blocking; never raises for one environment."""
+    One result per definition (``status``: ``ok``, ``built``, ``restored`` — a kept build of this
+    definition put back, its name in ``restored`` —, ``drift``, ``external_changed``, ``failed``),
+    plus ``tainted`` when an unjailed build ran in the conda dir and the jail is on.
+    Blocking; never raises for one environment. ``on_start(env_id, cause)``, when given, is called
+    from this thread as each fresh build begins (``cause``: ``missing``, ``stale``, ``drift``, or
+    what :func:`env_build.build` found: ``unjailed``, ``tainted``, ``interrupted``); a reused prefix
+    is not announced (D1/D1b)."""
     from auto_research.env import agent_conda_dir, analysis_environment, declared_externals
     from auto_research.sandbox import env_build as B
     from auto_research.sandbox.envs import _external_stamp
@@ -1098,7 +1242,8 @@ def reconcile_environments(toolkit_root: Path, *, runner: Any = None) -> list[di
         try:
             problems = B.validate(envs_dir / env_id, base_envs=bases, externals=externals)
             if problems:
-                results.append({"env": env_id, "status": "failed", "error": "; ".join(problems)[-600:]})
+                results.append({"env": env_id, "status": "failed", "error": "; ".join(problems)[-600:],
+                                **({"previous_in_use": True} if earlier_build_in_use(env_id, None) else {})})
                 continue
             definition = B.read_definition(envs_dir / env_id)
             record = B.build_record(conda_dir, prefix)
@@ -1120,14 +1265,22 @@ def reconcile_environments(toolkit_root: Path, *, runner: Any = None) -> list[di
             if drift is None:
                 causes[env_id] = None
                 continue
+            if on_start is not None:
+                on_start(env_id, "drift")
             results.append(_rebuild_drifted(toolkit_root, env_id, prefix, record, drift, runner=runner,
                                             conda_dir=conda_dir, externals=externals, bases=bases))
         except Exception as exc:  # noqa: BLE001 — one environment's trouble is reported, never the launch's
             results.append({"env": env_id, "status": "failed", "error": f"{type(exc).__name__}: {str(exc)[-600:]}"})
-    built = build_committed_environments(toolkit_root, list(causes), runner=runner) if causes else []
+    started = ((lambda env_id, reason: on_start(env_id, causes.get(env_id) or reason))
+               if on_start is not None else None)
+    built = (build_committed_environments(toolkit_root, list(causes), runner=runner, on_start=started)
+             if causes else [])
     for entry in built:
-        cause = causes.get(entry["env"])
-        status = ("built" if cause else "ok") if entry["ok"] else "failed"
+        # The reconcile's own reading, else what `build` found (D1b: a record built unjailed, a
+        # tainted conda dir, a prefix gone): either way a fresh build reads `built`.
+        cause = causes.get(entry["env"]) or entry.get("fresh")
+        # A kept build of this definition put back is one event of its own: nothing was built (D3c).
+        status = ("restored" if entry.get("restored") else "built" if cause else "ok") if entry["ok"] else "failed"
         result = {**entry, "status": status, **({"cause": cause} if cause else {})}
         if entry["ok"]:
             changed = _external_changes(conda_dir, conda_dir / "envs" / f"ar-{entry['env']}", externals, B, _external_stamp)
@@ -1173,7 +1326,8 @@ def _rebuild_drifted(toolkit_root: Path, env_id: str, prefix: Path, record: dict
     built = builds[0] if builds else {"ok": False, "error": "stopped before the rebuild"}
     result = {"env": env_id, "status": "drift", "diff": drift, "fingerprint": fp, "rebuilt": built["ok"]}
     if built["ok"]:
-        return {**result, "kept": str(kept), "name": built["name"]}
+        return {**result, "kept": str(kept), "name": built["name"],
+                **({"restored": built["restored"]} if built.get("restored") else {})}
     if os.path.lexists(prefix):
         B._remove_tree(prefix)
     kept.rename(prefix)
@@ -1208,6 +1362,7 @@ def heal_toolkit_branch_if_dirty(
     branch = branch or _resolve_tool_author_branch()
     if not (root / ".git").exists():
         return BranchHealResult(False, "not_git")
+    base_ref: str | None = None
     try:
         remove_untracked_ignores(root)  # files a coder-written `.gitignore` hid become dirty
         purge_bytecode(root)  # git ignores bytecode: "clean" must not keep a planted `.pyc`
@@ -1225,8 +1380,14 @@ def heal_toolkit_branch_if_dirty(
             root, reset_to, Path(run_directory) / "authoring", patch_prefix="resume_heal",
         )
         return BranchHealResult(True, "healed", base_ref, patch_path)
+    except PatchSaveFailed as exc:
+        # The tree was reset; only its patch is missing, which the record says (C2d).
+        return BranchHealResult(True, "healed", base_ref, None,
+                                note=f"the patch of the discarded work could not be saved: {exc}")
     except Exception as exc:  # noqa: BLE001 — never crash the launch; the preflight is the loud backstop
-        return BranchHealResult(False, f"error: {exc!r}")
+        # A reset that failed after its patch was saved keeps the patch in the record (C2c).
+        patch = exc.patch if isinstance(exc, TreeResetFailed) else None
+        return BranchHealResult(False, f"error: {exc!r}", base_ref, patch)
 
 
 # Captured so ``propose_and_pr``'s ``approve_edit`` parameter (a test seam) can default to
@@ -1413,7 +1574,19 @@ class AuthoringSession:
     the lead — the plan owner — diagnoses each gate/review verdict itself rather than the run
     terminating. Build via :func:`build_authoring_session`; ``await connect()`` before use and
     ``await aclose()`` in a ``finally``.
+
+    **Bound to a brief (C3).** The lead's chain driver sets ``brief`` (a brief report of the lead's
+    turn) after building the session; ``tool_spec`` then reads that brief's current version, so the
+    coder (at session start and before each turn, a revision as a diff), the gate and the co-lead
+    (at each submission) read what the lead last wrote. Each read is recorded (``spec_reads``,
+    ``coder.toolspec.read``); the approving review's version is ``reviewed_spec_sha``, and the
+    commit locks the brief. Without a brief (``drive_authoring``, ``propose_and_pr``, the
+    benchmarks) the session authors the spec it was built with, as before.
     """
+
+    brief: Any | None = None
+    reviewed_spec_sha: str | None = None
+    _coder_seen: tuple[str, str] | None = None
 
     def __init__(
         self,
@@ -1438,6 +1611,7 @@ class AuthoringSession:
         env_tools: Any | None = None,
     ) -> None:
         self.tool_spec = tool_spec
+        self.spec_reads: list[dict[str, str]] = []
         self._env_tools = env_tools  # the attempt's candidate environments (B3c-3), cleared at close
         self.worktree = worktree
         self.branch = branch
@@ -1455,6 +1629,7 @@ class AuthoringSession:
         self.submits_used = 0
         self.debate_cap = debate_cap  # bounds respond_to_review (lead↔co-lead) turns
         self.debates_used = 0
+        self.colead_refunds = 0  # passing co-lead failures refunded so far (C3c, at most 3)
         self.last_gate: GateReport | None = None
         #: The changeset the co-lead's latest review saw (its files' identities); a commit must
         #: hold exactly it.
@@ -1468,6 +1643,14 @@ class AuthoringSession:
         # The reset asks `pending_changes()`; there is no separate boolean, because two fields
         # encoding one fact is how the meanings drifted apart in the first place.
         self.last_commit_sha: str | None = None
+        #: Every commit this session landed, oldest first, so the lead is told all of them (C2).
+        self.commits: list[str] = []
+        #: The patch the failure reset in `aclose` saved the uncommitted work to; None if none.
+        self.reset_patch: Path | None = None
+        #: True when that reset failed, so the toolkit tree may still hold the work (C2b).
+        self.reset_failed = False
+        #: True when the tree was reset but saving its patch failed, so the work is gone (C2c).
+        self.reset_save_failed = False
         #: What building the last commit's environments came to, for the lead (B3c-4); "" if none.
         self.env_note = ""
         self._backend = backend
@@ -1524,7 +1707,61 @@ class AuthoringSession:
         **Blocking.** :meth:`start_drive` is the non-blocking form the lead uses (B1) — this one
         remains because ``drive_authoring`` and the seed call still want to wait.
         """
-        return await self._backend.drive(message)
+        return await self._backend.drive(await self._coder_instruction(message))
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        """What this session authors: its bound brief's current version (C3), else the spec it was
+        built with."""
+        brief = self.brief
+        return brief.value if brief is not None else self._tool_spec
+
+    @tool_spec.setter
+    def tool_spec(self, value: ToolSpec) -> None:
+        self._tool_spec = value
+
+    async def _brief_read(self, by: str, sha: str | None = None) -> None:
+        """Record that ``by`` (coder, gate, co-lead) read the bound brief: version ``sha``, else the
+        current one."""
+        brief = self.brief
+        if brief is None:
+            return
+        sha = sha or brief.sha256
+        self.__dict__.setdefault("spec_reads", []).append({"by": by, "sha256": sha})
+        await _emit(
+            self._monitor, "coder.toolspec.read", level=6,
+            summary=f"{by} read brief {brief.id} version {sha[:8]}",
+            data={"by": by, "brief": brief.id, "sha256": sha},
+        )
+
+    def _brief_version(self) -> tuple[str, str] | None:
+        """The bound brief's current version and document, as an instruction composed now reads it."""
+        brief = self.brief
+        return None if brief is None else (brief.sha256, brief.document())
+
+    async def _coder_instruction(self, message: str, version: tuple[str, str] | None = None) -> str:
+        """The instruction a coder turn receives: led by the brief's revision as a diff when the
+        lead changed the brief since the coder last read it (C3). ``version`` is the brief as it
+        stood when the instruction was composed (the seed's), else the current one."""
+        brief = self.brief
+        if brief is None:
+            return message
+        sha, document = version or self._brief_version()
+        seen, self._coder_seen = self._coder_seen, (sha, document)
+        if seen is not None and seen[0] == sha:
+            return message
+        await self._brief_read("coder", sha)
+        if seen is None:
+            return message  # the seed: the brief itself is in it
+        diff = "\n".join(difflib.unified_diff(
+            seen[1].splitlines(), document.splitlines(),
+            f"brief {brief.id} version {seen[0][:8]}", f"brief {brief.id} version {sha[:8]}",
+            lineterm="",
+        ))
+        return (
+            f"The lead revised your brief {brief.id}; it is now version {sha[:8]}. The change:\n"
+            f"{diff}\n\n{message}"
+        )
 
     # ── the second screen: the coder runs BESIDE the lead (B1) ────────────────
     #
@@ -1616,9 +1853,15 @@ class AuthoringSession:
         self._drive_status = "working"
         self._question_open = False
         self._drive_started_at = time.monotonic()
-        self._drive_task = asyncio.create_task(self._drive_in_background(message))
+        # The brief as the instruction was composed (C3): a seed built from it carries it, even
+        # when the lead revises the brief before the task first runs.
+        self._drive_task = asyncio.create_task(
+            self._drive_in_background(message, self._brief_version())
+        )
 
-    async def _drive_in_background(self, message: str) -> str:
+    async def _drive_in_background(
+        self, message: str, version: tuple[str, str] | None = None
+    ) -> str:
         """The background half of :meth:`start_drive`.
 
         Runs the instruction, then any messages queued meanwhile as the NEXT turn, in the same
@@ -1631,7 +1874,8 @@ class AuthoringSession:
         """
         while True:
             try:
-                text = await self._backend.drive(message)
+                text = await self._backend.drive(await self._coder_instruction(message, version))
+                version = None  # a queued turn reads the brief as it stands when it starts
             except asyncio.CancelledError:
                 self._drive_status = "cancelled"
                 self._queued = []
@@ -1839,6 +2083,7 @@ class AuthoringSession:
                     summary=f"submission snapshot failed: {type(exc).__name__}: {exc}",
                     data={"error": repr(exc)},
                 )
+        await self._brief_read("gate")
         try:
             g = await self._run_gate(self.worktree, self.tool_spec)
         except (OSError, ValueError, subprocess.SubprocessError, RecursionError, MemoryError) as exc:
@@ -1884,6 +2129,9 @@ class AuthoringSession:
         except (OSError, ValueError):
             # Unreadable now: no commit may claim this review (never a silent off-switch).
             self._reviewed_manifest = {"<unreadable at review>": ""}
+        await self._brief_read("co-lead")
+        if self.brief is not None:
+            self.reviewed_spec_sha = self.brief.sha256
         if lead_rebuttal is not None:
             # Debate turn: the co-lead reconsiders its prior verdict given the lead's argument.
             # Only this path needs the extended hook kwargs, so the plain auto-loop / submit path
@@ -1925,6 +2173,9 @@ class AuthoringSession:
             # commit ⇔ gate ∧ review over the SAME tree: a re-gate after a rebuttal may have judged
             # files the co-lead never saw (B3c-1 review 8).
             raise RuntimeError("the changeset changed after the co-lead reviewed it; submit again")
+        if self.brief is not None and self.brief.sha256 != self.reviewed_spec_sha:
+            # commit ⇔ review of the SAME brief (C3): the receipt names the version reviewed.
+            raise RuntimeError("the brief changed after the co-lead reviewed it; submit again")
         try:
             # Before staging: a purge that cannot finish stops the commit, honestly.
             purge_bytecode(self.worktree)
@@ -1934,6 +2185,9 @@ class AuthoringSession:
                                          base=self.last_gate.base)
                       if manifest is not None else self._approve_edit(self.worktree, message=message))
         self.last_commit_sha = commit_sha
+        if self.brief is not None:
+            self.brief.lock("commit")  # the link's consumption milestone (C3)
+        self.commits.append(commit_sha)
         # The base ref means "the commit this attempt's work sits on", so once approve_edit lands
         # one, that commit IS the base. Advancing it here corrects all three readers at once:
         # the §9.9 gate-entry backstop below (which reverts on a moved HEAD and cannot otherwise
@@ -1980,8 +2234,17 @@ class AuthoringSession:
                         await _emit(self._monitor, "env.forget", level=3,
                                     summary=f"ar-{env_id} removed from the catalogue",
                                     data={"commit_sha": self.last_commit_sha, "env": env_id})
-            results = (await asyncio.to_thread(build_committed_environments, self.worktree, env_ids, runner=runner)
-                       if env_ids else [])
+            async def record(event: str, *, level: int, summary: str, data: dict) -> None:
+                await _emit(self._monitor, event, level=level, summary=summary,
+                            data={"commit_sha": self.last_commit_sha, **data})
+
+            # A commit's build can take half an hour as well: the same start and heartbeat events
+            # as the launch reconcile (D1b).
+            results = (await run_builds(
+                lambda on_start: build_committed_environments(
+                    self.worktree, env_ids, runner=runner, on_start=on_start),
+                record=record, runner=runner,
+            ) if env_ids else [])
         except asyncio.CancelledError:
             runner.stop()  # a stop ends the build's conda and pip, not only this coroutine
             # The commit stands without its environments: said in the ledger; the launch drift
@@ -2000,19 +2263,27 @@ class AuthoringSession:
                     f"{_cap_text(str(exc), 300)}); the commit stands. State this in your report.{removed}")
         for result in results:
             await _emit(
-                self._monitor, "env.build" if result["ok"] else "env.build.error", level=3,
-                summary=(f"built {result['name']} in {result['seconds']}s" if result["ok"]
-                         else f"ar-{result['env']} did not build: {_cap_text(result['error'], 200)}"),
+                self._monitor, ("env.restored" if result.get("restored") else "env.build") if result["ok"]
+                else "env.build.error", level=3,
+                summary=(restored_summary(result) if result.get("restored") else
+                         f"built {result['name']} in {result['seconds']}s" if result["ok"]
+                         else f"ar-{result['env']} did not build: {_cap_text(result['error'], 200)}"
+                         + (PREVIOUS_IN_USE if result.get("previous_in_use") else "")),
                 data={"commit_sha": self.last_commit_sha, **result},
             )
-        built = [r["name"] for r in results if r["ok"]]
+        built = [r["name"] for r in results if r["ok"] and not r.get("restored")]
+        restored = [r["name"] for r in results if r["ok"] and r.get("restored")]
         failed = [r for r in results if not r["ok"]]
         note = f" Environment{'s' if len(built) > 1 else ''} built: {', '.join(built)}." if built else ""
+        if restored:
+            note += (f" Environment{'s' if len(restored) > 1 else ''} restored from a kept build of "
+                     f"{'their' if len(restored) > 1 else 'its'} definition: {', '.join(restored)}.")
         if dropped:
             note += f" Removed from the catalogue (definition deleted): {', '.join(f'ar-{i}' for i in dropped)}."
         for result in failed:
             note += (f" The environment ar-{result['env']} did not build ({_cap_text(result['error'], 300)}); "
-                     "the commit stands. State this in your report.")
+                     "the commit stands." + (PREVIOUS_IN_USE if result.get("previous_in_use") else "")
+                     + " State this in your report.")
         return note
 
     async def aclose(self) -> None:
@@ -2038,7 +2309,10 @@ class AuthoringSession:
         Idempotent: a human interrupt closes the session from shielded cleanup (its normal
         ``finally`` is inside the cancelled scope), and the ``finally`` may still run afterwards —
         a second reset would discard a base ref's worth of nothing, but the disconnect and the
-        patch artifact would be repeated for no reason.
+        patch artifact would be repeated for no reason. A close whose disconnect raised (C2b) has
+        settled the tree; a later close (the run's teardown, C2c) retries the disconnect alone,
+        because a reset to this session's base ref would roll the shared branch back past every
+        commit a later link landed.
         """
         # Closed only once everything below finished (D8): a close cut short by a cancel — a
         # human /stop landing while the lead's own close disconnects the coder — leaves the
@@ -2048,12 +2322,26 @@ class AuthoringSession:
             return
         self._closing = True
         try:
+            if getattr(self, "_disconnect_pending", False):
+                await self._backend.disconnect()
+                self._disconnect_pending = False
+                self._closed = True
+                return
             if self._env_tools is not None:
                 self._env_tools.close()  # a tool still running writes nothing into the tree being reset
             # B2: the background drive dies before the backend goes away and before the tree is
             # touched, so a coder cannot be writing into a worktree that is being reset under it.
             await self._cancel_drive()
-            await self._backend.disconnect()
+            # A disconnect that raises is held until the tree is reset (C2b): raising at once left
+            # the unbanked work in the tree the workers' registry reloads from.
+            disconnect_error: Exception | None = None
+            try:
+                await self._backend.disconnect()
+            except Exception as exc:  # noqa: BLE001 — raised below, once the tree is reset
+                disconnect_error = exc
+                await _emit(self._monitor, "coder.disconnect.error", level=3,
+                            summary=f"coder disconnect failed: {type(exc).__name__}: {exc}",
+                            data={"error": repr(exc)})
             if self._direct_branch is not None:
                 # Git ignores bytecode and anything an untracked `.gitignore` hides, so `pending_changes`
                 # alone would miss a planted `numpy.pyc` or a hidden `json/` package (B3c-1 reviews
@@ -2066,10 +2354,12 @@ class AuthoringSession:
                                     summary=f"{step.__name__} failed: {type(exc).__name__}: {exc}",
                                     data={"error": repr(exc)})
             if self._direct_branch is not None and self.pending_changes():
-                await _reset_direct_tree(
+                reset = await _reset_direct_tree(
                     self._toolkit_root, base_ref=self._base_ref, artifact_dir=self._worktree_base,
                     monitor=self._monitor, tool_spec=self.tool_spec,
                 )
+                self.reset_patch, self.reset_failed = reset.patch, not reset.cleared
+                self.reset_save_failed = reset.save_error is not None
             if self._env_tools is not None:
                 # The candidate environments end with the attempt; a committed definition is built
                 # again from the branch (B3c-4).
@@ -2079,7 +2369,12 @@ class AuthoringSession:
                     await _emit(self._monitor, "coder.env_cand.cleanup_error", level=3,
                                 summary=f"candidate environments not removed: {type(exc).__name__}: {exc}",
                                 data={"error": repr(exc)})
-            self._closed = True
+            # A failed disconnect leaves the session open (C2c): the run's teardown closes it
+            # again, and that close retries the disconnect only (see the docstring).
+            self._closed = disconnect_error is None
+            if disconnect_error is not None:
+                self._disconnect_pending = True
+                raise disconnect_error
         finally:
             self._closing = False
 

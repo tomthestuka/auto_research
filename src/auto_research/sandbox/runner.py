@@ -92,6 +92,18 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
     return env
 
 
+def builtin_function_source(name: str) -> str:
+    """The source text of one function of ``builtin_server.py``, read without importing the server
+    (it starts an MCP instance on import): the one definition of a rule the REPL script and the
+    gate's recorder run too (``private_param_dir``)."""
+    import ast
+
+    path = Path(__file__).with_name("builtin_server.py")
+    text = path.read_text(encoding="utf-8")
+    node = next(n for n in ast.parse(text).body if isinstance(n, ast.FunctionDef) and n.name == name)
+    return ast.get_source_segment(text, node) + "\n"
+
+
 def with_private_param_dir(
     env: dict[str, str], private: Path | str, *, create: Path | str | None = None,
 ) -> dict[str, str]:
@@ -169,7 +181,7 @@ def check_analyze_probe(*, config_path: str | Path | None = None) -> None:
 
 
 PROTOCOL_KEYS: frozenset[str] = frozenset(
-    {"stdout", "stderr", "exit_code", "figures", "console_tail"}
+    {"stdout", "stderr", "exit_code", "figures", "products", "console_tail"}
 )
 
 

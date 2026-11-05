@@ -45,7 +45,7 @@ class Block:
 
     name: str
     field: str
-    kind: str  # text | line | value | bool | list | figures | handles | keyvalue | claims | sections | tables
+    kind: str  # text | line | value | bool | list | figures | handles | keyvalue | claims | sections | tables | datasets | checks
     hint: str
 
 
@@ -96,6 +96,26 @@ LIBRARIAN_BLOCKS: tuple[Block, ...] = (
           "one '- claim' item per claim your sources support, then an indented "
           "'support: lib:p1, lib:w2' line naming the documents behind it"),
     Block("gaps", "gaps", "list", "one '- ' item per question no document answered or source you could not read"),
+)
+
+#: A tool brief (``ToolSpec``) as a document (C3): one block per field the lead writes; its ``id``
+#: and ``created_at`` are the runtime's.
+TOOLSPEC_BLOCKS: tuple[Block, ...] = (
+    Block("proposed_tool_name", "proposed_tool_name", "line", "the tool's name, one line"),
+    Block("request_kind", "request_kind", "value", "new_capability or fix_existing"),
+    Block("target_domain", "target_domain", "line", "the <domain>_utils package the tool goes in"),
+    Block("disposition", "disposition", "value", "extend_existing or new_package"),
+    Block("science_context", "science_context", "text", "what is measured and why the toolkit cannot do it yet"),
+    Block("expected_behavior", "expected_behavior", "text",
+          "the brief itself: signature, inputs, outputs and the procedure, at algorithm level"),
+    Block("observed_issue", "observed_issue", "text", "for fix_existing: the symptom observed"),
+    Block("validation_data", "validation_data", "datasets",
+          "one '- MISSION | OBSID' line per input the checks run on; add ' | synthetic' for a marked "
+          "synth<YYMMDD>-<hex> ObsID the coder's tests build in their fixture obs-db"),
+    Block("proposed_checks", "proposed_checks", "checks",
+          "one '- kind: description' item per must-have test; an indented 'tolerance: x' line when one applies"),
+    Block("replication_tolerance", "replication_tolerance", "value", "a number, when a numeric tolerance applies"),
+    Block("notes", "notes", "text", "anything else the coder should know"),
 )
 
 _TOOL_REQUEST_KEYS = (
@@ -153,6 +173,19 @@ def _block_body(block: Block, value: Any) -> list[str]:
                 f"validation_data: {entry.get('mission', '')} {entry.get('obsid', '')}"
                 + (" synthetic" if entry.get("synthetic") else "")
             )
+        return out
+    if kind == "datasets":
+        return [
+            f"- {entry.get('mission', '')} | {entry.get('obsid', '')}"
+            + (" | synthetic" if entry.get("synthetic") else "")
+            for entry in value
+        ]
+    if kind == "checks":
+        out = []
+        for check in value:
+            out.extend(_item_lines(f"{check.get('kind', '')}: {check.get('description', '')}"))
+            if check.get("tolerance") is not None:
+                out.append(f"  tolerance: {check['tolerance']}")
         return out
     if kind == "sections":
         out = []
@@ -306,6 +339,32 @@ def _parse_block(block: Block, lines: list[str], problems: list[str]) -> tuple[b
         if datasets:
             request["validation_data"] = datasets
         return True, request
+    if kind == "datasets":
+        datasets: list[dict] = []
+        for item in _items(lines, name, problems):
+            text = _joined(item)
+            # '|' separates the parts, so a mission named with spaces ('Cyg X-1') is kept whole;
+            # a line without one is read word by word.
+            parts = [p.strip() for p in text.split("|")] if "|" in text else text.split()
+            if len(parts) < 2 or not parts[0] or not parts[1]:
+                problems.append(f"# {name}: each line is '- MISSION | OBSID'; one reads {text[:60]!r}.")
+                continue
+            datasets.append({"mission": parts[0], "obsid": parts[1],
+                             "synthetic": "synthetic" in (p.lower() for p in parts[2:])})
+        return True, datasets
+    if kind == "checks":
+        checks: list[dict] = []
+        for item in _items(lines, name, problems):
+            body = list(item)
+            tolerance = None
+            if body and body[-1].strip().lower().startswith("tolerance:"):
+                tolerance = body.pop().strip()[10:].strip()
+            head, sep, rest = _joined(body).partition(":")
+            if not sep or not head.strip() or not rest.strip():
+                problems.append(f"# {name}: each item is '- kind: description'; one reads {_joined(body)[:60]!r}.")
+                continue
+            checks.append({"kind": head.strip(), "description": rest.strip(), "tolerance": tolerance})
+        return True, checks
     if kind in ("sections", "tables"):
         groups: list[tuple[str, list[str]]] = []
         for line in lines:

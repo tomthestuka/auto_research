@@ -1,7 +1,7 @@
 """Opt-in LIVE cells for the report form and its diagnostics (plan rows A1–A4, run 32814459).
 
-    AUTO_RESEARCH_LIVE_REPORT_FORM=1 pytest tests/test_live_report_form.py -s
-    AUTO_RESEARCH_LIVE_REPORT_FORM=1 pytest tests/test_live_report_form.py -s -k blue_worker
+    pytest tests/test_live_report_form.py --live -s
+    pytest tests/test_live_report_form.py --live -s -k blue_worker
 
 **Blue team** (honest seats, production prompts, no hint about the form): each seat files a report
 whose results sit in `findings`, whose `summary` is a short briefing and whose figures are cited —
@@ -39,10 +39,7 @@ from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_REPORT_FORM") != "1",
-    reason="set AUTO_RESEARCH_LIVE_REPORT_FORM=1 to spend provider tokens on the report-form cells",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

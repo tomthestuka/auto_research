@@ -1,8 +1,8 @@
-"""Env-gated LIVE test: web_fetch reads a real page in full as Markdown via Tavily Extract,
+"""Opt-in LIVE test: web_fetch reads a real page in full as Markdown via Tavily Extract,
 and pages it like read_file ([I10]).
 
 Activate with:
-    AUTO_RESEARCH_LIVE_WEB_FETCH_TESTS=1 pytest tests/test_live_web_fetch.py -q
+    pytest tests/test_live_web_fetch.py --live -q
 
 What it proves against the real Tavily Extract endpoint (the external dependency): a reference
 URL comes back as non-empty Markdown, `execute_web_fetch` renders it `cat -n` and — with a small
@@ -21,10 +21,7 @@ from dotenv import load_dotenv
 from auto_research.agents.react import execute_web_fetch
 from auto_research.sources import WebSource
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_WEB_FETCH_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_WEB_FETCH_TESTS=1 to run the live web_fetch test (spends a Tavily credit)",
-)
+pytestmark = pytest.mark.live
 
 _URL = "https://en.wikipedia.org/wiki/X-ray_binary"  # stable, long, on-domain reference page
 

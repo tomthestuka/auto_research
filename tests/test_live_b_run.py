@@ -2,7 +2,7 @@
 
 Activate with::
 
-    AUTO_RESEARCH_LIVE_B_RUN=1 pytest tests/test_live_b_run.py -s
+    AUTO_RESEARCH_LIVE_B_RUN=1 pytest tests/test_live_b_run.py --live -s
 
 Question is **#21** (`bhxrb_intraobs_qu_lag_crosscorr`), assembled verbatim from the PI research
 database exactly as `notebooks/usage_example.ipynb` does — same source of record, so this drives the
@@ -55,10 +55,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-LIVE = os.getenv("AUTO_RESEARCH_LIVE_B_RUN") == "1"
 HITL = os.getenv("AUTO_RESEARCH_B_RUN_HITL") == "1"
 _OVERWRITE = os.getenv("AUTO_RESEARCH_B_RUN_OVERWRITE") == "1"
-skip_live = pytest.mark.skipif(not LIVE, reason="Set AUTO_RESEARCH_LIVE_B_RUN=1 to run")
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
+    os.getenv("AUTO_RESEARCH_LIVE_B_RUN") != "1",
+    reason="set AUTO_RESEARCH_LIVE_B_RUN=1 with --live: it launches on the real Telegram channel, kills "
+    "backend trees and leaves the configured toolkit branch dirty mid-authoring",
+)]
 
 RESEARCH_DB = "/data/fzhou/ai-team/analysis_pipeline_mcp/ixpe_research_database.json"
 PROJECT_ID = "bhxrb_intraobs_qu_lag_crosscorr"
@@ -208,7 +211,6 @@ def _toolkit_dirty() -> bool:
 # ── preconditions ───────────────────────────────────────────────────────────────
 
 
-@skip_live
 def test_b_run_preconditions() -> None:
     """Every no-LLM precondition, before a paid run starts.
 
@@ -230,7 +232,6 @@ def test_b_run_preconditions() -> None:
 # ── the run: launch → kill mid-analysis → resume → kill mid-authoring → resume ──
 
 
-@skip_live
 def test_b_run_drills() -> None:
     """Drive the whole B-run, performing both kills at their marker events.
 
@@ -297,7 +298,6 @@ def test_b_run_drills() -> None:
     print("[B-run] B3/B5 evidence present; assertions in test_b_run_evidence")
 
 
-@skip_live
 def test_b_run_midauthoring_kill_heals() -> None:
     """B3: kill **mid-authoring** so the `ai` branch is left dirty, then resume and self-heal.
 
@@ -347,7 +347,6 @@ def test_b_run_midauthoring_kill_heals() -> None:
 # ── post-hoc evidence (re-runnable, spends nothing) ─────────────────────────────
 
 
-@skip_live
 def test_b_run_evidence() -> None:
     """B1 / B5 / F1 / D2 over the artifacts the run already wrote.
 
@@ -455,7 +454,7 @@ def test_b_run_evidence() -> None:
     assert not failures, "B-run evidence gaps:\n  - " + "\n  - ".join(failures)
 
 
-@pytest.mark.skipif(not (LIVE and HITL), reason="Set AUTO_RESEARCH_B_RUN_HITL=1 with a human present")
+@pytest.mark.skipif(not HITL, reason="Set AUTO_RESEARCH_B_RUN_HITL=1 with a human present")
 def test_b_run_hitl_commands() -> None:
     """B4 + E1: slash-commands over Telegram. **A human must drive this from the phone.**
 

@@ -9,7 +9,7 @@
 # ── Tier 1: banned vocabulary (hard-fail) ──
 # Prefer phrases over bare words where a legit collision exists ("dummy data" not "dummy" so
 # "dummy variable" survives; "toy data" not "toy"). Banning "synthetic" does NOT catch a
-# `synth<YYMMDD>-<sha>` ObsID token, so §9.5 fixtures stay legal via the allowlist below.
+# `synth<YYMMDD>-<sha>` ObsID token, so §9.5 fixtures in a package's tests/ stay legal via the allowlist below.
 hard_fail_vocabulary:
   # fabrication words (bare ambiguous descriptors → finding_vocabulary; see below)
   - example data
@@ -98,6 +98,6 @@ finding_code_patterns:
   - tf.random
 
 # ── Allowlist: ObsID/path tokens exempt from the vocabulary scan (regex, per line) ──
-# Belt-and-suspenders so a marked synth ObsID (§9.5, `synth<YYMMDD>-<sha>`) never trips the scan.
+# A marked synth ObsID (§9.5, `synth<YYMMDD>-<sha>`) in a package's tests/ is exempt; in lib/ or skills/ it is scanned.
 allowlist_obsid_tokens:
   - 'synth\d{6}'

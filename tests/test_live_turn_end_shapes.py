@@ -1,6 +1,6 @@
 """Opt-in LIVE check of EVERY shape the lead's report can take, one dispatched agent per shape.
 
-    AUTO_RESEARCH_LIVE_TURN_END_SHAPES=1 pytest tests/test_live_turn_end_shapes.py -s
+    pytest tests/test_live_turn_end_shapes.py --live -s
 
 **Why this exists, and why it is shaped this way.** The lead's report is its decision (A3), and
 `turn_end` is the door: `edit_report` stays permissive so a partial write mid-turn is legal, and
@@ -43,10 +43,7 @@ from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_TURN_END_SHAPES") != "1",
-    reason="set AUTO_RESEARCH_LIVE_TURN_END_SHAPES=1 to spend provider tokens on the shapes",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

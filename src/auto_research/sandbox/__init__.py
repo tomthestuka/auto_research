@@ -13,7 +13,6 @@ from auto_research.sandbox.review import (
 from auto_research.sandbox.runner import run_tool
 from auto_research.sandbox.workspace import (
     create_run_workspace,
-    figures_dir,
     run_dir,
 )
 
@@ -25,7 +24,6 @@ __all__ = [
     "build_diff_bundle",
     "check_author_reviewer_decorrelation",
     "create_run_workspace",
-    "figures_dir",
     "make_review_hook",
     "propose_and_pr",
     "run_dir",

@@ -1,9 +1,9 @@
-"""Env-gated LIVE tests of the quick channel between seats (E12).
+"""Opt-in LIVE tests of the quick channel between seats (E12).
 
 Activate with:
-    AUTO_RESEARCH_LIVE_CHANNEL=1 pytest tests/test_live_channel.py -s
-    AUTO_RESEARCH_LIVE_CHANNEL=1 pytest tests/test_live_channel.py -s -k matrix      # the ping matrix
-    AUTO_RESEARCH_LIVE_CHANNEL=1 pytest tests/test_live_channel.py -s -k attack      # the two attacks
+    pytest tests/test_live_channel.py --live -s
+    pytest tests/test_live_channel.py --live -s -k matrix      # the ping matrix
+    pytest tests/test_live_channel.py --live -s -k attack      # the two attacks
     AUTO_RESEARCH_CHANNEL_PAIRS='analyst_lead>analyst_worker_0,reviewer>human' ...   # a subset
 
 Real configured models in every seat (resolved through the configuration pointer, so
@@ -43,10 +43,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_CHANNEL") != "1",
-    reason="set AUTO_RESEARCH_LIVE_CHANNEL=1 to spend provider tokens on the channel cells",
-)
+pytestmark = pytest.mark.live
 
 STAMP = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "E12" / STAMP

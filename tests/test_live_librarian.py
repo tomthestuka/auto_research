@@ -1,6 +1,6 @@
 """Live: the librarian researches a real request and files a report bound to what it read.
 
-Env-gated (``AUTO_RESEARCH_LIVE_LIBRARIAN=1``) because it spends provider tokens and downloads real
+Opt-in (``--live``) because it spends provider tokens and downloads real
 papers. The librarian is built the way ``graph/runtime.py`` builds it — no model passed, so its
 seat resolves through the configuration pointer (``--seats`` / ``AUTO_RESEARCH_SEATS``) — with its
 real prompt, real sources, the real Docling parse and a real receipt store.
@@ -19,17 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_LIBRARIAN") != "1",
-    reason="set AUTO_RESEARCH_LIVE_LIBRARIAN=1 to spend provider tokens on a librarian research loop",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

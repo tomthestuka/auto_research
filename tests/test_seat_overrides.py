@@ -36,7 +36,6 @@ def test_one_role_one_member():
     assert list(parsed) == ["analyst_lead"]
     (member,) = parsed["analyst_lead"]
     assert (member.provider, member.model) == ("openai", "gpt-5.6-terra")
-    assert member.vision and member.documents
 
 
 def test_several_roles_and_a_two_member_group():
@@ -49,12 +48,11 @@ def test_several_roles_and_a_two_member_group():
     assert [m.provider for m in parsed["analyst_worker"]] == ["anthropic", "dashscope"]
 
 
-def test_capability_flags_clear_the_declaration():
-    """A text-only member must be *expressible*, since the declaration is what the guard reads."""
-    parsed = parse_seats("analyst_colead=deepseek:deepseek-v4-pro!novision!nodocs")
-    (member,) = parsed["analyst_colead"]
-    assert not member.vision
-    assert not member.documents
+def test_a_member_is_written_without_capability_flags():
+    """A1: what a member may be sent is its adapter's declaration, so the written member carries
+    no `vision`/`documents` key (the registry refuses one) and a text-only model needs no flag."""
+    (member,) = parse_seats("analyst_colead=deepseek:deepseek-v4-pro")["analyst_colead"]
+    assert "vision" not in member.member() and "documents" not in member.member()
 
 
 def test_whitespace_around_a_clause_is_ignored():
@@ -139,12 +137,10 @@ def test_an_explicit_parameters_argument_wins_over_the_pin():
     assert member.parameters == {"reasoning": {"effort": "low"}}
 
 
-def test_a_sweep_seat_round_trips_with_its_flags_and_price():
+def test_a_sweep_seat_round_trips_with_its_price():
     arms = pytest.importorskip("benchmarks.science_bench.arms")
     override = from_seat(arms.COLEAD)
     assert (override.provider, override.model) == (arms.COLEAD.provider, arms.COLEAD.model)
-    assert override.vision == arms.COLEAD.vision
-    assert override.documents == arms.COLEAD.documents
     assert override.parameters == arms.COLEAD.parameters()
     assert override.priceMTk == arms.COLEAD.price()
 
@@ -239,7 +235,7 @@ def test_by_default_the_session_overrides_nothing(_seat_overrides):
 def test_the_live_coding_tests_coder_seat_builds_for_every_harness(monkeypatch, choice):
     """The seat a paid live test opens with is constructed for free, here.
 
-    A live test dies at construction just as easily as it dies at a model call, and the env flag in
+    A live test dies at construction just as easily as it dies at a model call, and the `--live` gate in
     front of it means it gets far fewer chances to be caught than an ordinary source branch (the
     2026-08-20 lesson). Measured: the first launch of the rebuilt chain test spent nothing and
     failed on ``FrozenInstanceError`` assigning to ``SeatOverride.harness`` — a frozen dataclass,

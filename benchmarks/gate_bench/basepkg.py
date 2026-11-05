@@ -141,11 +141,14 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "csv_path": {
+                    "kind": "path",
                     "type": "string",
                     "description": "Path of the reduced product CSV to summarize.",
                 },
                 "min_total_counts": {
+                    "kind": "parameter",
                     "type": "number",
+                    "default": 0.0,
                     "description": "Exclude rows whose two bands sum below this count.",
                 },
             },
@@ -366,6 +369,23 @@ def make_synthetic_repo(dest: Path) -> Path:
     _git(dest, "add", "-A")
     _git(dest, "commit", "-qm", "base")
     return dest
+
+
+def add_catalog_writer(repo: Path, toolkit_root: Path, toolkit_sha: str) -> None:
+    """Commit the toolkit's catalog writer (``obsdb_catalog``, whole, at ``toolkit_sha``) into
+    ``repo``'s base, as the toolkit an obs-db tool is authored in carries it: the gate
+    imports it from the tree under test to judge an obs-db write."""
+    import io
+    import tarfile
+
+    archive = subprocess.run(
+        ["git", "archive", "--format=tar", toolkit_sha, "obsdb_catalog"],
+        cwd=str(toolkit_root), capture_output=True, check=True,
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(repo, filter="data")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "catalog writer")
 
 
 def _git(repo: Path, *args: str) -> str:

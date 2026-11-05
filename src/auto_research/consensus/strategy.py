@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from auto_research.agents.roles import ProviderTurnFailed
+from auto_research.agents.roles import ModelCallFailed
 from auto_research.monitor import RunMonitor
 from auto_research.schemas import (
     AnalysisTask,
@@ -174,20 +174,45 @@ class DebateToConverge:
             # is missing, so a thinner set reads as a failure and never as agreement.
             sources, filed = _filed(workers, reports)
             await self._notify_lead(lead, workers, reports)
-            outcome = await lead.run_cycle(
-                task,
-                filed,
-                sources=sources,
-                # Rounds the cap still allows AFTER this cycle — what request_another_round is
-                # measured against, so the handler can refuse it with the cap named.
-                rounds_left=max(0, self.max_rounds - debate_round - 1),
-                author_budget=author_budget,
-                toolkit_root=self.toolkit_root,
-                worktree_base=self.worktree_base or self.toolkit_root,
-                direct_branch=self.direct_branch,
-                colead=self.colead,
-                human_handler=self.human_handler,
-            )
+            try:
+                outcome = await lead.run_cycle(
+                    task,
+                    filed,
+                    sources=sources,
+                    # Rounds the cap still allows AFTER this cycle — what request_another_round is
+                    # measured against, so the handler can refuse it with the cap named.
+                    rounds_left=max(0, self.max_rounds - debate_round - 1),
+                    author_budget=author_budget,
+                    toolkit_root=self.toolkit_root,
+                    worktree_base=self.worktree_base or self.toolkit_root,
+                    direct_branch=self.direct_branch,
+                    colead=self.colead,
+                    human_handler=self.human_handler,
+                )
+            except ModelCallFailed as exc:
+                # The credits the failed cycle spent are charged, as a filed cycle's are (C3b):
+                # per analysis, never refilled (N11).
+                spent = getattr(exc, "cycle_outcome", None)
+                if spent is not None:
+                    self._credits.spent += max(0, author_budget - spent.author_budget)
+                # The lead's turn ended on a failed model call (A4b): the pass returns to the
+                # reviewer without a report. A tool its chain committed before the failure must be
+                # callable in the next pass, and the cycle's commit count went with the failure,
+                # so whenever authoring could have run the toolkit is reloaded and the workers'
+                # backends restarted (ruling (b)).
+                if self.toolkit_root is not None:
+                    try:
+                        await self._reload_toolkit(workers)
+                    except Exception as reload_exc:  # noqa: BLE001 — the lead's failure is the news
+                        # Said loudly, and the lead's failure still reaches the graph node, which
+                        # returns the pass to the reviewer.
+                        await _record(
+                            self.monitor, "analyst.toolkit.reload_error", level=1,
+                            summary=f"Reloading the toolkit after the lead's failure failed: "
+                            f"{reload_exc!r}",
+                            data={"error": repr(reload_exc)},
+                        )
+                raise
             self._credits.spent += max(0, author_budget - outcome.author_budget)
             author_budget = outcome.author_budget
             report = outcome.report
@@ -297,28 +322,7 @@ class DebateToConverge:
         if getattr(outcome.report, "rework", False):
             task = _augment_with_probe(task, outcome.report)
         if outcome.committed >= 1:
-            if self.registry is not None and hasattr(self.registry, "reload"):
-                self.registry.reload()
-                broken = dict(getattr(self.registry, "import_errors", None) or {})
-                if broken:  # the commit's package (or another) now exposes no tools: say so loudly
-                    await _record(
-                        self.monitor, "analyst.toolkit.load_error", level=2,
-                        summary="toolkit packages expose no tools after the reload: "
-                        + "; ".join(f"{pkg} ({why})" for pkg, why in sorted(broken.items())),
-                        data={"import_errors": broken},
-                    )
-                unchecked = list(getattr(self.registry, "manifest_errors", None) or [])
-                if unchecked:  # a tool whose arguments declare no kind refuses every call: say so
-                    await _record(
-                        self.monitor, "analyst.toolkit.load_error", level=2,
-                        summary="toolkit arguments the input validator cannot check after the reload: "
-                        + "; ".join(unchecked),
-                        data={"manifest_errors": unchecked},
-                    )
-            for worker in workers:
-                sandbox = getattr(worker, "sandbox", None)
-                if sandbox is not None and hasattr(sandbox, "restart"):
-                    await sandbox.restart()
+            await self._reload_toolkit(workers)
         exhausted = outcome.committed == 0 and outcome.author_budget <= 0
         await _record(
             self.monitor,
@@ -343,6 +347,34 @@ class DebateToConverge:
             return list(reports_unchanged), task
         reports = await self._initial_reports(workers, task, phase="rerun")
         return reports, task
+
+    async def _reload_toolkit(self, workers: Sequence[WorkerLike]) -> None:
+        """Make what the chain committed callable: reload discovery, restart each worker backend.
+
+        Load problems after the reload are said loudly (``analyst.toolkit.load_error``).
+        """
+        if self.registry is not None and hasattr(self.registry, "reload"):
+            self.registry.reload()
+            broken = dict(getattr(self.registry, "import_errors", None) or {})
+            if broken:  # the commit's package (or another) now exposes no tools: say so loudly
+                await _record(
+                    self.monitor, "analyst.toolkit.load_error", level=2,
+                    summary="toolkit packages expose no tools after the reload: "
+                    + "; ".join(f"{pkg} ({why})" for pkg, why in sorted(broken.items())),
+                    data={"import_errors": broken},
+                )
+            unchecked = list(getattr(self.registry, "manifest_errors", None) or [])
+            if unchecked:  # a tool whose arguments declare no kind refuses every call: say so
+                await _record(
+                    self.monitor, "analyst.toolkit.load_error", level=2,
+                    summary="toolkit arguments the input validator cannot check after the reload: "
+                    + "; ".join(unchecked),
+                    data={"manifest_errors": unchecked},
+                )
+        for worker in workers:
+            sandbox = getattr(worker, "sandbox", None)
+            if sandbox is not None and hasattr(sandbox, "restart"):
+                await sandbox.restart()
 
     async def _revision_round(
         self,
@@ -382,8 +414,8 @@ class DebateToConverge:
     ) -> list[AnalystReport | None]:
         """Each worker produces an initial report via its own tool loop.
 
-        Aligned with ``workers`` by index; ``None`` marks a worker whose turn a provider error
-        ended (D1), so the others still report.
+        Aligned with ``workers`` by index; ``None`` marks a worker whose turn a failed model
+        call ended (D1, A4), so the others still report.
         """
         reports: list[AnalystReport | None] = []
         last_round = _tool_results(workers)
@@ -418,27 +450,28 @@ class DebateToConverge:
         peer_reports: Sequence[AnalystReport] | None = None,
         phase: str = "initial",
     ) -> AnalystReport | None:
-        """One worker's turn, or ``None`` when a provider error ended it unfiled (D1, §9.3.8).
+        """One worker's turn, or ``None`` when a failed model call ended it unfiled (D1, A4).
 
-        Contains :class:`ProviderTurnFailed` only — the worker's honest failure, already in the
-        ledger as ``analyst_worker.<action>.provider_error``. ``ReactBudgetExhausted`` and every
-        other exception propagate unchanged.
+        Contains :class:`ModelCallFailed` only — the worker's honest failure (any exception its
+        model call raised), already in the ledger as ``analyst_worker.<action>.model_call_failed``.
+        ``ReactBudgetExhausted`` and every other exception propagate unchanged.
         """
         try:
             if peer_reports is None:
                 return await worker.analyze(task)
             return await worker.analyze(task, peer_reports=peer_reports)
-        except ProviderTurnFailed as exc:
+        except ModelCallFailed as exc:
             key = getattr(worker, "agent_key", None) or f"analyst_worker_{index}"
             await _record(
                 self.monitor,
                 "analyst.worker.failed",
-                # The unit's own `provider_error` event is the level-1 line; this one records
+                # The unit's own `model_call_failed` event is the level-1 line; this one records
                 # that the debate carried on.
                 level=2,
                 summary=(
-                    f"{key} filed no report this round (provider error); the debate carries on "
-                    "with the workers that filed"
+                    f"{key} filed no report this round (its model call failed: "
+                    f"{type(exc.cause).__name__}); the debate carries on with the workers that "
+                    "filed"
                 ),
                 actor=key,
                 data={
@@ -474,8 +507,8 @@ class DebateToConverge:
         lead_key = getattr(lead, "agent_key", None) or "analyst_lead"
         filed = [key for key, report in zip(keys, reports) if report is not None]
         text = (
-            f"{', '.join(missing)} filed no report in the latest worker round: a model-provider "
-            f"error ended {'its' if len(missing) == 1 else 'their'} turn. The reports in this "
+            f"{', '.join(missing)} filed no report in the latest worker round: a failed model "
+            f"call ended {'its' if len(missing) == 1 else 'their'} turn. The reports in this "
             f"cycle come from: {', '.join(filed) if filed else 'no worker'}. Weigh the analysis "
             "as one with these workers missing."
         )

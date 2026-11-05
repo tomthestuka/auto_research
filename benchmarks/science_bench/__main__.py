@@ -93,6 +93,11 @@ def preflight(slots: list[RunSlot], *, workspace: Path) -> list[str]:
             "configuration as its source and hands each trial its own; running it already "
             "pointed elsewhere would clone the wrong toolkit and read the wrong archive."
         )
+    if os.environ.get("AUTO_RESEARCH_RUNTIME_DIR"):
+        problems.append(
+            "AUTO_RESEARCH_RUNTIME_DIR is set in this shell. It outranks each trial's own "
+            "runtime_dir, so every trial would write its runs into that one folder."
+        )
     for path in (orchestration_yaml(), observations_yaml(), code_gate_yaml()):
         if not path.exists():
             problems.append(f"missing configuration: {path}")

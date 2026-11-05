@@ -1,12 +1,11 @@
 """Opt-in live checks for configured model strings.
 
 Run with:
-    AUTO_RESEARCH_LIVE_MODEL_TESTS=1 pytest tests/test_live_models.py
+    pytest tests/test_live_models.py --live
 """
 
 import asyncio
 import json
-import os
 
 import pytest
 from dotenv import load_dotenv
@@ -15,10 +14,7 @@ from auto_research.models import ModelMessage, load_registry
 from tests.dev_logs import dev_log_path
 
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_MODEL_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_MODEL_TESTS=1 to spend provider tokens",
-)
+pytestmark = pytest.mark.live
 
 
 def _unique_handles():

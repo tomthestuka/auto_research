@@ -1,7 +1,7 @@
 """Opt-in LIVE check of the **unattended** path — `human_channel='none'` — for every role that
 can raise to a human: the three graph roles and the author.
 
-    AUTO_RESEARCH_LIVE_NO_HITL=1 pytest tests/test_live_no_hitl.py -s
+    pytest tests/test_live_no_hitl.py --live -s
 
 **Why this exists.** Closing the human channel is the standing condition for every benchmark
 batch, and until 2026-09-01 nobody had watched a model meet that condition. Reading the code then
@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -48,10 +47,7 @@ from dotenv import load_dotenv
 
 from tests.dev_logs import dev_log_path
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_NO_HITL") != "1",
-    reason="set AUTO_RESEARCH_LIVE_NO_HITL=1 to spend provider tokens on the unattended path",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

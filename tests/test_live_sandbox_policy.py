@@ -1,6 +1,6 @@
 """Opt-in live XSPEC sandbox policy test.
 
-Activate with: AUTO_RESEARCH_LIVE_SANDBOX_POLICY_TESTS=1
+Activate with: pytest tests/test_live_sandbox_policy.py --live
 
 Starts two persistent analyst subprocesses using the configured HEASoft/PyXSPEC
 analysis environment and verifies that each subprocess boots with the same
@@ -22,11 +22,7 @@ import pytest
 from tests.dev_logs import dev_log_path
 
 
-LIVE = os.getenv("AUTO_RESEARCH_LIVE_SANDBOX_POLICY_TESTS") == "1"
-skip_live = pytest.mark.skipif(
-    not LIVE,
-    reason="Set AUTO_RESEARCH_LIVE_SANDBOX_POLICY_TESTS=1 to run",
-)
+pytestmark = pytest.mark.live
 
 
 def _write_log(data: dict) -> Path:
@@ -55,7 +51,6 @@ def _write_log(data: dict) -> Path:
     return json_path
 
 
-@skip_live
 def test_persistent_sandbox_sets_xspec_policy_in_each_subprocess(tmp_path: Path) -> None:
     """Both real HEASoft subprocesses boot with non-interactive XSPEC settings."""
 
@@ -122,7 +117,6 @@ def status():
         assert policy.get("allow_prompting") is False, policy
 
 
-@skip_live
 def test_sandbox_restarts_after_timeout(tmp_path: Path) -> None:
     """A timed-out REPL subprocess is killed and replaced; subsequent calls succeed."""
 
@@ -168,7 +162,6 @@ def test_sandbox_restarts_after_timeout(tmp_path: Path) -> None:
     assert alive is True
 
 
-@skip_live
 def test_mcp_bash_env_xspec_and_toolkit(tmp_path: Path) -> None:
     """MCP bash_exec env has xspec on PATH and both xspec_utils import styles work.
 

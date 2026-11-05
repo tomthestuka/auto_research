@@ -136,6 +136,42 @@ def test_human_channel_check_green_only_when_reply_returns():
         asyncio.run(make_human_channel_check(slow, timeout_s=0.05)())
 
 
+def test_the_ping_window_measures_only_the_humans_reply(monkeypatch):
+    """D2 ruling: the connector's start-up (Telegram: getMe, deleteWebhook, setMyCommands, each
+    up to the bot's 30 s read timeout) runs before the window; a slow start leaves the window to
+    the reply, and a failing start fails with its own message."""
+    from auto_research.hitl import TelegramHandler, make_human_channel_check
+    from tests.test_hitl import _FakeTGApp, _tg_update
+
+    class _SlowStart(_FakeTGApp):
+        async def initialize(self):
+            await asyncio.sleep(0.3)  # the Bot API answering slowly at start-up
+
+    handler = TelegramHandler(app=_SlowStart(), chat_id="555")
+
+    async def _reply_when_asked():
+        for _ in range(500):
+            if handler._pending:
+                break
+            await asyncio.sleep(0.005)
+        handler.on_message(_tg_update("live", reply_to_id=next(iter(handler._pending))))
+
+    async def scenario():
+        replier = asyncio.create_task(_reply_when_asked())
+        await make_human_channel_check(handler, timeout_s=0.2)()  # shorter than the start-up
+        await replier
+
+    asyncio.run(scenario())
+
+    class _BrokenStart(_FakeTGApp):
+        async def initialize(self):
+            raise TimeoutError("getMe timed out")
+
+    with pytest.raises(RuntimeError, match="did not start: TimeoutError: getMe timed out"):
+        asyncio.run(make_human_channel_check(TelegramHandler(app=_BrokenStart(), chat_id="555"),
+                                             timeout_s=5)())
+
+
 def test_author_reviewer_decorrelation_passes_on_project_config():
     # Project config: coder = anthropic, analyst_colead = openai → decorrelated. No LLM call.
     check_author_reviewer_decorrelation()

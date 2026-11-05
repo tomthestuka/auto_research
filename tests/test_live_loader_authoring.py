@@ -1,7 +1,7 @@
-"""Env-gated LIVE end-to-end test of the lead-driven tool-authoring path (Phase-2 step 7).
+"""Opt-in LIVE end-to-end test of the lead-driven tool-authoring path (Phase-2 step 7).
 
 Activate with:
-    AUTO_RESEARCH_LIVE_LOADER_AUTHORING_TESTS=1 pytest tests/test_live_loader_authoring.py -q -s
+    pytest tests/test_live_loader_authoring.py --live -q -s
 
 Poses a missing-capability request — a joint multi-instrument spectral *loader*,
 ``load_epoch_spectra`` — to the analyst lead against a **throwaway, empty from-scratch toolkit**
@@ -56,10 +56,7 @@ from auto_research.schemas import (
 from auto_research.schemas.toolspec import AnalystToolRequest, ValidationDataset
 from tests.seats import SeatOverride, from_seat, repo_config_dir, seat, seated
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_LOADER_AUTHORING_TESTS") != "1",
-    reason="set AUTO_RESEARCH_LIVE_LOADER_AUTHORING_TESTS=1 to run the live loader-authoring test",
-)
+pytestmark = pytest.mark.live
 
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "P2" / "loader-test"
 
@@ -503,7 +500,7 @@ def _coder_seat() -> SeatOverride:
     if choice == "claude_sdk":
         return seat(
             "anthropic", "claude-sonnet-5",
-            harness="claude_sdk", vision=False, documents=False,
+            harness="claude_sdk",
         )
     if choice:
         raise ValueError(f"{CODER_HARNESS_ENV} takes 'codex' or 'claude_sdk', got {choice!r}")
@@ -513,8 +510,6 @@ def _coder_seat() -> SeatOverride:
     return SeatOverride(
         provider=configured["provider"],
         model=configured["model"],
-        vision=bool(configured.get("vision", False)),
-        documents=bool(configured.get("documents", False)),
         parameters=dict(configured.get("parameters") or {}),
         priceMTk=dict(configured.get("priceMTk") or {}),
         harness=configured.get("harness"),

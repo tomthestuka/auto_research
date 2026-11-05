@@ -45,14 +45,16 @@ class _ScriptedModel:
         return ModelResponse(content="done")
 
 
-def _run(tmp_path, calls, sandbox=None, known=(TOOL, BASH), action="analyze", store=None):
+SCHEMA = {"properties": {"obsid": {"kind": "setting"}, "ixpe_path": {"kind": "path"},
+                        "save_path": {"kind": "path"}, "out_path": {"kind": "path"},
+                        "note": {"kind": "setting"}}}
+
+
+def _run(tmp_path, calls, sandbox=None, known=(TOOL, BASH), action="analyze", store=None, schema=SCHEMA):
     store = store or ReceiptStore(tmp_path / "receipts")
     ledger = tmp_path / "monitor.jsonl"
     sandbox = sandbox or _FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "PD=3.4", "stderr": ""})
-    registry = _FakeRegistry(known=set(known), mcp={BASH},
-                             schema={"properties": {"obsid": {"kind": "setting"}, "ixpe_path": {"kind": "path"},
-                                                    "save_path": {"kind": "path"}, "out_path": {"kind": "path"},
-                                                    "note": {"kind": "setting"}}})
+    registry = _FakeRegistry(known=set(known), mcp={BASH}, schema=schema)
     tools = SandboxToolProvider(registry, sandbox, cwd=tmp_path / "w0", receipts=store,
                                 receipt_source="analyst_worker_0")
     worker = AnalystWorkerAgent(model=_ScriptedModel(calls), prompt="p",
@@ -78,9 +80,12 @@ def test_every_call_rebuilds_from_the_ledger_to_its_receipt_and_to_what_the_tool
     received = [args for _, _, args in sandbox.tool_calls] + [args for _, args in sandbox.mcp_calls]
     assert [c.sent_args for c in rebuilt] == received
     assert rebuilt[3].ran_args["env"] == "ar-x" and "env" not in rebuilt[3].sent_args
-    assert rebuilt[0].ran_args["save_path"] == str(tmp_path / "w0" / "figures" / "q.png")
+    # A figure lands in its call's own folder (B2): the same file name in two calls never collides.
+    own = [tmp_path / "w0" / "products" / "fn" / c.call_id for c in rebuilt]
+    assert rebuilt[0].ran_args["save_path"] == str(own[0] / "q.png")
+    assert rebuilt[2].ran_args["save_path"] == str(own[2] / "q.png") != rebuilt[0].ran_args["save_path"]
     assert rebuilt[0].ran_args["ixpe_path"] == "/obs/IXPE"
-    assert rebuilt[1].ran_args["save_path"].startswith(str(tmp_path / "w0" / "figures" / "fn_"))
+    assert rebuilt[1].ran_args["save_path"] == str(own[1] / "fn.png")
     assert rebuilt[3].ran_args["ixpe_path"] == "/mine"
     assert "shell_env" not in rebuilt[4].ran_args and rebuilt[4].ran_args["cwd"] == str(tmp_path / "w0")
 
@@ -116,10 +121,15 @@ def test_a_receipt_whose_call_does_not_rebuild_is_left_unmatched(tmp_path):
 
 
 def test_the_figure_rule_keeps_the_basename_and_owns_the_folder_and_extension():
-    context = {"figure_args": ["save_path", "save_path_prefix"], "figures_dir": "/run/w0/figures",
-               "fn": "plot", "stamp_ms": 17}
+    context = {"figure_args": ["save_path", "save_path_prefix"], "products_dir": "/run/w0/products/plot/c1",
+               "fn": "plot"}
     args = resolve_call_args({"save_path": "../../etc/x.PDF", "save_path_prefix": " "}, context)
-    assert args == {"save_path": "/run/w0/figures/x.png", "save_path_prefix": "/run/w0/figures/plot_17"}
+    assert args == {"save_path": "/run/w0/products/plot/c1/x.png", "save_path_prefix": "/run/w0/products/plot/c1/plot"}
+    # `..` names no file: a prefix the tool joins onto stays in the call's folder.
+    assert resolve_call_args({"save_path_prefix": ".."}, context)["save_path_prefix"] == "/run/w0/products/plot/c1/plot"
+    # A ledger written before 2026-11-04 rebuilds as it ran: the shared figures folder, a stamped name.
+    old = {"figure_args": ["save_path_prefix"], "figures_dir": "/run/w0/figures", "fn": "plot", "stamp_ms": 17}
+    assert resolve_call_args({}, old) == {"save_path_prefix": "/run/w0/figures/plot_17"}
 
 
 def test_a_call_that_never_ran_is_never_paired_with_its_identical_twin(tmp_path):
@@ -174,7 +184,7 @@ def test_a_malformed_ledger_line_is_skipped_not_fatal(tmp_path):
 
 
 def test_every_receipt_of_a_call_pairs_with_it_figures_and_data_too(tmp_path):
-    """One call minting a result, a figure and a data file: all three join the same call."""
+    """One call minting a result, a figure and a declared product: all three join the same call."""
     from datetime import datetime, timezone
 
     def tool(m, f, a):
@@ -182,11 +192,12 @@ def test_every_receipt_of_a_call_pairs_with_it_figures_and_data_too(tmp_path):
         Path(a["out_path"]).write_text("t,pd\n0,3.4\n")
         return {"exit_code": 0, "stdout": "wrote", "figures": [{
             "path": a["save_path"], "caption": "PD", "mime_type": "image/png", "produced_by": TOOL,
-            "created_at": datetime.now(timezone.utc).isoformat(), "sha256": "0" * 64}]}
+            "created_at": datetime.now(timezone.utc).isoformat(), "sha256": "0" * 64}],
+            "products": [{"path": a["out_path"], "caption": "PD per slice"}]}
 
-    (tmp_path / "w0").mkdir()
-    call = ToolCall(id="c1", name=TOOL, arguments={"save_path": "pd", "out_path": str(tmp_path / "w0" / "s.csv")})
-    store, ledger, _ = _run(tmp_path, [call], sandbox=_FakeSandbox(tool_fn=tool))
+    schema = {"properties": {**SCHEMA["properties"], "out_path": {"kind": "output", "shape": "file"}}}
+    call = ToolCall(id="c1", name=TOOL, arguments={"save_path": "pd", "out_path": "s.csv"})
+    store, ledger, _ = _run(tmp_path, [call], sandbox=_FakeSandbox(tool_fn=tool), schema=schema)
     assert {r.kind for r in store.receipts()} == {"result", "figure", "data"}
     matched = calls_by_receipt(ledger_calls(ledger), store.receipts())
     assert {matched[r.handle].tool_call_id for r in store.receipts()} == {"c1"}
@@ -226,3 +237,27 @@ def test_two_loops_of_one_actor_reusing_a_call_id_never_cross(tmp_path):
     first, second = store.receipts(kind="result")
     matched = calls_by_receipt(ledger_calls(ledger), [first, second])
     assert (matched[first.handle].tool, matched[second.handle].tool) == (TOOL, other)
+
+
+def test_output_arguments_rebuild_from_the_ledger_in_each_calls_own_folder(tmp_path):
+    """B1: output arguments are placed in `<workdir>/products/<fn>/<call id>/`; the ledger rebuilds
+    the placed paths, so each receipt pairs with its call by the arguments' hash, and the folder's
+    name is the call id on the receipt and on the ledger line."""
+    schema = {"properties": {"obsid": {"kind": "setting"}, "out_dir": {"kind": "output", "shape": "folder"},
+                             "outfile": {"kind": "output", "shape": "file"},
+                             "stem": {"kind": "output", "shape": "prefix"}}}
+    calls = [ToolCall(id="c1", name=TOOL, arguments={"obsid": "X", "outfile": "/obs/IXPE/g.pha", "stem": "pd"}),
+             ToolCall(id="c2", name=TOOL, arguments={"obsid": "X", "out_dir": "/obs/IXPE"})]
+    store, ledger, sandbox = _run(tmp_path, calls, schema=schema)
+    rebuilt = ledger_calls(ledger)
+    assert [c.sent_args for c in rebuilt] == [args for _, _, args in sandbox.tool_calls]
+    results = store.receipts(source="analyst_worker_0", kind="result")
+    matched = calls_by_receipt(rebuilt, results)
+    assert [matched[r.handle].tool_call_id for r in results] == ["c1", "c2"]
+    for call, receipt in zip(rebuilt, results):
+        folder = tmp_path / "w0" / "products" / "fn" / receipt.call_id
+        assert call.call_id == receipt.call_id and call.context["products_dir"] == str(folder)
+        assert call.ran_args["out_dir"] == str(folder) and folder.is_dir()
+    assert rebuilt[0].ran_args["outfile"].endswith("/g.pha") and rebuilt[0].ran_args["stem"].endswith("/pd")
+    assert rebuilt[1].ran_args["outfile"].endswith("/outfile") and rebuilt[1].ran_args["stem"].endswith("/fn")
+    assert results[0].call_id != results[1].call_id

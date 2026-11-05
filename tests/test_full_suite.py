@@ -1,6 +1,6 @@
 """Full end-to-end live test with the persistent sandbox architecture.
 
-Activate with: AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1
+Activate with: pytest tests/test_full_suite.py --live
 
 Runs the IXPE Cyg X-1 soft-state 2023-05-24 research question through the
 complete Phase 1 graph: reviewer dispatch → librarian IO (search, ingest) →
@@ -11,7 +11,6 @@ Logs: logs/dev/step-12/
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,8 +19,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-LIVE = os.getenv("AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS") == "1"
-skip_live = pytest.mark.skipif(not LIVE, reason="Set AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1 to run")
+pytestmark = pytest.mark.live
 
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "step-12"
 
@@ -33,7 +31,6 @@ def _monitor_paths(name: str) -> tuple[Path, Path]:
     return jsonl, jsonl.with_suffix(".md")
 
 
-@skip_live
 def test_cyg_x1_ixpe_softstate() -> None:
     """Full Phase 1 run: IXPE Cyg X-1 soft-state 2023-05-24 broadband spectral fit.
 

@@ -20,7 +20,7 @@ Assertions are on our side of the boundary — the ledger, the filesystem, the c
 escalation reached its in-process handler, whether HEAD moved. Model quality is never asserted
 (CLAUDE.md §10).
 
-    AUTO_RESEARCH_LIVE_CODER_MATRIX=1 pytest tests/test_live_coder_matrix.py -s
+    pytest tests/test_live_coder_matrix.py --live -s
 
 Each leg skips unless its credential is present, and a leg whose vendor refuses the account
 outright (no entitlement, a revoked key) skips carrying that refusal, since neither is a defect in
@@ -46,10 +46,7 @@ from auto_research.schemas import CheckResult, GateReport, ToolReviewVerdict
 from tests.dev_logs import dev_log_path
 
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AUTO_RESEARCH_LIVE_CODER_MATRIX") != "1",
-    reason="set AUTO_RESEARCH_LIVE_CODER_MATRIX=1 to spend tokens on the coder harness matrix",
-)
+pytestmark = pytest.mark.live
 
 load_dotenv()
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from typing import Any
 
-from auto_research.sandbox.runner import with_private_param_dir
+from auto_research.sandbox.runner import builtin_function_source, with_private_param_dir
 
 
 def _descendant_pids(pid: int) -> list[int]:
@@ -71,7 +71,7 @@ def repl_payload(result):
 #: Prepended to a ``python -c`` program in place of ``-P`` (shared with the shell server).
 SAFE_PATH_PRELUDE = "import sys as _sys\n_sys.path[:] = [_p for _p in _sys.path if _p not in ('', '.')]\n"
 _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
-    inspect.getsource(repl_payload) + "\n" + textwrap.dedent("""
+    inspect.getsource(repl_payload) + "\n" + builtin_function_source("private_param_dir") + textwrap.dedent("""
     import sys, os, json, importlib, traceback, tempfile
 
     def _coerce(v):
@@ -141,7 +141,14 @@ _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
         _s1, _s2 = os.dup(1), os.dup(2)
         os.dup2(_cap.fileno(), 1)
         os.dup2(_cap.fileno(), 2)
+        # This call's own, empty HEASoft parameter folder (G4): no call inherits another's
+        # learned values; the REPL's own folder comes back after it.
+        _params = _pfiles = None
+        _before = os.environ.get("PFILES")
         try:
+            _params, _pfiles = private_param_dir()
+            if _pfiles:
+                os.environ["PFILES"] = _pfiles
             mod = importlib.import_module(cmd["module"])
             fn = getattr(mod, cmd["fn"])
             args = {k: _coerce(v) for k, v in cmd.get("args", {}).items()}
@@ -154,6 +161,10 @@ _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
                 "stdout": "",
             }
         finally:
+            if _pfiles:
+                os.environ["PFILES"] = _before
+                import shutil
+                shutil.rmtree(_params, ignore_errors=True)
             try:
                 sys.stdout.flush()
                 sys.stderr.flush()
