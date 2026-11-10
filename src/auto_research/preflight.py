@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 # A check raises on failure (its exception message is surfaced) and returns None on success.
@@ -121,6 +122,63 @@ class Preflight:
             )
 
 
+#: ``orchestration.yaml`` keys that retired, each with what to do instead (no aliases, D16).
+RETIRED_KEYS: dict[str, str] = {
+    "agent_os_jail": "is retired (every runtime process runs in the jail); delete the key",
+    "mcp_servers": "is retired (the workers' shell is the jailed builtin server); delete the key",
+    "toolkit_root": "is retired; set toolkits[].root",
+    "tool_author_branch": "is retired; set toolkits[].authoring_branch",
+    "analyze_env": "is retired; declare the base in human_envs and name toolkits[].default_env",
+    "analyze_ini_sh": "is retired; write the default environment's envs/<id>/activate.sh in the toolkit",
+    "repl_init_py": "is retired; write the default environment's envs/<id>/boot.py in the toolkit",
+    "analyze_probe": "is retired; write the default environment's envs/<id>/env.yaml probe",
+    "gate_readonly_roots": "is retired; list the data sets under test_data",
+}
+
+
+def check_config_keys() -> None:
+    """``orchestration.yaml`` holds no retired key (each named with what to do instead) and an
+    ``agent_fs_allow`` that lists roots narrower than the filesystem: the jail mounts that list and
+    the runtime's own reads are confined to it, so an empty list (read as allow-all) or one naming
+    ``/`` is refused."""
+    from auto_research.env import _orch_config
+
+    config = _orch_config()
+    problems = [f"`{key}` {RETIRED_KEYS[key]}" for key in RETIRED_KEYS if key in config]
+    allow = config.get("agent_fs_allow") or []
+    if not allow:
+        problems.append("list in `agent_fs_allow` the roots runtime processes may reach")
+    elif any(Path(str(entry)).expanduser().resolve() == Path("/") for entry in allow):
+        problems.append("name in `agent_fs_allow` the folders runtime processes need, in place of `/`")
+    if problems:
+        raise RuntimeError("orchestration.yaml: " + "; ".join(problems))
+
+
+def check_private_variables() -> None:
+    """Every ``env_externals.<name>.private`` entry is well formed (``env.private_variables``) and
+    the toolkit's default environment's activation (sourced as its processes source it,
+    ``runner.analysis_activation_env``) sets the variable with its separator, so the folder is
+    replaced as declared; a misspelt or mismatched declaration fails at launch, not silently."""
+    from auto_research.env import _orch_config, private_variables
+    from auto_research.sandbox.runner import analysis_activation_env
+
+    config = _orch_config()
+    private = private_variables(config)
+    if not private:
+        return
+    activated = analysis_activation_env(config)
+    owner = {var: name for name, spec in (config.get("env_externals") or {}).items()
+             for var in ((spec or {}).get("private") or {})}
+    problems = [
+        f"env_externals.{owner[var]}.private: {var}: the default environment's activation "
+        + (f"sets it to {activated[var]!r}, without the separator {sep!r}" if var in activated else "leaves it unset")
+        + "; declare the variable and separator the activation sets"
+        for var, sep in private.items() if sep not in activated.get(var, "")
+    ]
+    if problems:
+        raise RuntimeError("; ".join(problems))
+
+
 def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     """Assemble the default checklist by registering each module's own check.
 
@@ -129,18 +187,14 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     ``human_handler`` is resolved (non-headless), the launch-time channel ping is added so
     a run starts only if the human-response channel actually replies (§9.8).
     """
-    from auto_research.env import check_required_env
+    from auto_research.env import check_human_envs, check_required_env
     from auto_research.graph.checkpoint import check_checkpointer_available
     from auto_research.models.capabilities import check_member_capabilities
     from auto_research.models.media_probe import check_member_media
     from auto_research.models.keys import check_api_key_fallbacks
     from auto_research.models.providers._doc_parse import check_document_parser_ready
     from auto_research.observations import check_catalog_health
-    from auto_research.sandbox.merge_flow import (
-        check_toolkit_branch_clean,
-        check_toolkit_git_identity,
-        check_toolkit_root_configured,
-    )
+    from auto_research.sandbox.merge_flow import check_toolkit_branch_clean, check_toolkit_git_identity
     from auto_research.sandbox.coder import (
         check_coder_harness_available,
         check_coder_harness_supported,
@@ -148,14 +202,15 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     from auto_research.sandbox.jail import (
         check_os_jail_available,
         check_os_jail_harness,
-        check_os_jail_probe,
     )
     from auto_research.sandbox.registry import check_toolkit_manifests
     from auto_research.sandbox.review import check_author_reviewer_decorrelation
-    from auto_research.sandbox.runner import check_analyze_probe
+    from auto_research.sandbox.runner import check_analysis_probe
     from auto_research.storage import check_database_health
+    from auto_research.toolkit_contract import check_toolkit_contract, check_toolkit_test_data
 
     preflight = Preflight()
+    preflight.register("config_keys", check_config_keys)
     preflight.register("required_env", check_required_env)
     preflight.register("api_key_fallbacks", check_api_key_fallbacks)
     preflight.register("member_capabilities", check_member_capabilities)
@@ -166,16 +221,21 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight.register("coder_harness_supported", check_coder_harness_supported)
     preflight.register("coder_harness_available", check_coder_harness_available)
     preflight.register("os_jail_available", check_os_jail_available)
-    preflight.register("os_jail_probe", check_os_jail_probe)
-    # The probe execs the analysis interpreter; this execs the author's own CLI. The first jailed
-    # sweep passed the probe and lost every trial to an unbound harness binary (2026-08-20).
+    # The analysis probe (below) execs the default environment's interpreter; this execs the
+    # author's own CLI. The first jailed sweep passed the probe and lost every trial to an unbound
+    # harness binary (2026-08-20).
     preflight.register("os_jail_harness", check_os_jail_harness)
-    preflight.register("toolkit_root_configured", check_toolkit_root_configured)
+    preflight.register("toolkit_contract", check_toolkit_contract)
+    preflight.register("toolkit_test_data", check_toolkit_test_data)
     preflight.register("toolkit_git_identity", check_toolkit_git_identity)
     preflight.register("toolkit_branch_clean", check_toolkit_branch_clean)
     preflight.register("toolkit_manifests", check_toolkit_manifests)
     preflight.register("catalog_health", check_catalog_health)
-    preflight.register("analyze_probe", check_analyze_probe)
+    # The toolkit's environments, after its contract: human bases declared, then the default
+    # environment's activation (private variables) and probe, both run as a unit's REPL starts.
+    preflight.register("human_envs", check_human_envs)
+    preflight.register("private_variables", check_private_variables)
+    preflight.register("analysis_probe", check_analysis_probe)
     # The one paid check (Z1e): one tiny image and one tiny PDF per distinct chat member, through the
     # real call. Last, so a launch that fails a free check spends nothing.
     preflight.register("member_media", check_member_media)

@@ -1893,6 +1893,8 @@ class ReviewerAgent(AgentRole):
     #: The run's receipt store and this role's work folder; the runtime sets both.
     receipts: Any | None = None
     report_dir: Path | None = None
+    #: What the latest turn admitted to its scope (``reviewer_admitted_receipts``); set by ``review``.
+    admitted_receipts: list[str] | None = None
 
     @_one_turn_at_a_time
     async def review(
@@ -1946,13 +1948,11 @@ class ReviewerAgent(AgentRole):
         store = self.receipts
         figure_handles = _receipt_handles_for_figures(store, report.figures if report else ())
         request_handle = _request_receipt(store, request)
-        admitted = [
-            request_handle,
-            *(literature_receipts or {}),
-            *_cited_handles(report),
-            *figure_handles,
-            *human_files,
-        ]
+        admitted = reviewer_admitted_receipts(
+            request_handle, literature_receipts=literature_receipts, report=report,
+            figure_handles=figure_handles, human_files=human_files,
+        )
+        self.admitted_receipts = admitted  # the scope this turn had, for a check outside it
         budgets = dict(budgets or {})
         lookup = ScopedLookup(store, own_source=REVIEWER_SOURCE, admitted=admitted)
         self._reviews = getattr(self, "_reviews", 0) + 1
@@ -2078,6 +2078,30 @@ def _request_receipt(store: Any, request: ResearchRequest) -> str:
     """
     text = request.question + (f"\n\n{request.context}" if request.context else "")
     return store.mint_input(text, kind="human", produced_by="research_request").handle
+
+
+def reviewer_admitted_receipts(
+    request_handle: str,
+    *,
+    literature_receipts: Mapping[str, Any] | None = None,
+    report: AnalystReport | None = None,
+    figure_handles: Sequence[str] = (),
+    human_files: Sequence[str] = (),
+) -> list[str]:
+    """What a reviewer turn admits to its citable scope beside its own receipts: the request's
+    receipt, the documents the filed literature reports cite, every receipt the analysis report
+    cites, that report's figures' receipts, and the human's files.
+
+    ``ReviewerAgent.review`` builds its scope from this once per turn and keeps the result as
+    ``admitted_receipts``, which a check outside the turn reads.
+    """
+    return [
+        request_handle,
+        *(literature_receipts or {}),
+        *_cited_handles(report),
+        *figure_handles,
+        *human_files,
+    ]
 
 
 _ARRIVED = {
@@ -2690,6 +2714,9 @@ def _cycle_instruction(cycle: LeadCycle, reports: Sequence[Any], rounds_left: in
             "opens automatically. A link that cannot be made mergeable simply ends and the chain "
             "moves on; you decide when to stop and write your report."
         )
+        from auto_research.sandbox.gate import ci_test_rules
+
+        lines.append(ci_test_rules())
     lines.append(
         "An honest stop is a correct outcome with no quality penalty: report real results, or "
         "report none — never fabricate a result to fill a gap."
@@ -3105,7 +3132,7 @@ class _ChainDriver:
             "nothing else to do for this link call wait_for_reply: it returns the moment the coder "
             "stops or asks you something, and says how long it has been working. Messages you "
             "send the coder while it works are queued for its next turn. "
-            "submit_for_review waits for the coder to stop before the gate runs. If it cannot be "
+            "submit_for_review waits for the coder to stop before the CI pipeline runs. If it cannot be "
             "made mergeable, let "
             "its submissions run out and the next link opens automatically — an honest failure "
             "is correct."
@@ -3127,7 +3154,7 @@ class _ChainDriver:
             spec,
             lead=self.lead,
             toolkit_root=self.toolkit_root,
-            worktree_base=self.worktree_base or self.toolkit_root,
+            worktree_base=self.worktree_base,
             colead=self.colead,
             human_handler=self.human_handler,
             coder=self.coder,
@@ -3296,7 +3323,7 @@ class _ChainDriver:
         if result.status == "committed":
             sha = (result.commit_sha or "")[:10]
             return (
-                f"You dispatched {name}. {narrative} COMMITTED {sha} — the gate passed and the "
+                f"You dispatched {name}. {narrative} COMMITTED {sha} — the CI pipeline passed and the "
                 "independent reviewer approved, so the tool is on the authoring branch and "
                 f"becomes callable once the workers rerun.{spent}{credits}"
             ).replace("  ", " ")
@@ -3857,14 +3884,15 @@ class AnalystLeadAgent(AgentRole):
                 "Inspect the coder's work with read_file/list_dir. Steer it with message to the coder, "
                 "giving concrete algorithm-level instructions (signature, exact procedure, edge "
                 "cases, the tests it must add). When you believe the tool and its tests are right, "
-                "call submit_for_review: it runs the deterministic gate, then the independent GPT "
-                "co-lead review, and commits automatically on gate-pass AND review-pass — you never "
-                "self-approve. On a gate failure (mechanical), fix the underlying cause by messaging "
-                "the coder; never weaken a check to pass. On a review rejection, either steer the "
+                "call submit_for_review: it runs the toolkit's CI pipeline, then the review by a "
+                "co-lead from a vendor apart from the coder's, and commits automatically on "
+                "pipeline-pass AND review-pass — approval rests with them. On a pipeline failure "
+                "(mechanical; each failed job names its checks), fix the underlying cause by messaging "
+                "the coder, with every check kept at its strength. On a review rejection, either steer the "
                 "coder to address it (message to the coder) or, when you believe a challenge is "
                 "unfounded or "
                 "already handled, defend it with respond_to_review — the co-lead reconsiders and may "
-                "concede to a sound argument (it commits if persuaded and the gate still passes). "
+                "concede to a sound argument (it commits if persuaded and the CI pipeline still passes). "
                 "When the tool commits you are done; if it cannot be made mergeable within the "
                 "budget, conclude honestly — an honest failure is a correct outcome, never fabricate "
                 "a result to force a pass."
@@ -3985,12 +4013,15 @@ class AnalystColeadAgent(AgentRole):
             "diff": diff,
             "gate_report": {
                 "passed": gate.passed,
+                "jobs": [j.model_dump(mode="json") for j in gate.jobs],
+                # The change's live tests did not run in the gate (no network): judge each one.
+                "live_tests_not_run": next((c.detail for c in gate.layer_b if c.name == "layer_b.live"), ""),
                 "layer_a": [c.model_dump(mode="json") for c in gate.layer_a],
                 "layer_b": [c.model_dump(mode="json") for c in gate.layer_b],
                 "findings": [c.model_dump(mode="json") for c in gate.findings],
             },
             "review_semantics": (
-                "Code review only — judge the tool code and its committed Layer-B tests, "
+                "Code review only — judge the tool code and its committed tests, "
                 "not the research finding. approved=true only if the code matches the brief, "
                 "the tests are the right ones and strict enough, there is no fabrication, and "
                 "no blocking bug remains. Otherwise approved=false with specific, actionable "

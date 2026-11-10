@@ -15,7 +15,7 @@ from pathlib import Path
 
 from typing import Any
 
-from auto_research.sandbox.runner import builtin_function_source, with_private_param_dir
+from auto_research.sandbox.runner import builtin_function_source, private_folders
 
 
 def _descendant_pids(pid: int) -> list[int]:
@@ -71,7 +71,7 @@ def repl_payload(result):
 #: Prepended to a ``python -c`` program in place of ``-P`` (shared with the shell server).
 SAFE_PATH_PRELUDE = "import sys as _sys\n_sys.path[:] = [_p for _p in _sys.path if _p not in ('', '.')]\n"
 _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
-    inspect.getsource(repl_payload) + "\n" + builtin_function_source("private_param_dir") + textwrap.dedent("""
+    inspect.getsource(repl_payload) + "\n" + builtin_function_source("private_folders") + textwrap.dedent("""
     import sys, os, json, importlib, traceback, tempfile
 
     def _coerce(v):
@@ -92,19 +92,19 @@ _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
                 return v
         return v
 
-    def _run_repl_init():
-        \"\"\"Exec the configured domain REPL-init file at subprocess boot (best-effort).
+    def _run_boot():
+        \"\"\"Exec the environment's boot file (``boot.py``) at subprocess boot (best-effort).
 
-        Path comes from AR_REPL_INIT_PY (config: repl_init_py); empty/absent ⇒ bare REPL.
+        Path comes from AR_BOOT_PY (the environment's boot file); empty/absent ⇒ bare REPL.
         A failure is swallowed so a missing optional model never kills the REPL — the
-        domain owns what its session setup does.\"\"\"
-        _init = os.environ.get("AR_REPL_INIT_PY", "").strip()
+        environment's definition owns what its session setup does.\"\"\"
+        _init = os.environ.get("AR_BOOT_PY", "").strip()
         if not _init:
             return
         try:
             with open(_init, "r") as _f:
                 _src = _f.read()
-            exec(compile(_src, _init, "exec"), {"__name__": "__repl_init__"})
+            exec(compile(_src, _init, "exec"), {"__name__": "__boot__"})
         except Exception:
             pass
 
@@ -113,7 +113,7 @@ _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
     _s1 = os.dup(1)
     os.dup2(2, 1)
     try:
-        _run_repl_init()
+        _run_boot()
     finally:
         try:
             sys.stdout.flush()
@@ -141,14 +141,13 @@ _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
         _s1, _s2 = os.dup(1), os.dup(2)
         os.dup2(_cap.fileno(), 1)
         os.dup2(_cap.fileno(), 2)
-        # This call's own, empty HEASoft parameter folder (G4): no call inherits another's
-        # learned values; the REPL's own folder comes back after it.
-        _params = _pfiles = None
-        _before = os.environ.get("PFILES")
+        # This call's own, empty private folders (G4): no call inherits another's learned values;
+        # the REPL's own come back after it.
+        _made, _before = [], {}
         try:
-            _params, _pfiles = private_param_dir()
-            if _pfiles:
-                os.environ["PFILES"] = _pfiles
+            _env, _made = private_folders(os.environ)
+            _before = {_k: os.environ.get(_k) for _k in _env if os.environ.get(_k) != _env[_k]}
+            os.environ.update(_env)
             mod = importlib.import_module(cmd["module"])
             fn = getattr(mod, cmd["fn"])
             args = {k: _coerce(v) for k, v in cmd.get("args", {}).items()}
@@ -161,10 +160,10 @@ _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
                 "stdout": "",
             }
         finally:
-            if _pfiles:
-                os.environ["PFILES"] = _before
-                import shutil
-                shutil.rmtree(_params, ignore_errors=True)
+            os.environ.update(_before)
+            import shutil
+            for _folder in _made:
+                shutil.rmtree(_folder, ignore_errors=True)
             try:
                 sys.stdout.flush()
                 sys.stderr.flush()
@@ -225,27 +224,14 @@ class PersistentSandbox:
         toolkit_root: Path | str,
         workdir: Path | str,
         *,
-        analyze_env: Path | str | None = None,
-        analyze_ini_sh: str | None = None,
-        repl_init_py: Path | str | None = None,
+        environment: Any,
         default_timeout_s: int = 300,
         mcp_client: Any | None = None,
-        environment: Any | None = None,
         environments: Any | None = None,
         label: str = "repl",
     ) -> None:
         self._toolkit_root = Path(toolkit_root)
         self._workdir = Path(workdir)
-        if environment is None:
-            # The legacy spelling of the same thing (prefix, activation, boot file).
-            from auto_research.sandbox.envs import Environment
-
-            prefix = Path(analyze_env) if analyze_env else Path(sys.prefix)
-            environment = Environment(
-                name=prefix.name, prefix=prefix,
-                activate=Path(analyze_ini_sh) if analyze_ini_sh else None,
-                boot=Path(repl_init_py) if repl_init_py else None,
-            )
         #: The software environment this REPL runs in; its fingerprint stamps every receipt.
         self.environment = environment
         #: ``() -> list[Environment]``: what this worker may list and point its shell at.
@@ -302,7 +288,8 @@ class PersistentSandbox:
             env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
         else:
             if self.environment.activate is None:
-                raise ValueError("analyze_ini_sh must be configured — no env fallback")
+                raise ValueError(f"{self.environment.name} has no activation script: a human "
+                                 "environment runs here only with one (no fallback to this process's)")
             # A derived environment with no activation of its own runs its human base's, as the
             # analysis REPL does.
             import dataclasses
@@ -312,9 +299,8 @@ class PersistentSandbox:
             pythonpath = str(self._toolkit_root) + (":" + existing if existing else "")
             env = {**base_env, "PYTHONPATH": pythonpath}
         if self.environment.boot is not None:
-            env["AR_REPL_INIT_PY"] = str(self.environment.boot)
-        # The OS jail (§12) when configured: the REPL is where toolkit tools and ``bash_exec`` run,
-        # and a shell command's implicit reads are exactly what the command-string guard cannot see.
+            env["AR_BOOT_PY"] = str(self.environment.boot)
+        # The OS jail (unconditional, D25): the REPL is where toolkit tools and ``bash_exec`` run.
         # Network stays on — acquisition tools download observations. The toolkit is read-only and
         # /tmp private (``jail.analysis_policy``, F20 review 2026-10-06).
         from auto_research.sandbox.jail import analysis_policy, private_tmp, wrap
@@ -337,7 +323,7 @@ class PersistentSandbox:
             from auto_research.sandbox.envs import in_environment
 
             script = in_environment(self.environment, f'{shlex.quote(python_exec)} "$@"', self._toolkit_root,
-                                    pass_args=True, keep=("AR_REPL_INIT_PY", "PYTHONPYCACHEPREFIX"), quiet=True)
+                                    pass_args=True, keep=("AR_BOOT_PY", "PYTHONPYCACHEPREFIX"), quiet=True)
             command = ["/bin/bash", "--noprofile", "--norc", "-c", script, "_", *command[1:]]
         argv = wrap(
             command,
@@ -349,24 +335,15 @@ class PersistentSandbox:
                 home=private_tmp(f"{self._label}-home", self._workdir),
             ),
         )
-        # Its own HEASoft parameter folder (F23): /tmp is private when jailed.
-        jailed = argv[0] != command[0]
-        if owned and not jailed:
-            from auto_research.sandbox.jail import jail_enabled
+        # Its own folder for each declared private variable (F23), in the jail's private /tmp.
+        from auto_research.env import private_variables
 
-            if jail_enabled():  # configured but not runnable here: a coder-written activation waits
-                raise RuntimeError(f"{self.environment.name} runs only in the jail, which cannot start on this host")
-        env = with_private_param_dir(
-            env, "/tmp/pfiles" if jailed else self._private_tmp / "pfiles",
-            create=self._private_tmp / "pfiles",
-        )
-        if pipeline:  # the launcher puts this writable half back after the activation
-            (self._private_tmp / "pfiles").mkdir(parents=True, exist_ok=True)
-            env["PFILES"] = "/tmp/pfiles" if jailed else str(self._private_tmp / "pfiles")
-        # Bytecode in this REPL's own private folder: the toolkit's `__pycache__` (git-ignored, so
+        # A pipeline environment's launcher puts the kept part back after the activation (alone).
+        env, _ = private_folders(env, private_variables(), at="/tmp", create=self._private_tmp, alone=pipeline)
+        # Bytecode in this REPL's own private /tmp: the toolkit's `__pycache__` (git-ignored, so
         # never judged) is never read — a planted `.pyc` matching its source cannot replace
-        # reviewed code. Private either way: never the shared host /tmp.
-        env["PYTHONPYCACHEPREFIX"] = "/tmp/ar-pycache" if jailed else str(self._private_tmp / "ar-pycache")
+        # reviewed code.
+        env["PYTHONPYCACHEPREFIX"] = "/tmp/ar-pycache"
         # The environment state this REPL booted on (taken above): a call after it changes
         # restarts it first (env plan B2a); its receipts stamp it only once its lock is on disk.
         self.booted_lock_written = await asyncio.to_thread(self._lock_booted)

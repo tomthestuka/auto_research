@@ -245,9 +245,17 @@ carried by **reference** (`FigureRef`), never embedded
   `observed_issue: str | None` (the symptom, for `fix_existing` defect reports — §9.3 L5).
 - `CheckResult(name: str, layer: "A"|"B", passed: bool, detail: str = "")` — one gate
   check; `detail` is the machine-readable reason fed back to the author on failure.
-- `GateReport(passed: bool, layer_a: list[CheckResult] = [], layer_b: list[CheckResult] = [],
-  findings: list[CheckResult] = [], reason: str = "", report_hash: str = "")` — the
-  deterministic gate's verdict (§9.4); `report_hash` seeds the §9.9 atomic-commit message.
+- `GATE_JOBS` — the gate's CI jobs in report order (`change_scope`, `environments`, `no_fabrication`,
+  `structural`, `minting`, `tests`, `regression`), all required; `jobs_pass(jobs)` — the verdict they
+  give (every job listed, none failed, `tests` passed).
+- `GateJob(name: str, status: "pass"|"fail"|"skip", reason: str = "", checks: list[str] = [])` (frozen) —
+  one job of the gate's CI pipeline (`sandbox.gate.JOBS`): `fail` names its failing checks, `skip`
+  says why it did not run.
+- `GateReport(passed: bool, jobs: tuple[GateJob, ...] = (), layer_a: list[CheckResult] = [],
+  layer_b: list[CheckResult] = [], findings: list[CheckResult] = [], reason: str = "",
+  report_hash: str = "")` — the deterministic gate's verdict (§9.4); `jobs` lists every required
+  job in order and `passed` is derived from them (a validator refuses `passed=True` the jobs do not
+  give, a pass with no jobs included, and a report whose listed jobs give another verdict); `report_hash` seeds the §9.9 atomic-commit message.
   `findings` are **non-failing** observations (the literal-array landmine) the mechanical
   gate records for the step-4 co-lead to judge — they never flip `passed`. Produced by
   `gate.run_gate` (step 3).
@@ -331,3 +339,8 @@ Compacted 2026-10-07 and 2026-10-19 (every entry); detail in git history.
 - 2026-11-04 — `ValidationDataset` (docstring, `synthetic` description): a synthetic input is a marked `synth<YYMMDD>-<hex>` ObsID the coder's tests build in their fixture obs-db (user ruling S1).
 - 2026-11-04 — `ToolSpec.validation_data`: a synthetic ObsID is added beside the required real input; `ValidationDataset.obsid` admits the marked synthetic ObsID; lowercase hex.
 - 2026-11-04 — H2: `InputFile.basis` description: an `obsdb` path is the ObsID's folder, flat or under HEASARC's tree.
+- 2026-11-09 — Phase 3 step 0a W3: `GateJob` and `GateReport.jobs` (the gate as a CI pipeline of required jobs, `pass | fail | skip(reason)`); `layer_a`/`layer_b` kept for their readers.
+- 2026-11-09 — W3 review: `GATE_JOBS`, `jobs_pass`, and the `GateReport` validator tying `passed` to the jobs.
+- 2026-11-09 — W3 re-review: `GateJob` frozen; `GateReport.jobs` a tuple.
+- 2026-11-09 — Phase 3 step 0a W6: `ToolCall.kind` and `ToolSpec.target_domain` descriptions name no toolkit package (`<toolkit>.<package>.<tool>`; a new package named like the existing ones).
+- 2026-11-09 — W6 review: `ToolSpec.validation_data` adds that real data reaches a test through a data set the CI pipeline provides; `proposed_checks` states the grader rule positively.

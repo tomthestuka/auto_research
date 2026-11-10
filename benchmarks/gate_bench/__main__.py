@@ -19,6 +19,7 @@ from pathlib import Path
 
 import yaml
 
+from auto_research.toolkit_contract import toolkit
 from benchmarks.gate_bench.harness import (
     ABLATIONS,
     DEFAULT_TOOLKIT_REF,
@@ -35,7 +36,7 @@ OUT_ROOT = REPO_ROOT / "logs" / "dev" / "gate-bench"
 
 def _toolkit_root() -> Path:
     with (REPO_ROOT / "config" / "orchestration.yaml").open(encoding="utf-8") as handle:
-        return Path((yaml.safe_load(handle) or {})["toolkit_root"])
+        return toolkit(yaml.safe_load(handle) or {}).root
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

@@ -5,7 +5,7 @@ unambiguous alongside TOOL_MANIFEST kinds in ToolkitRegistry.
 
 Usage::
 
-    client = MCPToolClient()           # default: auto_research_builtin server
+    client = MCPToolClient(servers=[graph.runtime._builtin_server_config(...)])  # jailed builtin
     await client.start()
     result = await client.call_tool("mcp.builtin.bash_exec", {"command": "ls /"})
     await client.shutdown()
@@ -16,26 +16,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import sys
-from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-
-_BUILTIN_SERVER = Path(__file__).parent / "builtin_server.py"
 
 # Backstop ceiling on a single MCP tool call. Far above any builtin inspection
 # tool's own timeout (bash_exec defaults to 60s), so it never fires in normal
 # use — it bounds the await so a wedged server can never hang the whole run.
 _CALL_TIMEOUT_S = 900.0
-
-_DEFAULT_SERVERS: list[dict] = [
-    {
-        "name": "builtin",
-        "command": sys.executable,
-        "args": [str(_BUILTIN_SERVER)],
-    }
-]
 
 
 class MCPToolClient:
@@ -46,18 +34,13 @@ class MCPToolClient:
     ``AsyncExitStack``; call ``start()`` before use and ``shutdown()`` when done.
     """
 
-    def __init__(self, servers: list[dict] | None = None) -> None:
-        self._servers: list[dict] = servers if servers is not None else list(_DEFAULT_SERVERS)
+    def __init__(self, servers: list[dict]) -> None:
+        self._servers: list[dict] = list(servers)
         self._sessions: dict[str, ClientSession] = {}
         # kind -> (server_name, tool_name)
         self._tool_index: dict[str, tuple[str, str]] = {}
         self._tool_descs: dict[str, str] = {}
         self._tool_schemas: dict[str, dict] = {}  # kind -> input JSON schema
-        # server name -> launched inside the OS jail. Recorded by whoever built the server config
-        # (``graph.runtime._builtin_server_config`` sets it from the argv it actually produced), so
-        # a guard that stands down "because the jail confines it" asks how the server was started,
-        # not what the config file says now.
-        self._jailed: dict[str, bool] = {s["name"]: bool(s.get("jailed")) for s in self._servers}
         self._stack: contextlib.AsyncExitStack = contextlib.AsyncExitStack()
 
     async def start(self) -> None:
@@ -85,11 +68,6 @@ class MCPToolClient:
     def list_kinds(self) -> list[str]:
         """Return all registered MCP tool kinds."""
         return list(self._tool_index)
-
-    def is_jailed(self, kind: str) -> bool:
-        """Whether the server serving ``kind`` was launched inside the OS jail."""
-        server = self._tool_index.get(kind, (None, None))[0]
-        return bool(server is not None and self._jailed.get(server))
 
     def describe(self, kind: str) -> str:
         """Return a description string for a tool kind."""

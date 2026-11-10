@@ -228,7 +228,7 @@ def _activation(env: Environment) -> dict:
         result = _source_ini_env(str(env.activate))
     except RuntimeError as exc:
         return {"script": _file_sha(env.activate), "error": str(exc)}
-    # What the script derives from HOME (``PFILES=$HOME/pfiles;...``) is written back as ``$HOME``,
+    # What the script derives from HOME (``VAR=$HOME/folder;...``) is written back as ``$HOME``,
     # so the identity is the environment's, not the user's. Only HOME, and only as a whole leading
     # path -- at the start of the value or of a list entry (after ``:``, ``;``, ``=``), followed by
     # ``/``, a separator or the end; a raw substring replace rewrote unrelated paths (USER ``li``
@@ -419,27 +419,37 @@ _SHELL_KEEP = ("USER", "LOGNAME", "LC_ALL", "LC_CTYPE", "TZ", "http_proxy", "htt
                "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
 
 
+def _dq(text: str) -> str:
+    """``text`` as a double-quoted shell word (a separator matched literally in a pattern)."""
+    return '"' + re.sub(r'(["\\$`])', r"\\\1", text) + '"'
+
+
 def in_environment(
     environment, command: str, toolkit_root: Path | None, *, pass_args: bool = False, keep: tuple[str, ...] = (),
     quiet: bool = False,
 ) -> str:
     """``command`` rewritten to run in ``environment``, inside the caller's jail: a fresh shell with
-    only the jail's own ``HOME``/``TMPDIR``/``PFILES``, locale, identity and proxies, that
+    only the jail's own ``HOME``/``TMPDIR``/private folders, locale, identity and proxies, that
     environment's activation sourced there (never in the runtime: it may be coder-written, and its
     values would carry whatever it could read outside the jail), then ``<prefix>/bin`` first on
     ``PATH`` and the toolkit on ``PYTHONPATH``. Used by a worker's shell (``use_env``) and by the
     coder's candidate wrappers (``coder.env_tools``).
 
     What an activation could do to the command is undone before it runs: functions, aliases and
-    shell options it set are cleared, the working folder restored, and only the writable half of
-    ``PFILES`` replaced (the jail's own). An activation that fails, exits or ends the shell is
+    shell options it set are cleared, the working folder restored, and of each declared private
+    variable (``env.private_variables``) only the part before its separator replaced (the jail's
+    own folder), its declaration re-exported for the REPL's and recorder's calls. An activation that fails, exits or ends the shell is
     reported: the outer shell checks a marker the inner one writes just before the command.
     ``pass_args``: the outer script's arguments reach ``command`` as ``"$@"`` (a wrapper). ``keep``:
     more variables carried into the clean start when set (the gate's test recorder, B3c-2).
     ``quiet``: the activation's own output goes to stderr (a REPL's stdout is its protocol)."""
+    import json
     import shlex
     import uuid
 
+    from auto_research.env import private_variables
+
+    private = private_variables()
     toolkit = [str(toolkit_root), str(Path(toolkit_root).parent)] if toolkit_root is not None else []
     label = re.sub(r"[^A-Za-z0-9_.-]", "_", environment.name)
     steps = ['cd -- "$AR_SHELL_PWD" 2>/dev/null', 'ar_args=("$@")']  # `source` shares "$@"
@@ -455,10 +465,11 @@ def in_environment(
         "builtin unalias -a 2>/dev/null; builtin shopt -u expand_aliases",
         "builtin set +euo pipefail; builtin set +f; IFS=$' \\t\\n'",
         'builtin cd -- "$AR_SHELL_PWD" 2>/dev/null',
-        # The jail's own writable parameter folder; the environment's system half when it set one.
-        'if [ -n "$AR_SHELL_PFILES" ]; then case "$PFILES" in *";"*) '
-        'builtin export PFILES="${AR_SHELL_PFILES%%;*};${PFILES#*;}";; '
-        '*) builtin export PFILES="$AR_SHELL_PFILES";; esac; fi',
+        # The jail's own folder before each separator; the environment's part after it when it set one.
+        *(f'if [ -n "$AR_SHELL_{name}" ]; then case "${name}" in *{_dq(sep)}*) '
+          f'builtin export {name}="${{AR_SHELL_{name}%%{_dq(sep)}*}}"{_dq(sep)}"${{{name}#*{_dq(sep)}}}";; '
+          f'*) builtin export {name}="$AR_SHELL_{name}";; esac; fi' for name, sep in private.items()),
+        *([f"builtin export AR_PRIVATE_FOLDERS={shlex.quote(json.dumps(private))}"] if private else []),
         f'builtin export PATH={shlex.quote(str(environment.prefix / "bin"))}:"$PATH"',
         f'builtin export PYTHONPATH={shlex.quote(os.pathsep.join(toolkit))}${{PYTHONPATH:+:$PYTHONPATH}}',
         "builtin export PYTHONNOUSERSITE=1",
@@ -475,7 +486,8 @@ def in_environment(
     return (
         f"AR_SHELL_MARK={mark}; "
         # By absolute path: a candidate's own `env` may sit first on PATH (as a wrapper of itself).
-        '/usr/bin/env -i HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" AR_SHELL_PFILES="$PFILES" AR_SHELL_PWD="$PWD" '
+        f'/usr/bin/env -i HOME="$HOME" TMPDIR="${{TMPDIR:-/tmp}}" '
+        + "".join(f'AR_SHELL_{name}="${name}" ' for name in private) + 'AR_SHELL_PWD="$PWD" '
         f'AR_SHELL_MARK="$AR_SHELL_MARK" LANG="${{LANG:-C.UTF-8}}" {keep} PATH=/usr/local/bin:/usr/bin:/bin '
         f"/bin/bash --noprofile --norc -c {shlex.quote(chr(10).join(steps))}"
         + (' _ "$@"' if pass_args else "") + "; "

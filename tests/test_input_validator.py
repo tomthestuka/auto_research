@@ -235,7 +235,7 @@ def test_a_disabled_tool_never_blocks_launch(tmp_path, monkeypatch, _fresh_demo_
 def test_the_leads_catalog_definition_carries_no_runtime_key_and_offers_no_reference():
     defn = react.data_catalog_tool_def()
     if defn is None:
-        pytest.skip("catalog_utils is not importable from the configured toolkit")
+        pytest.skip("catalog_utils' manifest is not readable in the configured toolkit")
     props = defn["input_schema"]["properties"]
     assert all("kind" not in p and "default" not in p for p in props.values())
     assert "$ref" not in json.dumps(defn)
@@ -328,7 +328,9 @@ def test_the_leads_catalog_call_passes_the_same_validator(tmp_path, monkeypatch)
     spec = {"args_schema": {"properties": {"obs_db_path": {"kind": "path"}, "min_level": {"kind": "setting"},
                                            "cut": {"kind": "parameter"}}, "required": ["cut"]}}
     monkeypatch.setattr(react, "_toolkit_clean_head", lambda: "head")
-    monkeypatch.setattr(react, "_catalog_read_fn", ("head", lambda p, min_level=None: calls.append(p) or "ok", spec))
+    monkeypatch.setattr(react, "_catalog_spec", lambda: spec)
+    monkeypatch.setattr(react, "_jailed_catalog_read",
+                        lambda spec, p, min_level, **_: calls.append(p) or "ok")
     out = asyncio.run(react.execute_data_catalog({"obs_db_path": "/x", "cut": 2.0}))
     assert out.is_error and "argument cut is a parameter" in out.text and calls == []
     out = asyncio.run(react.execute_data_catalog({"obs_db_path": "/x", "cut": {"value": 2.0, "reason": "r"}}))

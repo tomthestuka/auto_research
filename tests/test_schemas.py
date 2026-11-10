@@ -487,3 +487,35 @@ def test_merge_flow_result_round_trips_each_status():
 
     with pytest.raises(ValidationError):
         MergeFlowResult(tool_spec_id="toolspec-abc123", status="merged_to_master")
+
+
+def test_a_gate_report_states_the_verdict_its_jobs_give():
+    """`GateReport.passed` is the jobs' verdict: a pass lists every required job, none failed and the
+    tests job passed; a report listing its jobs cannot state another verdict."""
+    from pydantic import ValidationError
+
+    from auto_research.schemas import GATE_JOBS, GateJob
+
+    passing = [GateJob(name=job, status="pass") for job in GATE_JOBS]
+    assert GateReport(passed=True, jobs=passing).passed
+    with pytest.raises(ValidationError, match="disagrees with the jobs"):
+        GateReport(passed=True)  # a pass nothing vouched for
+    with pytest.raises(ValidationError, match="disagrees with the jobs"):
+        GateReport(passed=True, jobs=passing[:-1])  # a required job left out
+    failing = [*passing[:-1], GateJob(name="regression", status="fail", reason="failed: layer_b.regression")]
+    with pytest.raises(ValidationError, match="disagrees with the jobs"):
+        GateReport(passed=True, jobs=failing)
+    with pytest.raises(ValidationError, match="disagrees with the jobs"):
+        GateReport(passed=False, jobs=passing)
+    assert not GateReport(passed=False, jobs=failing).passed and not GateReport(passed=False).passed
+
+
+def test_a_gate_reports_jobs_are_frozen():
+    from pydantic import ValidationError
+
+    from auto_research.schemas import GATE_JOBS, GateJob
+
+    report = GateReport(passed=True, jobs=[GateJob(name=job, status="pass") for job in GATE_JOBS])
+    assert isinstance(report.jobs, tuple)
+    with pytest.raises(ValidationError):
+        report.jobs[0].status = "skip"

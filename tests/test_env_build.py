@@ -1,7 +1,8 @@
 """Pipeline-owned environment definitions: validation and the runtime builder (env plan B3a).
 
 Drives `sandbox.env_build` with a fake conda (the one thing outside the code under test): it
-"creates" a prefix by writing the conda-meta records the lock names, the way conda does.
+"creates" a prefix by writing the conda-meta records the lock names, the way conda does. Every
+build runs in the jail (D25): the fake receives the bwrap argv and answers the command after it.
 """
 
 from __future__ import annotations
@@ -14,7 +15,18 @@ from pathlib import Path
 import pytest
 
 from auto_research.sandbox import env_build as B
+from auto_research.sandbox import jail
 from auto_research.sandbox.envs import Environment, External
+
+
+@pytest.fixture(autouse=True)
+def _bwrap(monkeypatch):
+    """The jail's argv on any host (the fake conda answers what follows it); this host's own bwrap,
+    when it has one, for the tests that start a real jailed process."""
+    import shutil
+
+    found = shutil.which("bwrap") or "/usr/bin/bwrap"
+    monkeypatch.setattr(jail, "bwrap_path", lambda: found)
 
 _PKG = "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.1-h1_0.conda#" + "a" * 32
 _PKG2 = "https://conda.anaconda.org/conda-forge/noarch/pip-24.0-pyh_0.conda#" + "b" * 32
@@ -35,13 +47,15 @@ def _definition(root: Path, name="tiny", *, yaml="purpose: test env\nexternals: 
 _H = " --hash=sha256:" + "d" * 64
 
 
-def _fake_conda(calls, *, pkgs_dirs=None, pip_installs=None):
+def _fake_conda(calls, *, pkgs_dirs=None, pip_installs=None, wrapped=None):
     """Stands in for conda and pip at the process boundary, writing what each really writes:
-    conda-meta records for a create, dist-info for a pip install, JSON for `config --show`."""
+    conda-meta records for a create, dist-info for a pip install, JSON for `config --show`.
+    ``calls`` receives each command after its jail prefix; ``wrapped``, when given, the whole argv."""
     def run(argv, env=None, **kw):
+        if wrapped is not None:
+            wrapped.append((argv, env))
+        argv = argv[argv.index("--") + 1:]  # the jail prefix wraps the real command
         calls.append((argv, env))
-        if "--" in argv:  # a jail prefix wraps the real command
-            argv = argv[argv.index("--") + 1:]
         if "config" in argv:
             shown = pkgs_dirs if pkgs_dirs is not None else env["CONDA_PKGS_DIRS"].split(",")
             kw["stdout"].write(json.dumps({"pkgs_dirs": shown}).encode())  # the build's output file
@@ -71,9 +85,15 @@ def _fake_conda(calls, *, pkgs_dirs=None, pip_installs=None):
     return run
 
 
-def _build(tmp_path, folder, calls, *, jailed=False, **kw):
-    return B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe="conda",
-                   base_envs={}, externals={}, jailed=jailed,
+def _conda(tmp_path: Path) -> str:
+    """A conda installation under ``tmp_path`` (the jail binds its root read-only)."""
+    root = tmp_path / "opt" / "conda"
+    return str(root / "bin" / "conda") if root.is_dir() else str(_conda_install(root))
+
+
+def _build(tmp_path, folder, calls, **kw):
+    return B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe=_conda(tmp_path),
+                   base_envs={}, externals={},
                    runner=_fake_conda(calls, **{k: kw.pop(k) for k in ("pkgs_dirs", "pip_installs") if k in kw}),
                    **kw)
 
@@ -137,7 +157,7 @@ def test_a_built_environment_is_created_from_its_lock_with_the_safe_layout(tmp_p
     for flag in ("--isolated", "--no-deps", "--require-hashes", "--only-binary=:all:"):
         assert flag in pip
     record = B.build_record(tmp_path / "conda", env.prefix)
-    assert record == {"definition_sha256": B.read_definition(folder).digest(), "jailed": False,
+    assert record == {"definition_sha256": B.read_definition(folder).digest(), "jailed": True,
                       "name": "ar-tiny", "activate": None, "boot": None, "externals": []}
 
     calls.clear()  # a recorded prefix is verified, not rebuilt
@@ -164,15 +184,13 @@ def _binds(argv: list[str]) -> dict[str, str]:
     return out
 
 
-def test_a_jailed_build_wraps_every_command_and_writes_only_its_own_folders(tmp_path, monkeypatch):
-    from auto_research.sandbox import jail
-
+def test_a_build_wraps_every_command_in_the_jail_and_writes_only_its_own_folders(tmp_path, monkeypatch):
     monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")  # the real argv, whatever the host
     conda_exe = _conda_install(tmp_path / "opt" / "conda")
     calls = []
     folder = _definition(tmp_path / "defs")
     env = B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe=str(conda_exe),
-                  base_envs={}, externals={}, jailed=True, runner=_fake_conda(calls))
+                  base_envs={}, externals={}, runner=_fake_conda([], wrapped=calls))
     assert calls and all(argv[0] == "/usr/bin/bwrap" and "--" in argv for argv, _ in calls)
     jail_part = calls[1][0][:calls[1][0].index("--")]
     binds = _binds(jail_part)
@@ -183,33 +201,13 @@ def test_a_jailed_build_wraps_every_command_and_writes_only_its_own_folders(tmp_
     assert str(folder) not in binds and "--unshare-net" not in jail_part  # the staged copy; network on
     for private in ("built", ".install.lock", "envs"):
         assert str(tmp_path / "conda" / private) not in binds
-    assert B.build_record(tmp_path / "conda", env.prefix)["jailed"] is True
 
 
-def test_a_jailed_caller_never_reuses_a_prefix_built_unjailed(tmp_path, monkeypatch):
-    from auto_research.sandbox import jail
-
-    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
-    folder = _definition(tmp_path / "defs")
-    _build(tmp_path, folder, [])  # unjailed
-    calls = []
-    env = B.build(B.read_definition(folder), conda_dir=tmp_path / "conda",
-                  conda_exe=str(_conda_install(tmp_path / "opt" / "conda")),
-                  base_envs={}, externals={}, jailed=True, runner=_fake_conda(calls))
-    assert any("create" in argv for argv, _ in calls)
-    assert B.build_record(tmp_path / "conda", env.prefix)["jailed"] is True
-    calls.clear()
-    _build(tmp_path, folder, calls)  # an unjailed caller may reuse a jailed prefix
-    assert calls == []
-
-
-def test_a_jailed_build_without_bwrap_is_refused(tmp_path, monkeypatch):
-    from auto_research.sandbox import jail
-
+def test_a_build_without_bwrap_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(jail, "bwrap_path", lambda: None)
     with pytest.raises(RuntimeError, match="needs bwrap"):
         B.build(B.read_definition(_definition(tmp_path / "defs")), conda_dir=tmp_path / "conda",
-                conda_exe=str(_conda_install(tmp_path / "opt" / "conda")), base_envs={}, externals={}, jailed=True,
+                conda_exe=str(_conda_install(tmp_path / "opt" / "conda")), base_envs={}, externals={},
                 runner=lambda *a, **k: pytest.fail("nothing runs unjailed"))
 
 
@@ -304,25 +302,10 @@ def test_untraversable_leftovers_are_removed(tmp_path, where, mode):
     if stuck is not None:
         (stuck / "sub").mkdir(parents=True)
         os.chmod(stuck, mode)
-    env = B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe="conda",
-                  base_envs={}, externals={}, jailed=False, runner=locking)
+    env = B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe=_conda(tmp_path),
+                  base_envs={}, externals={}, runner=locking)
     assert B.build_record(tmp_path / "conda", env.prefix)
     assert list((tmp_path / "conda" / "staging").iterdir()) == []
-
-
-def test_after_an_unjailed_build_no_jailed_caller_reuses_anything(tmp_path, monkeypatch):
-    from auto_research.sandbox import jail
-
-    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
-    conda_exe = str(_conda_install(tmp_path / "opt" / "conda"))
-    one, two = _definition(tmp_path / "a", name="one"), _definition(tmp_path / "b", name="two")
-    B.build(B.read_definition(one), conda_dir=tmp_path / "conda", conda_exe=conda_exe,
-            base_envs={}, externals={}, jailed=True, runner=_fake_conda([]))
-    _build(tmp_path, two, [])  # unjailed: its scripts could have rewritten one's record
-    calls = []
-    B.build(B.read_definition(one), conda_dir=tmp_path / "conda", conda_exe=conda_exe,
-            base_envs={}, externals={}, jailed=True, runner=_fake_conda(calls))
-    assert any("create" in argv for argv, _ in calls)
 
 
 def test_a_derived_environment_comes_from_one_staged_read(tmp_path):
@@ -332,8 +315,7 @@ def test_a_derived_environment_comes_from_one_staged_read(tmp_path):
     (folder / "env.yaml").write_text("purpose: x\nbase: other\n")
     other = Environment(name="other", prefix=tmp_path / "other")
     env = B.build(stale, conda_dir=tmp_path / "conda", conda_exe="conda",
-                  base_envs={"astropy": base, "other": other}, externals={}, jailed=True,
-                  runner=lambda *a, **k: pytest.fail("a derived env runs no conda"))
+                  base_envs={"astropy": base, "other": other}, externals={}, runner=lambda *a, **k: pytest.fail("a derived env runs no conda"))
     assert env.prefix == other.prefix  # what was validated is what is returned
 
 
@@ -365,15 +347,12 @@ def test_a_definition_file_over_the_size_cap_is_refused(tmp_path, monkeypatch):
     assert any("under 64 bytes" in p for p in B.validate(folder, base_envs={}, externals={}))
 
 
-def test_a_rebuild_drops_the_old_record_before_touching_the_prefix(tmp_path, monkeypatch):
-    from auto_research.sandbox import jail
-
-    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
-    conda_exe = str(_conda_install(tmp_path / "opt" / "conda"))
-    one, two = _definition(tmp_path / "a", name="one"), _definition(tmp_path / "b", name="two")
+def test_a_rebuild_drops_the_old_record_before_touching_the_prefix(tmp_path):
+    conda_exe = _conda(tmp_path)
+    one = _definition(tmp_path / "a", name="one")
     B.build(B.read_definition(one), conda_dir=tmp_path / "conda", conda_exe=conda_exe,
-            base_envs={}, externals={}, jailed=True, runner=_fake_conda([]))
-    _build(tmp_path, two, [])  # taints: the next jailed call rebuilds one
+            base_envs={}, externals={}, runner=_fake_conda([]))
+    (one / "env.lock").write_text((one / "env.lock").read_text() + "\n")  # another definition: a rebuild
     inner = _fake_conda([])
 
     record_while_building: list = []
@@ -389,7 +368,7 @@ def test_a_rebuild_drops_the_old_record_before_touching_the_prefix(tmp_path, mon
     before = B.build_record(tmp_path / "conda", _prefix(tmp_path, one))
     with pytest.raises(KeyboardInterrupt):
         B.build(B.read_definition(one), conda_dir=tmp_path / "conda", conda_exe=conda_exe,
-                base_envs={}, externals={}, jailed=True, runner=killed)
+                base_envs={}, externals={}, runner=killed)
     assert record_while_building == [None]
     # D1c: the interrupted rebuild's half-written prefix is gone; the working build it replaced is
     # back under its own record (never the half-written one under it).
@@ -397,8 +376,8 @@ def test_a_rebuild_drops_the_old_record_before_touching_the_prefix(tmp_path, mon
     assert not list((tmp_path / "conda" / "envs").glob("ar-one.prev-*"))
     calls = []
     B.build(B.read_definition(one), conda_dir=tmp_path / "conda", conda_exe=conda_exe,
-            base_envs={}, externals={}, jailed=True, runner=_fake_conda(calls))
-    assert any("create" in argv for argv, _ in calls)  # still tainted: a jailed caller rebuilds
+            base_envs={}, externals={}, runner=_fake_conda(calls))
+    assert any("create" in argv for argv, _ in calls)  # still another definition: built
 
 
 def test_a_yaml_alias_bomb_is_refused_before_it_expands(tmp_path):
@@ -432,14 +411,12 @@ def test_activation_is_a_runtime_copy_of_the_reviewed_bytes(tmp_path):
 
 @pytest.mark.parametrize("name", ["tmp", "home", "pkgs", "def"])
 def test_a_definition_named_like_a_build_folder_stays_read_only_in_the_jail(tmp_path, monkeypatch, name):
-    from auto_research.sandbox import jail
-
     monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
     calls = []
     folder = _definition(tmp_path / "defs", name=name)
     B.build(B.read_definition(folder), conda_dir=tmp_path / "conda",
             conda_exe=str(_conda_install(tmp_path / "opt" / "conda")),
-            base_envs={}, externals={}, jailed=True, runner=_fake_conda(calls))
+            base_envs={}, externals={}, runner=_fake_conda([], wrapped=calls))
     create = next(argv for argv, _ in calls if "create" in argv)
     staged = Path(create[create.index("--file") + 1]).parent
     jail_part = create[:create.index("--")]
@@ -458,8 +435,8 @@ def test_build_output_goes_to_a_file_not_memory(tmp_path):
         return inner(argv, env=env, **kw)
 
     with pytest.raises(RuntimeError) as caught:
-        B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe="conda",
-                base_envs={}, externals={}, jailed=False, runner=loud)
+        B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe=_conda(tmp_path),
+                base_envs={}, externals={}, runner=loud)
     assert str(caught.value).endswith("TAIL-OF-OUTPUT") and len(str(caught.value)) < 1000
 
 
@@ -732,8 +709,7 @@ def test_a_derived_environment_layers_on_a_human_base_read_only(tmp_path):
     heasoft = External("heasoft", tmp_path / "heasoft", ("build.txt",))
     assert B.validate(folder, base_envs={"astropy": base}, externals={"heasoft": heasoft}) == []
     env = B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe="conda",
-                  base_envs={"astropy": base}, externals={"heasoft": heasoft}, jailed=True,
-                  runner=lambda *a, **k: pytest.fail("a derived env runs no conda"))
+                  base_envs={"astropy": base}, externals={"heasoft": heasoft}, runner=lambda *a, **k: pytest.fail("a derived env runs no conda"))
     assert env.prefix == base.prefix and env.activate.read_bytes() == (folder / "activate.sh").read_bytes()
     assert env.activate.is_relative_to(tmp_path / "conda" / "activation")  # a runtime copy, not the toolkit file
     assert env.externals == (heasoft,) and env.name == "ar-xspec"
@@ -758,8 +734,8 @@ def test_live_a_lock_exported_by_conda_rebuilds_exactly(tmp_path):
     registry = Path.home() / ".conda" / "environments.txt"
     before = registry.read_text() if registry.is_file() else ""
     built = B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe=conda,
-                    base_envs={}, externals={}, jailed=True)
-    assert built.python.exists() and B.build_record(tmp_path / "conda", built.prefix)["jailed"] is True
+                    base_envs={}, externals={})
+    assert built.python.exists() and B.build_record(tmp_path / "conda", built.prefix)
     assert (registry.read_text() if registry.is_file() else "") == before
 
 
@@ -887,36 +863,36 @@ def test_replay_rebuilds_a_recorded_state_into_its_own_prefix_and_matches_it(tmp
     defaults = "https://repo.anaconda.com/pkgs/main/linux-64/zlib-1.3-h0_0.conda#" + "e" * 32
     lock = _replay_lock(tmp_path, [_PKG, defaults])
     calls: list = []
-    report = B.replay(lock, conda_dir=tmp_path / "conda", conda_exe="conda", jailed=False, runner=_fake_conda(calls))
+    report = B.replay(lock, conda_dir=tmp_path / "conda", conda_exe=_conda(tmp_path), runner=_fake_conda(calls))
     assert report["conda_match"] is True and report["missing"] == report["extra"] == []
     assert Path(report["prefix"]) == tmp_path / "conda" / "replay" / lock["fingerprint"][:16]
     creates = [c for c in calls if "create" in c[0]]
-    again = B.replay(lock, conda_dir=tmp_path / "conda", conda_exe="conda", jailed=False, runner=_fake_conda(calls))
+    again = B.replay(lock, conda_dir=tmp_path / "conda", conda_exe=_conda(tmp_path), runner=_fake_conda(calls))
     assert again["conda_match"] and len([c for c in calls if "create" in c[0]]) == len(creates), "reused"
 
 
 def test_replay_refuses_a_foreign_platform_or_an_unknown_host(tmp_path):
     with pytest.raises(ValueError, match="this machine is"):
         B.replay(_replay_lock(tmp_path / "a", [_PKG], platform="osx-arm64"), conda_dir=tmp_path / "c",
-                 conda_exe="conda", jailed=False, runner=_fake_conda([]))
+                 conda_exe=_conda(tmp_path), runner=_fake_conda([]))
     other = "https://example.org/pkgs/linux-64/x-1-0.conda#" + "a" * 32
     with pytest.raises(ValueError, match="cannot install"):
         B.replay(_replay_lock(tmp_path / "b", [other]), conda_dir=tmp_path / "c", conda_exe="conda",
-                 jailed=False, runner=_fake_conda([]))
+                 runner=_fake_conda([]))
 
 
 def test_replay_keeps_a_changed_replay_aside_and_refuses_unlisted_packages(tmp_path):
     lock = _replay_lock(tmp_path, [_PKG])
-    first = B.replay(lock, conda_dir=tmp_path / "conda", conda_exe="conda", jailed=False, runner=_fake_conda([]))
+    first = B.replay(lock, conda_dir=tmp_path / "conda", conda_exe=_conda(tmp_path), runner=_fake_conda([]))
     prefix = Path(first["prefix"])
     (prefix / "conda-meta" / "debug.json").write_text(json.dumps({"url": "https://x/dbg.conda", "md5": "f" * 32}))
-    again = B.replay(lock, conda_dir=tmp_path / "conda", conda_exe="conda", jailed=False, runner=_fake_conda([]))
+    again = B.replay(lock, conda_dir=tmp_path / "conda", conda_exe=_conda(tmp_path), runner=_fake_conda([]))
     assert again["conda_match"]
     [kept] = prefix.parent.glob(f"{prefix.name}.changed-*")
     assert (kept / "conda-meta" / "debug.json").exists()
     lock["components"]["conda"].append("local-pkg-1.0-0#" + "a" * 32)
     with pytest.raises(ValueError, match="no URL"):
-        B.replay(lock, conda_dir=tmp_path / "conda", conda_exe="conda", jailed=False, runner=_fake_conda([]))
+        B.replay(lock, conda_dir=tmp_path / "conda", conda_exe=_conda(tmp_path), runner=_fake_conda([]))
 
 
 def _fake_conda_installation(root: Path) -> Path:
@@ -959,7 +935,7 @@ def test_a_jailed_build_works_under_a_symlinked_folder(tmp_path):
         (base / "linked").symlink_to(base / "real")
         folder = _definition(base / "linked" / "defs")
         env = B.build(B.read_definition(folder), conda_dir=base / "linked" / "conda", conda_exe=str(conda),
-                      base_envs={}, externals={}, jailed=True)
+                      base_envs={}, externals={})
         assert env.prefix == base / "linked" / "conda" / "envs" / "ar-tiny"
         assert len(list((base / "real" / "conda" / "envs" / "ar-tiny" / "conda-meta").glob("p*.json"))) == 2
     finally:
@@ -985,7 +961,7 @@ def test_a_jailed_wheel_pin_works_under_a_symlinked_folder():
             "name, version = args[-1].split('==')\n"
             "open(os.path.join(d, f'{name}-{version}-py3-none-any.whl'), 'wb').write(b'wheel')\n")
         python.chmod(0o755)
-        lines = B.pin_wheels(python, ["pkg==1.0"], work=base / "linked" / "work", jailed=True)
+        lines = B.pin_wheels(python, ["pkg==1.0"], work=base / "linked" / "work")
         assert lines and lines[0].startswith("pkg==1.0 --hash=sha256:")
     finally:
         shutil.rmtree(base, ignore_errors=True)
@@ -1004,52 +980,43 @@ def test_a_package_with_a_large_file_list_verifies(tmp_path):
     B.verify(B.read_definition(folder), env.prefix)
 
 
-def test_a_fresh_build_reports_why_it_did_not_reuse_the_prefix(tmp_path, monkeypatch):
+def test_a_fresh_build_reports_why_it_did_not_reuse_the_prefix(tmp_path):
     """D1b: `build` tells its caller when it builds rather than reuses, and why, so the launch
-    reconcile reports a real rebuild as one (the jail cases are where the reconcile's own reading
-    says "intact")."""
-    from auto_research.sandbox import jail
-
-    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
-    conda_exe = str(_conda_install(tmp_path / "opt" / "conda"))
+    reconcile reports a real rebuild as one."""
+    conda_exe = _conda(tmp_path)
     one = _definition(tmp_path / "a", name="one")
     reasons: list[str] = []
 
-    def build(folder, *, jailed):
+    def build(folder):
         return B.build(B.read_definition(folder), conda_dir=tmp_path / "conda", conda_exe=conda_exe,
-                       base_envs={}, externals={}, jailed=jailed, runner=_fake_conda([]),
-                       on_build=reasons.append)
+                       base_envs={}, externals={}, runner=_fake_conda([]), on_build=reasons.append)
 
-    build(one, jailed=False)
-    build(one, jailed=False)              # intact and as strong as asked: reused, nothing said
-    build(one, jailed=True)               # a jailed caller, a record built unjailed
-    assert reasons == ["missing", "unjailed"]
+    build(one)
+    build(one)                            # intact: reused, nothing said
+    assert reasons == ["missing"]
     (one / "env.lock").write_text((one / "env.lock").read_text() + "\n")
-    build(one, jailed=True)
+    build(one)
     assert reasons[-1] == "stale"
-    two = _definition(tmp_path / "b", name="two")
-    build(two, jailed=True)
-    build(two, jailed=True)               # this conda dir saw an unjailed build: nothing reused
-    assert reasons[-2:] == ["missing", "tainted"]
+    B._remove_tree(tmp_path / "conda" / "envs" / "ar-one")
+    build(one)                            # a record without its prefix
+    assert reasons[-1] == "interrupted"
 
 
-def test_a_failed_rebuild_over_a_working_build_puts_it_back(tmp_path, monkeypatch):
-    """D1c: a jailed caller rebuilds a prefix built unjailed; the rebuild fails, and the working
+def test_a_failed_rebuild_over_a_working_build_puts_it_back(tmp_path):
+    """D1c: a changed definition rebuilds a working prefix; the rebuild fails, and the working
     build and its record come back, so the environment stays in the catalogue."""
-    from auto_research.sandbox import jail
-
-    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
-    conda_exe = str(_conda_install(tmp_path / "opt" / "conda"))
+    conda_exe = _conda(tmp_path)
     one = _definition(tmp_path / "a", name="one")
     conda_dir = tmp_path / "conda"
     B.build(B.read_definition(one), conda_dir=conda_dir, conda_exe=conda_exe,
-            base_envs={}, externals={}, jailed=False, runner=_fake_conda([]))
+            base_envs={}, externals={}, runner=_fake_conda([]))
     prefix = conda_dir / "envs" / "ar-one"
     record = B.build_record(conda_dir, prefix)
     marker = prefix / "conda-meta" / "history"
     working = marker.read_bytes()
 
     fake = _fake_conda([])
+    (one / "env.lock").write_text((one / "env.lock").read_text() + "\n")  # another definition: a rebuild
 
     def fails_on_create(argv, env=None, **kw):
         if "create" in argv:
@@ -1058,7 +1025,36 @@ def test_a_failed_rebuild_over_a_working_build_puts_it_back(tmp_path, monkeypatc
 
     with pytest.raises(RuntimeError, match="conda create failed"):
         B.build(B.read_definition(one), conda_dir=conda_dir, conda_exe=conda_exe,
-                base_envs={}, externals={}, jailed=True, runner=fails_on_create)
+                base_envs={}, externals={}, runner=fails_on_create)
     assert prefix.is_dir() and marker.read_bytes() == working
     assert B.build_record(conda_dir, prefix) == record
     assert not list((conda_dir / "envs").glob("ar-one.prev-*"))
+
+
+@pytest.mark.parametrize("stamp", [{"jailed": False}, {}], ids=["unjailed", "unstamped"])
+def test_a_record_not_stamped_as_built_in_the_jail_is_rebuilt_and_never_listed(tmp_path, stamp):
+    """D25: only a record saying `"jailed": true` is reused or listed; one an earlier, unjailed
+    build wrote, or one without the field, is rebuilt."""
+    folder = _definition(tmp_path / "defs")
+    env = _build(tmp_path, folder, [])
+    record = {k: v for k, v in B.build_record(tmp_path / "conda", env.prefix).items() if k != "jailed"}
+    B._write_record(tmp_path / "conda", env.prefix, {**record, **stamp})
+    assert [e.name for e in B.built_environments(tmp_path / "conda", {})] == []
+    reasons, calls = [], []
+    _build(tmp_path, folder, calls, on_build=reasons.append)
+    assert reasons == ["unjailed"] and any("create" in argv for argv, _ in calls)
+    assert [e.name for e in B.built_environments(tmp_path / "conda", {})] == ["ar-tiny"]
+    assert B.build_record(tmp_path / "conda", env.prefix)["jailed"] is True
+
+
+def test_a_conda_dir_an_unjailed_build_ran_in_is_refused(tmp_path):
+    """D25: the marker an unjailed build left means no record there can be trusted: refused, saying
+    how to rebuild."""
+    folder = _definition(tmp_path / "defs")
+    _build(tmp_path, folder, [])
+    (tmp_path / "conda" / "built" / "unjailed.json").write_text("{}")
+    with pytest.raises(RuntimeError, match="unjailed build ran in .*rebuild"):
+        _build(tmp_path, folder, [])
+    with pytest.raises(RuntimeError, match="unjailed build ran in"):
+        B.replay(_replay_lock(tmp_path, [_PKG]), conda_dir=tmp_path / "conda", conda_exe=_conda(tmp_path),
+                 runner=_fake_conda([]))

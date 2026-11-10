@@ -7,21 +7,14 @@ Agent SDK and the two are comparable in one campaign.
 
 Where the two harnesses genuinely differ, and how each difference is handled here:
 
-* **Write jail.** ``workspace-write`` plus ``writableRoots`` is the primary gate here, and it is
-  stronger than the Claude harness's: the allow-list is enforced by the OS (Landlock on Linux),
-  not by a hook we can be routed around. Reads are the opposite: Codex grants full-disk read
-  access by design, so a read outside the allow-list is *recorded* as
-  ``coder.read_outside_allowlist`` rather than prevented. The preventive form is the OS-level jail
-  of §12; the event is what makes the gap countable meanwhile.
-* **Permission gate.** Codex has no per-tool allow-list. The app-server asks the client to approve
-  a *patch* and to approve an action the sandbox would otherwise refuse, and this backend answers
-  from the shared ``PathGuard`` allow-list. Measured 2026-08-19: a shell command the sandbox
-  already permits arrives with **no** approval request, so the handler is a second line over
-  patches and escalations rather than a gate on every command. Commands are confined by the
-  sandbox above and audited below, which is why both exist.
-* **Git.** ``.git`` is read-only inside a writable root under this sandbox, so the coder cannot
-  commit even before our own rules apply. The §9.9 backstops (gate-entry auto-revert, per-attempt
-  base-ref reset) are unchanged and remain the guarantee.
+* **Jail.** The app-server runs inside the OS jail (:meth:`CodexBackend._jail_launcher`,
+  ``jail.coder_policy``): the allow-list is all it reads, its working tree and its own settings home
+  all it writes. Codex's own sandbox is bubblewrap too and cannot nest inside ours, so it stands
+  down (``danger-full-access``, approvals ``never``) and the jail is the one wall.
+* **Escalation approvals.** The app-server routes an MCP tool call to the client as an
+  elicitation; our own escalation server's tools are accepted, any other server's declined.
+* **Git.** ``.git`` is read-only inside every writable root of the jail, so the coder cannot
+  commit. The §9.9 backstops (gate-entry auto-revert, per-attempt base-ref reset) are unchanged.
 * **Cost.** Codex reports token counts per turn (``ThreadTokenUsage.last``), which map onto our
   own usage classes, so its spend is priced through the same path as every chat role rather than
   arriving as an opaque session dollar figure.
@@ -49,19 +42,6 @@ _TOOL_ITEM_TYPES = {"commandExecution", "fileChange", "mcpToolCall", "webSearch"
 # reports the same fact to the drive loop. One set, so the two can never disagree about what
 # "the turn is over" means.
 _TERMINAL_TURN_METHODS = frozenset({"turn/completed", "turn/failed", "turn/aborted"})
-
-
-def _plain_path(value: Any) -> str:
-    """Read a path out of a Codex field, whose types are often wrapped models.
-
-    ``CommandExecutionThreadItem.cwd`` is a ``RootModel``, so ``str()`` on it yields
-    ``root='/tmp/…'`` rather than the path — which silently turned every relative read into a
-    path outside the allow-list (measured 2026-08-19).
-    """
-    if value is None:
-        return ""
-    inner = getattr(value, "root", value)
-    return "" if inner is None else str(inner)
 
 
 def _toml_literal(value: Any) -> str:
@@ -93,21 +73,22 @@ def _flatten_overrides(config: dict[str, Any], prefix: str = "") -> list[str]:
     return flat
 
 
-def _thread_config(*, writable_roots: list[str]) -> dict[str, Any]:
-    """The config a coder session runs under.
+def _thread_config() -> dict[str, Any]:
+    """The config a coder session runs under: the harness's web search on. Reach is the jail's
+    (``jail.coder_policy``), not a Codex sandbox setting."""
+    return {"tools": {"web_search": True}}
 
-    ``sandbox_workspace_write.writable_roots`` is the allow-list; network access stays off for
-    spawned commands, since the author's own model traffic goes through the app-server rather
-    than through anything it runs, and the tests it writes read local observation products.
+
+def jail_label(worktree: Path) -> str:
+    """The settings-home label of the Codex author working in ``worktree``, unique to it.
+
+    Derived from the working tree's **full** path, not its name: every trial clones its toolkit
+    into a directory called ``repo``, so a name-derived label collided across every concurrent
+    author and they raced to initialise one state database (2026-08-20).
     """
-    return {
-        "sandbox_workspace_write": {
-            "writable_roots": writable_roots,
-            "network_access": False,
-            "exclude_slash_tmp": False,
-        },
-        "tools": {"web_search": True},
-    }
+    import hashlib
+
+    return f"codex-{hashlib.sha1(str(Path(worktree).resolve()).encode()).hexdigest()[:10]}"
 
 
 #: The key a Codex author launches with, and a log-safe name for its slot.
@@ -130,12 +111,10 @@ class CodexBackend:
         member: Any,
         worktree: Path,
         system_prompt: str,
-        guard: Any,
         escalation: Any | None = None,
         escalation_url: str | None = None,
         escalation_token_env: str | None = None,
         env: dict[str, str] | None = None,
-        writable_roots: list[str] | None = None,
         jail_readonly: tuple[str, ...] = (),
         monitor: Any | None = None,
         codex_bin: str | None = None,
@@ -148,7 +127,6 @@ class CodexBackend:
         self._model = member.model
         self._provider = member.provider
         self._system_prompt = system_prompt
-        self._guard = guard
         # An EscalationServer, owned by this backend: started before the thread (Codex connects
         # to the MCP endpoint at thread start) and closed with it.
         self._escalation = escalation
@@ -166,7 +144,6 @@ class CodexBackend:
         # this makes the two agree rather than inventing a rule.
         self._key_env = member.key_env or env_var_names(member.provider)[0]
         self._env = env
-        self._writable_roots = writable_roots or [str(worktree)]
         # Folders the jailed author reads but never writes (its candidate environments, B3c-3).
         self._jail_readonly = tuple(jail_readonly)
         self._monitor = monitor
@@ -184,18 +161,17 @@ class CodexBackend:
         """This author's launch key and its slot; see :func:`resolve_vendor_key`."""
         return resolve_vendor_key(self._provider, self._key_env)
 
-    # ---------------------------------------------------------------- permission gate
+    # ---------------------------------------------------------------- approvals
 
     ESCALATION_SERVER = "escalation"
 
     def approve(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
         """Answer one request the app-server routes to the client.
 
-        Three shapes arrive here, and they do not share a reply vocabulary:
+        Two shapes arrive here, and they do not share a reply vocabulary:
 
-        * a **patch** approval and a sandbox **escalation** answer with ``{"decision": …}``. A
-          command the sandbox already permits is never offered (measured 2026-08-19), so this is
-          not the command gate; writable roots are.
+        * a **patch** or **command** approval answers with ``{"decision": …}``; the approval policy
+          is ``never`` (the jail is the wall), so one arriving is accepted.
         * an **MCP tool call** arrives as an *elicitation* (``mcpServer/elicitation/request``,
           ``_meta.codex_approval_kind = "mcp_tool_call"``) and takes the MCP spec's
           ``{"action": "accept" | "decline"}``. Answering it with a ``decision`` key reads as a
@@ -212,43 +188,7 @@ class CodexBackend:
             if server == self.ESCALATION_SERVER:
                 return {"action": "accept", "content": {}}
             return {"action": "decline"}
-        denied: str | None = None
-        try:
-            if method.endswith("commandExecution/requestApproval"):
-                command = params.get("command") or params.get("item", {}).get("command") or ""
-                if isinstance(command, list):
-                    command = " ".join(str(part) for part in command)
-                denied = self._guard.forbidden_in_command(str(command))
-            elif method.endswith("fileChange/requestApproval"):
-                for change in self._patch_paths(params):
-                    if not self._guard.is_allowed(change):
-                        denied = change
-                        break
-        except Exception:  # noqa: BLE001 — a guard bug must never brick authoring (fail-open)
-            denied = None
-        if denied is None:
-            return {"decision": "accept"}
-        return {
-            "decision": "deny",
-            "reason": (
-                f"{denied} is outside the coder's filesystem allow-list "
-                "(research_toolkit / obsdb / analyst-env / HEASoft); the auto_research "
-                "orchestration repo and governance files are off-limits (§2/§4)."
-            ),
-        }
-
-    @staticmethod
-    def _patch_paths(params: dict[str, Any]) -> list[str]:
-        """Every path a file-change approval request names."""
-        changes = params.get("changes")
-        if changes is None:
-            changes = (params.get("item") or {}).get("changes") or []
-        paths: list[str] = []
-        for change in changes or []:
-            path = change.get("path") if isinstance(change, dict) else None
-            if path:
-                paths.append(str(path))
-        return paths
+        return {"decision": "accept"}
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -290,31 +230,29 @@ class CodexBackend:
                     # the inherited environment carries: the point is not to launch on a key the
                     # run has already rotated away from.
                     env[self._key_env] = value
-        # Jailed, the CLI's settings directory has to be one that exists *inside* the jail. It
-        # defaults to the operator's own, which is not bound there, and the CLI refuses to start
-        # rather than degrade — every Codex author died this way on the first jailed sweep. Set only
-        # when jailed, so the unjailed path keeps whatever the operator has configured.
-        from auto_research.sandbox.jail import codex_settings_home, jail_enabled
+        # The CLI's settings directory has to be one that exists *inside* the jail. It defaults to
+        # the operator's own, which is not bound there, and the CLI refuses to start rather than
+        # degrade — every Codex author died this way on the first jailed sweep.
+        from auto_research.sandbox.jail import codex_settings_home
 
-        if jail_enabled():
-            env["CODEX_HOME"] = str(codex_settings_home(self._jail_label()))
-        # Its own HEASoft parameter folder (F23), in its own home, which its jail lets it write.
+        env["CODEX_HOME"] = str(codex_settings_home(self._jail_label()))
+        # Its own folder for each declared private variable (F23), in its own home, which its jail
+        # lets it write.
+        from auto_research.env import private_variables
         from auto_research.sandbox.jail import coder_home
-        from auto_research.sandbox.runner import with_private_param_dir
+        from auto_research.sandbox.runner import private_folders
 
-        env = with_private_param_dir(env, coder_home(self._jail_label()) / "pfiles")
+        env, _ = private_folders(env, private_variables(), at=coder_home(self._jail_label()))
         overrides = [
             "preferred_auth_method=apikey",
             "forced_login_method=api",
             *_flatten_overrides(self._config_payload()),
         ]
         codex_bin = self._codex_bin or configured_codex_bin()
-        jailed = self._jail_launcher(codex_bin)
         config = CodexConfig(
-            # None lets the SDK resolve the binary it ships with, which is the version-matched
-            # one; an explicit path is the escape hatch (see coder.codex_bin). With the OS jail on,
-            # this is a wrapper that execs that same binary inside the jail.
-            codex_bin=jailed or codex_bin,
+            # A wrapper that execs the binary inside the jail: the configured one (see
+            # coder.codex_bin), else the version-matched one the SDK ships.
+            codex_bin=self._jail_launcher(codex_bin),
             env=env,
             cwd=str(self._worktree),
             config_overrides=tuple(overrides),
@@ -347,8 +285,6 @@ class CodexBackend:
         )
 
     def _start_thread(self) -> str:
-        from auto_research.sandbox.jail import jail_enabled
-
         # One enforcement layer, not two. This harness's own sandbox **is** bubblewrap, so running
         # it inside our bubblewrap jail nests the same mechanism: Codex cannot spawn its
         # ``codex-linux-sandbox`` helper, every shell command it issues is rejected, and the author
@@ -356,31 +292,21 @@ class CodexBackend:
         # like a weak model rather than like broken plumbing (measured 2026-08-20, the coder
         # diagnosed it itself and escalated).
         #
-        # So when the kernel jail is on, this harness's own sandbox stands down and the jail is the
-        # wall. That is only safe because ``jail.coder_policy`` tightens the author's writable roots
+        # So this harness's own sandbox stands down and the jail is the wall. That is only safe because ``jail.coder_policy`` tightens the author's writable roots
         # to the working tree and its own settings home, which is **stricter** than the
         # ``workspace-write`` mode being given up: the observation database, the runtime directory
         # and the environments are all read-only, so an author cannot write data files anywhere.
-        # The approval policy stays ``untrusted`` either way, so the path guard still sees the
-        # commands it can see — belt, with the kernel as the wall.
         params: dict[str, Any] = {
             "cwd": str(self._worktree),
             "model": self._model,
-            # ``never`` under the jail, and this is not a relaxation of anything that worked.
-            # With the harness sandbox on, a command it already permitted was never offered to the
-            # client (so this was never the command gate); standing that sandbox down routed
-            # command approvals to a handler for the first time, and that path has never worked —
-            # `python`, `pytest` and every compound shell command came back rejected, so the author
-            # could not run the tests it had just written. Measured 2026-08-20 across three trials,
-            # with the lead telling the coder those binaries were "blocked by design". The kernel
-            # jail already makes anything outside the allow-list *absent*, which is stronger than a
-            # command-string check, so the approval round-trip buys nothing here and costs the
-            # author its own test run. What is genuinely given up is the ``PathGuard`` command
-            # audit for this harness while jailed; it was documented best-effort (§13) and the
-            # jail supersedes it.
-            "approvalPolicy": "never" if jail_enabled() else "untrusted",
+            # ``never``: with the harness sandbox stood down, command approvals reached a handler
+            # for the first time, and `python`, `pytest` and every compound shell command came back
+            # rejected, so the author could not run the tests it had just written (measured
+            # 2026-08-20 across three trials). The kernel jail makes anything outside the
+            # allow-list *absent*, so the approval round-trip buys nothing.
+            "approvalPolicy": "never",
             "approvalsReviewer": "user",
-            "sandbox": "danger-full-access" if jail_enabled() else "workspace-write",
+            "sandbox": "danger-full-access",
             # Layered on top of Codex's own instructions rather than replacing them
             # (``baseInstructions``): the harness's account of its tools is harness-specific and
             # worth keeping, while `prompts/coder.md` is policy. Both were live-checked to be
@@ -394,7 +320,7 @@ class CodexBackend:
         return started.thread.id
 
     def _config_payload(self) -> dict[str, Any]:
-        config = _thread_config(writable_roots=self._writable_roots)
+        config = _thread_config()
         if self._base_url:
             # A non-native vendor is reached by declaring its provider block; the endpoint and
             # the key variable both come from the coder member (see coder.harness).
@@ -423,35 +349,20 @@ class CodexBackend:
         return config
 
 
-    def _jail_launcher(self, codex_bin: str | None) -> str | None:
-        """A wrapper running the app-server inside the OS jail, or ``None`` when the jail is off.
+    def _jail_launcher(self, codex_bin: str | None) -> str:
+        """A wrapper running the app-server inside the OS jail.
 
         This harness is the reason the jail exists: its reads are ungated by design, and a coder on
-        it read this repository's own source unprompted (§13). The write jail it already applies
-        (``writable_roots``) stays — belt and kernel — while the mount namespace is what finally
-        makes a read outside the allow-list impossible rather than merely recorded.
+        it read this repository's own source unprompted (§13). The mount namespace makes a read
+        outside the allow-list impossible.
         """
-        from auto_research.sandbox.jail import (
-            coder_home,
-            coder_policy,
-            jail_available,
-            jail_enabled,
-            write_launcher,
-        )
+        from auto_research.sandbox.jail import coder_home, coder_policy, write_launcher
 
-        if not jail_enabled():
-            return None
-        ok, _ = jail_available()
-        if not ok:
-            return None  # reported by the launch check; run as before rather than not at all
         real = codex_bin
         if not real:
             from auto_research.sandbox.coder.codex_bin import resolve_codex_bin
 
-            try:
-                real = resolve_codex_bin()
-            except Exception:  # noqa: BLE001 — let the SDK report a missing binary as it always did
-                return None
+            real = resolve_codex_bin()
         target = self._worktree if self._worktree.is_dir() else Path(".")
         # A label of this author's own, so concurrent authors do not share one settings directory:
         # a sweep runs several at once, and the CLI writes login state and history into it.
@@ -474,16 +385,8 @@ class CodexBackend:
         return str(write_launcher(coder_home(label) / ".codex-jailed", real, policy))
 
     def _jail_label(self) -> str:
-        """A settings-home label unique to this author.
-
-        Derived from the working tree's **full** path, not its name: every trial clones its toolkit
-        into a directory called ``repo``, so a name-derived label collided across every concurrent
-        author and they raced to initialise one state database (2026-08-20).
-        """
-        import hashlib
-
-        digest = hashlib.sha1(str(self._worktree.resolve()).encode()).hexdigest()[:10]
-        return f"codex-{digest}"
+        """A settings-home label unique to this author (:func:`jail_label`)."""
+        return jail_label(self._worktree)
 
     async def disconnect(self) -> None:
         import asyncio
@@ -671,7 +574,6 @@ class CodexBackend:
             if output:
                 data["text"] = str(output)
             summary = f"coder → shell: {cap_text(command, 60)}"
-            await self._audit_reads(root)
         elif kind == "fileChange":
             paths = [getattr(c, "path", "") for c in getattr(root, "changes", []) or []]
             data["input"] = json.dumps(paths)
@@ -685,46 +587,6 @@ class CodexBackend:
             data["input"] = str(getattr(root, "query", "") or "")
             summary = f"coder → web_search: {cap_text(data['input'], 60)}"
         await emit(self._monitor, "coder.tool_use", level=7, summary=summary, data=data)
-
-    async def _audit_reads(self, root: Any) -> None:
-        """Record a read of a path outside the allow-list.
-
-        Codex grants full-disk read access by design and asks for no approval to read, so this
-        is a detective control, not a preventive one: it makes a boundary crossing countable
-        while the preventive OS-level jail (§12) is unbuilt.
-
-        Paths come from Codex's own parse of the command and are usually **relative** to the
-        command's working directory. Resolving them against this process's cwd instead put every
-        ordinary in-worktree read outside the allow-list (47 false events in one session,
-        measured 2026-08-19), which would have made the audit useless by drowning a real crossing.
-        """
-        actions = getattr(root, "command_actions", None) or []
-        base = Path(_plain_path(getattr(root, "cwd", None)) or self._worktree)
-        outside: list[str] = []
-        for action in actions:
-            inner = getattr(action, "root", action)
-            for attr in ("path", "paths", "file", "files"):
-                value = getattr(inner, attr, None)
-                if value is None:
-                    continue
-                candidates = value if isinstance(value, (list, tuple)) else [value]
-                for candidate in candidates:
-                    try:
-                        resolved = Path(_plain_path(candidate) or "")
-                        if not str(resolved) or str(resolved) == ".":
-                            continue
-                        if not resolved.is_absolute():
-                            resolved = base / resolved
-                        if not self._guard.is_allowed(str(resolved)):
-                            outside.append(str(resolved))
-                    except Exception:  # noqa: BLE001 — auditing never breaks a turn
-                        continue
-        if outside:
-            await emit(
-                self._monitor, "coder.read_outside_allowlist", level=3,
-                summary=f"coder read {len(outside)} path(s) outside the allow-list",
-                data={"paths": outside, "harness": self.harness},
-            )
 
     async def _record_usage(self, usage: Any) -> Any:
         """Book this turn's tokens on the run's cost meter.

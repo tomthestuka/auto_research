@@ -275,8 +275,13 @@ Imports from the pipeline (all read-only consumers, nothing is modified):
 `ValidationDataset`, `CheckResult`), and `auto_research.observability.costs`
 (`install_cost_meter`, only under `--review`).
 
+The synthetic base is written by the test suite's fixture-toolkit builder,
+`tests/fixtures/toolkit.py` (`PKG_NAME`, `TOOL_NAME`, `write_base_package`, `init_repo`, `git`),
+the one builder of a contract-meeting toolkit (Phase 3 step 0a, B5); with its defaults it writes
+the frozen corpus base byte for byte. Run from the repository root, so `tests` is importable.
+
 External: `git`, `pyyaml`, and — for the real Layer-B runs — the analysis environment the gate
-resolves from `config/orchestration.yaml` (`analyze_env`, `analyze_ini_sh`). Real mutants also
+resolves: the toolkit's default environment (`toolkits[].default_env`, its base in `human_envs`). Real mutants also
 need the `toolkit_root` checkout and read the observation database the toolkit's own tests read;
 an entry with `catalog_writer` reads `obsdb_catalog` from that checkout at the pinned ref
 (`git archive`, read-only).
@@ -288,16 +293,17 @@ Depended on by: nothing in `src/`. `tests/test_gate_bench.py` covers it determin
 ### `basepkg.py` — the synthetic base and the editing helpers
 
 - `PKG_NAME` / `TOOL_NAME` — the synthetic package and tool names (`demo_utils`,
-  `band_pa_summary`).
-- `LIB_SOURCE` / `MANIFEST_SOURCE` / `TEST_SOURCE` — the correct human half, the pure-data
-  manifest, and the committed Layer-B checks of the synthetic package. The tool computes a
+  `band_pa_summary`), re-exported from `tests/fixtures/toolkit.py`.
+- `write_base_package(repo, *, tool_name=TOOL_NAME, with_test=True) -> Path` — re-exported from
+  the fixture builder, called with its defaults: write the package into `repo`; returns the
+  package root. `with_test=False` and a mismatched `tool_name` are the two structural mutants.
+  The package (the builder's `LIB_SOURCE` / `MANIFEST_SOURCE` / `TEST_SOURCE`) is the correct
+  human half, the pure-data manifest, and the committed Layer-B checks. The tool computes a
   two-band count ratio with propagated Poisson error and an error-weighted position angle on the
   180-degree circle; the tests are known-input, independent-recompute and metamorphic checks.
-- `write_base_package(repo, *, tool_name=TOOL_NAME, with_test=True) -> Path` — write the package
-  into `repo`; returns the package root. `with_test=False` and a mismatched `tool_name` are the
-  two structural mutants.
-- `make_synthetic_repo(dest) -> Path` — throwaway git repo with one base commit and the
-  toolkit's own ignore rules, so byte-compiled output never looks like authored content.
+- `make_synthetic_repo(dest) -> Path` — throwaway git repo with one base commit (the builder's
+  `init_repo` with this corpus's cover README, committer `analyst`) and the toolkit's own ignore
+  rules, so byte-compiled output never looks like authored content.
 - `add_catalog_writer(repo, toolkit_root, toolkit_sha)` — commit the toolkit's `obsdb_catalog` at
   `toolkit_sha` (whole) into `repo`'s base, for an entry whose tool writes an obs-db.
 - `patch(path, old, new, *, count=1)` — anchored replacement; raises `AssertionError` unless
@@ -595,3 +601,14 @@ Compacted 2026-09-01, 2026-09-24 and 2026-10-19 (every entry); detail in git his
   with the default runner (this interpreter, jail off) per pair. The generic pair tests build through
   the harness base (`_built`). Records carry `author`, so the output-class entries can be split
   from the published 134-entry corpus. Corpus 134 → 152.
+- 2026-11-09 — Phase 3 step 0a W1 (B5, one builder): the synthetic base's package and repository
+  move to the test suite's fixture-toolkit builder, `tests/fixtures/toolkit.py`, which `basepkg.py`
+  imports (`PKG_NAME`, `TOOL_NAME`, `write_base_package`; `make_synthetic_repo` = `init_repo` with
+  the cover README); the editing helpers, `add_catalog_writer` and `keep_only_passing_tests` stay.
+  The builder's defaults write the corpus base byte for byte (every file and `.git/config`, `HEAD`
+  compared before and after the move); the benchmark now imports from `tests/`.
+- 2026-11-09 — W1 review M1: `test_the_synthetic_base_is_the_published_corpus_base_byte_for_byte` pins the
+  sha256 of every file the base writes (clean, `with_test=False`, `tool_name="band_summary_v2"`; `.git`
+  left out), so an edit of the shared builder changes the corpus base only together with the pin. The base
+  holds no root `conftest.py` (only the full fixture toolkit does).
+- 2026-11-09 — Phase 3 step 0a W4: the real Layer-B runs use the toolkit's default environment (the `analyze_env`/`analyze_ini_sh` keys retired); the `analysis_env` test fixture stands this interpreter in as `env.analysis_environment`.

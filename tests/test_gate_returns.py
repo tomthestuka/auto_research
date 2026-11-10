@@ -3,8 +3,9 @@
 Each case builds a throwaway toolkit repo, commits a base, adds one tool + manifest entry + test
 uncommitted (so the tool is "new" to the diff), and runs the REAL `run_gate` with its REAL default
 Layer-B runner — two pytest subprocesses with the recorder plugin. Two things are swapped for the
-suite: the analysis interpreter is this one (it has what the tools below import), and the OS jail
-is off. Everything the check judges with is the runtime's own code.
+suite: the analysis interpreter is this one (it has what the tools below import), and the jail's
+allow-list is empty (the gate binds what its run needs: the worktree, the environment's prefix).
+Everything the check judges with is the runtime's own code; the tests run in the real jail.
 """
 
 from __future__ import annotations
@@ -521,9 +522,24 @@ BREACHES = {
 
 @pytest.fixture
 def analysis_env(monkeypatch):
-    """This interpreter as the analysis env, the jail off; the gate otherwise untouched."""
-    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"analyze_env": sys.prefix})
-    monkeypatch.setattr(gate, "_jailed_pytest", lambda argv, *, junit_path, worktree=None, masked=None, extra_ro=(): argv)
+    """This interpreter as the toolkit's default environment (what the gate builds for a package
+    naming none), the jail's allow-list empty; the gate otherwise untouched."""
+    from auto_research.sandbox import jail
+    from auto_research.sandbox.envs import Environment
+    from auto_research.toolkit_contract import toolkit
+
+    built = gate._gate_environment
+    host = Environment(name="host", prefix=Path(sys.prefix), owner="human")
+
+    async def default_is_host(export, env_id):
+        return (host, "") if env_id == toolkit().default_env else await built(export, env_id)
+
+    monkeypatch.setattr(gate, "_gate_environment", default_is_host)
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"env_externals": {
+        "heasoft": {"root": "/opt/heasoft", "private": {"PFILES": ";"}}}})
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
+    monkeypatch.setattr(jail, "_config", lambda: {})
     monkeypatch.setattr(gate, "_gate_test_timeout", lambda worktree, targets: 120)
 
 
@@ -654,7 +670,7 @@ def test_recorder_is_assembled_from_runtime_source():
     # G4: one parameter-folder rule for the REPL, the shell server and the recorder.
     from auto_research.sandbox.runner import builtin_function_source
 
-    assert builtin_function_source("private_param_dir") in src and builtin_function_source("private_param_dir") in _REPL_SCRIPT
+    assert builtin_function_source("private_folders") in src and builtin_function_source("private_folders") in _REPL_SCRIPT
     compile(src, "recorder", "exec")
 
 
@@ -686,10 +702,13 @@ def test_run_ones_pytest_scratch_is_gone_before_run_two(tmp_path, monkeypatch):
     )
     prefix = sys.prefix  # its configured spelling: the jail links it to the resolved path
     monkeypatch.setattr(jail, "_config", lambda: {
-        "agent_os_jail": True, "agent_fs_allow": [prefix], "agent_fs_readonly": [prefix],
+        "agent_fs_allow": [prefix], "agent_fs_readonly": [prefix],
     })
-    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"analyze_env": sys.prefix})
-    result = asyncio.run(gate._default_test_runner(repo, [str(pkg)], timeout_s=120))
+    from auto_research.sandbox.envs import Environment
+
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {})
+    host = Environment(name="host", prefix=Path(sys.prefix), owner="human")
+    result = asyncio.run(gate._default_test_runner(repo, [str(pkg)], timeout_s=120, environment=host))
     assert result["results"][0].passed, result["results"][0].detail
     assert result["deterministic"], result.get("determinism_detail")
 
@@ -873,7 +892,11 @@ def test_earlier_tests_run_in_the_environment_their_package_names(tmp_path, monk
     package names, built for the gate; when it cannot build, the check says whose tests waited."""
     from tests.test_gate import _derived_package
 
-    monkeypatch.setattr(gate, "_jailed_pytest", lambda argv, *, junit_path, worktree=None, masked=None, extra_ro=(): argv)
+    from auto_research.sandbox import jail
+
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
+    monkeypatch.setattr(jail, "_config", lambda: {})
     monkeypatch.setattr(gate, "_gate_test_timeout", lambda worktree, targets: 120)
     repo = _make_repo(tmp_path)
     _derived_package(repo, monkeypatch)
@@ -934,7 +957,7 @@ def test_a_failing_earlier_test_shows_its_assertion_and_what_it_printed(tmp_path
 def test_many_failing_earlier_tests_stay_within_the_output_cap(tmp_path, analysis_env, monkeypatch):
     cap = 3000
     monkeypatch.setattr(gate, "_orchestration_config",
-                        lambda: {"analyze_env": sys.prefix, "gate_layer_b_output_cap": cap})
+                        lambda: {"gate_layer_b_output_cap": cap})
     many = {"demo_utils/tests/test_many.py": (
         "import pytest\n\n\n@pytest.mark.parametrize('i', range(60))\n"
         "def test_each(i):\n    print('x' * 2000)\n    assert i < 0\n")}
@@ -942,3 +965,101 @@ def test_many_failing_earlier_tests_stay_within_the_output_cap(tmp_path, analysi
     detail = next(c for c in report.layer_b if c.name == "layer_b.regression").detail
     assert "and 50 more earlier tests that fail with this change" in detail and "and 30 more" in detail, detail[-500:]
     assert len(detail) < 2 * cap, len(detail)
+
+
+# ── the data test class (Phase 3 step 0a W3): the toolkit names a data set, the host provides it ──
+
+_DATA_TEST = ('import os\n\nimport pytest\n\n\n@pytest.mark.data("demo_rows")\n'
+              'def test_reads_the_named_rows():\n'
+              '    assert os.listdir(os.environ["TOOLKIT_DATA_DEMO_ROWS"]) == ["rows.csv"]\n')
+
+
+def _with_test_data(monkeypatch, test_data: dict) -> None:
+    """The host's configuration as the gate reads it, with ``test_data``."""
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {
+        "env_externals": {"heasoft": {"root": "/opt/heasoft", "private": {"PFILES": ";"}}}, "test_data": test_data})
+
+
+def _data_set(tmp_path) -> Path:
+    folder = tmp_path / "rows"
+    folder.mkdir()
+    (folder / "rows.csv").write_text("a,b\n1,2\n")
+    return folder
+
+
+@pytest.mark.parametrize("earlier", [False, True])
+def test_a_data_test_the_gate_skips_fails_the_change(tmp_path, analysis_env, monkeypatch, earlier):
+    """The toolkit's root conftest skips a data test whose data set is absent, with the reason; the
+    gate counts that skip from its JUnit report and fails the change, naming the data set, whether
+    the test is the change's own or an earlier one."""
+    from tests.fixtures.toolkit import ROOT_CONFTEST
+
+    _with_test_data(monkeypatch, {"elsewhere": str(_data_set(tmp_path))})
+    test = {"demo_utils/tests/test_rows.py": _DATA_TEST}
+    repo = _repo(tmp_path, *_CLEAN_TOOL, base_files={"conftest.py": ROOT_CONFTEST, **(test if earlier else {})},
+                 extra_files=None if earlier else test)
+    report = _gate(repo)
+    status = {j.name: j for j in report.jobs}
+    check = next(c for c in report.layer_b if c.name == ("layer_b.regression" if earlier else "layer_b.data"))
+    assert not report.passed and not check.passed, [(c.name, c.detail) for c in report.layer_b]
+    assert "test_reads_the_named_rows (data demo_rows) was skipped: data: demo_rows is absent" in check.detail
+    assert "Data sets this pipeline provides: elsewhere" in check.detail
+    assert status["regression" if earlier else "tests"].status == "fail"
+
+
+def test_a_data_test_runs_on_the_data_set_the_host_names(tmp_path, analysis_env, monkeypatch):
+    from tests.fixtures.toolkit import ROOT_CONFTEST
+
+    _with_test_data(monkeypatch, {"demo_rows": str(_data_set(tmp_path))})
+    test = {"demo_utils/tests/test_rows.py": _DATA_TEST}
+    repo = _repo(tmp_path, *_CLEAN_TOOL, base_files={"conftest.py": ROOT_CONFTEST}, extra_files=test)
+    report = _gate(repo)
+    assert report.passed, report.reason
+    data = next(c for c in report.layer_b if c.name == "layer_b.data")
+    assert data.passed and data.detail == "1 data tests ran"
+    assert [j.status for j in report.jobs if j.name == "tests"] == ["pass"]
+
+
+def test_a_live_test_of_the_change_is_deselected(tmp_path, analysis_env, monkeypatch):
+    """The gate's test run has no network: a change's live test is left out, never run or skipped."""
+    from tests.fixtures.toolkit import ROOT_CONFTEST
+
+    _with_test_data(monkeypatch, {})
+    live = {"demo_utils/tests/test_net.py": "import pytest\n\n\n@pytest.mark.live\ndef test_net():\n    assert False\n"}
+    repo = _repo(tmp_path, *_CLEAN_TOOL, base_files={"conftest.py": ROOT_CONFTEST}, extra_files=live)
+    report = _gate(repo)
+    assert report.passed, report.reason
+    # Listed for the co-lead, never run and never a failure (yet).
+    listed = next(c for c in report.layer_b if c.name == "layer_b.live")
+    assert listed.passed and "demo_utils/tests/test_net.py::test_net" in listed.detail, listed.detail
+    assert "test_net" not in str(report.findings)
+
+
+@pytest.mark.parametrize("test,needle", [
+    ("import pytest\n\n\ndef test_waits():\n    pytest.skip('needs the archive')\n", "test_waits was skipped: needs the archive"),
+    ("import pytest\n\n\n@pytest.mark.xfail(reason='known gap')\ndef test_gap():\n    assert False\n", "test_gap was skipped: known gap"),
+    ("import pytest\n\n\n@pytest.mark.xfail(reason='maybe')\ndef test_maybe():\n    assert True\n", "test_maybe is marked xfail"),
+])
+def test_a_skipped_or_xfail_test_of_the_change_fails_the_tests_job(tmp_path, analysis_env, monkeypatch, test, needle):
+    """Every test of the change runs and passes in the gate: a skip, an XFAIL or an XPASS verifies
+    nothing about the new tool, so the tests job fails, naming the test and why."""
+    _with_test_data(monkeypatch, {})
+    repo = _repo(tmp_path, *_CLEAN_TOOL, extra_files={"demo_utils/tests/test_extra.py": test})
+    report = _gate(repo)
+    check = next(c for c in report.layer_b if c.name == "layer_b.skipped")
+    assert not check.passed and needle in check.detail, check.detail
+    assert "Make each one run here" in check.detail
+    assert not report.passed and {j.name: j.status for j in report.jobs}["tests"] == "fail"
+
+
+def test_a_conditional_xfail_whose_condition_is_false_is_a_plain_test(tmp_path, analysis_env, monkeypatch):
+    """pytest's own evaluation decides whether an xfail mark applies: `xfail(False, ...)` does not."""
+    _with_test_data(monkeypatch, {})
+    test = ("import sys\n\nimport pytest\n\n\n@pytest.mark.xfail(False, reason='never here')\n"
+            "def test_plain():\n    assert True\n\n\n"
+            "@pytest.mark.xfail(sys.platform == 'no-such-platform', reason='elsewhere')\n"
+            "def test_also_plain():\n    assert True\n")
+    repo = _repo(tmp_path, *_CLEAN_TOOL, extra_files={"demo_utils/tests/test_extra.py": test})
+    report = _gate(repo)
+    assert report.passed, report.reason
+    assert next(c for c in report.layer_b if c.name == "layer_b.skipped").passed

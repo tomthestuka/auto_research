@@ -19,7 +19,7 @@ import shutil
 from pathlib import Path
 
 from auto_research.sandbox import env_build as B
-from tests.test_env_build import _build, _conda_install, _definition, _fake_conda
+from tests.test_env_build import _build, _bwrap, _conda, _conda_install, _definition, _fake_conda  # noqa: F401 — _bwrap: autouse, every build is jailed
 
 #: What the package server holds (the network): URL → bytes.
 SERVER = {
@@ -27,6 +27,17 @@ SERVER = {
     "https://conda.anaconda.org/conda-forge/noarch/certs-1.0-h0_0.conda": b"certs archive bytes",
 }
 LOCK = ("@EXPLICIT", *(f"{url}#{hashlib.md5(data).hexdigest()}" for url, data in SERVER.items()))
+
+
+def _config(toolkit: Path) -> dict:
+    """An orchestration config naming ``toolkit`` in its toolkit contract, and nothing else; the
+    process is bound to that contract, as a run binds its own (readers take it from ``toolkit()``)."""
+    from auto_research import toolkit_contract
+
+    config = {"toolkits": [{"name": "research_toolkit", "root": str(toolkit), "template_package": "demo_utils",
+                            "authoring_branch": "ai", "default_env": "analysis"}]}
+    toolkit_contract.bind(config)  # unbound after the test (tests/conftest.py)
+    return config
 
 
 def _caching_conda(downloads: list[str]):
@@ -72,10 +83,8 @@ def test_the_gate_and_a_commit_time_build_of_one_lock_share_the_archive(tmp_path
 
     toolkit, folder, _ = _reconcile_setup(tmp_path, monkeypatch)
     (folder / "env.lock").write_text("# platform: linux-64\n" + "\n".join(LOCK) + "\n")
-    # Jailed builds: only they read the archive (unjailed, conda would find it writable).
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: True)
     monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
-    conda_exe = str(_conda_install(tmp_path / "opt" / "conda"))
+    conda_exe = _conda(tmp_path)
     monkeypatch.setattr("auto_research.env.conda_executable", lambda: conda_exe)
     downloads: list[str] = []
     conda = _caching_conda(downloads)
@@ -164,7 +173,7 @@ def test_a_failed_build_of_a_changed_definition_keeps_the_previous_one_flagged(t
 
     [failed] = build_committed_environments(toolkit, ["built"], runner=fails)
     assert not failed["ok"] and failed["previous_in_use"] is True
-    [listed] = [e for e in app_env.env_catalogue({"toolkit_root": str(toolkit)}) if e.owner == "pipeline"]
+    [listed] = [e for e in app_env.env_catalogue(_config(toolkit)) if e.owner == "pipeline"]
     assert listed.name == "ar-built" and listed.superseded is True
     # Derived from the digests (D3c): the record is put back exactly as it was, nothing stamped.
     record = B.build_record(app_env.agent_conda_dir(), listed.prefix)
@@ -201,7 +210,7 @@ def test_a_revert_to_the_kept_definition_clears_its_superseded_mark(tmp_path, mo
         return fake(argv, env=env, **kw)
 
     build_committed_environments(toolkit, ["built"], runner=fails)
-    catalogue = lambda: [e for e in app_env.env_catalogue({"toolkit_root": str(toolkit)})  # noqa: E731
+    catalogue = lambda: [e for e in app_env.env_catalogue(_config(toolkit))  # noqa: E731
                          if e.owner == "pipeline"]
     assert catalogue()[0].superseded is True
     (folder / "env.lock").write_text(first)
@@ -226,26 +235,24 @@ def test_a_kept_build_changed_by_hand_is_not_put_back(tmp_path):
     assert any("create" in argv for argv, _ in calls), "rebuilt, not put back"
 
 
-def test_only_a_jailed_build_reads_the_archive_and_never_one_holding_a_folder(tmp_path, monkeypatch):
-    """Review finding: unjailed, conda would find the archive writable and extract into it; and an
-    archive holding a folder (an extracted package nothing re-checks) is not used."""
+def test_a_build_reads_the_archive_and_never_one_holding_a_folder(tmp_path, monkeypatch):
+    """Review finding: an archive holding a folder (an extracted package nothing re-checks) is not
+    used."""
     from auto_research.sandbox import jail
 
     monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
     conda_exe = str(_conda_install(tmp_path / "opt" / "conda"))
     archive = tmp_path / "archive"
 
-    def pkgs_dirs_of(folder, *, jailed):
+    def pkgs_dirs_of(folder):
         calls: list = []
         B.build(B.read_definition(folder), conda_dir=tmp_path / f"conda-{folder.name}", conda_exe=conda_exe,
-                base_envs={}, externals={}, jailed=jailed, runner=_fake_conda(calls),
-                package_archive=archive)
+                base_envs={}, externals={}, runner=_fake_conda(calls), package_archive=archive)
         return next(env["CONDA_PKGS_DIRS"] for argv, env in calls if "config" in argv).split(",")
 
-    assert len(pkgs_dirs_of(_definition(tmp_path / "a", name="one"), jailed=False)) == 1
-    assert pkgs_dirs_of(_definition(tmp_path / "b", name="two"), jailed=True)[1] == str(archive)
+    assert pkgs_dirs_of(_definition(tmp_path / "b", name="two"))[1] == str(archive)
     (archive / "zlib-1.3-h0_0").mkdir()
-    assert len(pkgs_dirs_of(_definition(tmp_path / "c", name="three"), jailed=True)) == 1
+    assert len(pkgs_dirs_of(_definition(tmp_path / "c", name="three"))) == 1
 
 
 def _failing(fake, calls):
@@ -309,7 +316,7 @@ def test_a_kept_build_put_back_at_launch_is_logged_as_one_restore(tmp_path, monk
     assert restored["summary"] == (f"restored kept build {kept.name} as ar-built "
                                    "(built earlier from this definition)")
     assert not [argv for argv, _env in calls if "create" in argv]
-    assert [e.superseded for e in app_env.env_catalogue({"toolkit_root": str(toolkit)})
+    assert [e.superseded for e in app_env.env_catalogue(_config(toolkit))
             if e.owner == "pipeline"] == [False]
 
 
@@ -372,7 +379,7 @@ def test_a_definition_that_no_longer_validates_keeps_the_earlier_build_said_and_
     (folder / "env.lock").write_text("not a lock\n")
     [result] = reconcile_environments(toolkit, runner=_fake_conda([]))
     assert result["status"] == "failed" and result["previous_in_use"] is True
-    [listed] = [e for e in app_env.env_catalogue({"toolkit_root": str(toolkit)}) if e.owner == "pipeline"]
+    [listed] = [e for e in app_env.env_catalogue(_config(toolkit)) if e.owner == "pipeline"]
     assert listed.superseded is True
 
 
@@ -385,5 +392,5 @@ def test_a_build_whose_definition_is_gone_reads_as_superseded(tmp_path, monkeypa
     toolkit, folder, _ = _reconcile_setup(tmp_path, monkeypatch)
     build_committed_environments(toolkit, ["built"], runner=_fake_conda([]))
     shutil.rmtree(folder)
-    [listed] = [e for e in app_env.env_catalogue({"toolkit_root": str(toolkit)}) if e.owner == "pipeline"]
+    [listed] = [e for e in app_env.env_catalogue(_config(toolkit)) if e.owner == "pipeline"]
     assert listed.superseded is True

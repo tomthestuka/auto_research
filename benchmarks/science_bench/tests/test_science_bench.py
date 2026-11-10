@@ -374,10 +374,9 @@ def test_block2_records_why_it_is_unassigned():
 _SOURCE_ORCHESTRATION = {
     "runtime_dir": "/shared/runtime",
     "papers_dir": "/shared/papers",
-    "toolkit_root": "/shared/toolkit",
+    "toolkits": [{"name": "research_toolkit", "root": "/shared/toolkit", "template_package": "xspec_utils",
+                  "authoring_branch": "ai", "default_env": "analysis"}],
     "max_iterations": 3,
-    "tool_author_branch": "ai",
-    "agent_os_jail": True,
     "agent_fs_allow": [
         "/shared/toolkit", "/shared/obsdb", "/shared/runtime",
         "/opt/conda/envs/astropy", "/opt/heasoft", "/man1/CALDB", "/tmp",
@@ -411,7 +410,7 @@ def _orchestration(**kwargs):
 
 def test_the_four_paths_a_trial_owns_are_redirected():
     config = _orchestration()
-    assert config["toolkit_root"] == "/trial/toolkit"
+    assert [t["root"] for t in config["toolkits"]] == ["/trial/toolkit"]
     assert config["runtime_dir"] == "/trial/runtime"
     assert config["papers_dir"] == "/trial/papers"
 
@@ -420,8 +419,7 @@ def test_every_cap_and_flag_is_inherited_untouched():
     """The pipeline is what is being measured; only where it reads and writes may differ."""
     config = _orchestration()
     assert config["max_iterations"] == 3
-    assert config["agent_os_jail"] is True
-    assert config["tool_author_branch"] == "ai"
+    assert config["toolkits"][0]["authoring_branch"] == "ai"
 
 
 def test_the_allow_list_names_the_private_roots_and_drops_the_shared_ones(monkeypatch):
@@ -808,7 +806,9 @@ def test_the_stamps_name_the_code_the_base_the_gate_and_the_question(tmp_path):
 
     if not orchestration_yaml().exists():
         pytest.skip("no live configuration on this machine")
-    source = Path(yaml.safe_load(orchestration_yaml().read_text())["toolkit_root"])
+    from auto_research.toolkit_contract import toolkit
+
+    source = toolkit().root
     if not (source / ".git").exists():
         pytest.skip("no toolkit checkout on this machine")
     stamps = trial.collect_stamps(source)
@@ -915,7 +915,8 @@ def test_the_preflight_refuses_a_workspace_an_actor_could_read(monkeypatch, tmp_
     orchestration = tmp_path / "config" / "orchestration.yaml"
     orchestration.parent.mkdir(parents=True)
     orchestration.write_text(
-        yaml.safe_dump({"toolkit_root": str(tmp_path / "tk"),
+        yaml.safe_dump({"toolkits": [{"name": "research_toolkit", "root": str(tmp_path / "tk"),
+                                      "template_package": "xspec_utils", "authoring_branch": "ai", "default_env": "analysis"}],
                         "agent_fs_allow": [str(tmp_path / "inside")]}),
         encoding="utf-8",
     )

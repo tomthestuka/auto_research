@@ -8,6 +8,7 @@ import asyncio
 import subprocess
 
 from auto_research.run_control import RunControl
+from auto_research.sandbox import jail
 import pathlib
 import types
 
@@ -21,7 +22,11 @@ from auto_research.sandbox.merge_flow import (
     build_authoring_session,
     propose_and_pr,
 )
-from auto_research.schemas import GateReport, ToolReviewVerdict, ToolSpec
+from auto_research.schemas import GATE_JOBS, GateJob, GateReport, ToolReviewVerdict, ToolSpec
+
+#: Every job of the gate's pipeline passed: what a passing gate report lists (``GateReport`` refuses a
+#: pass without them).
+_PASSING_JOBS = [GateJob(name=job, status="pass") for job in GATE_JOBS]
 
 
 def _coder_member(model: str):
@@ -78,7 +83,7 @@ async def _pass_gate(worktree, spec):
     # Default gate for the loop-orchestration tests: the real gate (gate.run_gate) needs
     # a git worktree + science stack — out of scope here, covered by tests/test_gate.py.
     # Tests exercising gate behaviour inject their own run_gate, overriding this default.
-    return GateReport(passed=True)
+    return GateReport(passed=True, jobs=_PASSING_JOBS)
 
 
 async def _pass_review(worktree, spec, gate):
@@ -150,6 +155,23 @@ def test_structure_context_states_absolute_cwd_and_paths(tmp_path):
     for line in ctx.splitlines():
         if line.endswith(".py") and "/" in line and not line.startswith("#"):
             assert line.startswith(str(tmp_path)), line
+
+
+def test_the_coder_seed_names_the_data_sets_the_ci_pipeline_provides(tmp_path, monkeypatch):
+    """The coder learns each data set a ``data("<name>")`` test can name, and the variable it reads,
+    from its seed (W6) rather than from a failed submission; a configured folder that is absent is
+    not offered."""
+    from auto_research.sandbox import gate
+
+    rows = tmp_path / "rows"
+    rows.mkdir()
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {
+        "test_data": {"demo_rows": str(rows), "gone": str(tmp_path / "absent")}})
+    ctx = _build_structure_context(tmp_path)
+    assert 'data("demo_rows")' in ctx and "TOOLKIT_DATA_DEMO_ROWS" in ctx
+    assert "gone" not in ctx
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"test_data": {}})
+    assert "Data sets the CI pipeline provides" not in _build_structure_context(tmp_path)
 
 
 def test_drive_author_streams_sdk_blocks_to_monitor():
@@ -257,7 +279,7 @@ def test_gate_failures_drive_exactly_n_reworks_then_succeed(tmp_path):
                 reason="bad",
                 layer_b=[{"name": "inj_rec", "layer": "B", "passed": False, "detail": "off"}],
             )
-        return GateReport(passed=True)
+        return GateReport(passed=True, jobs=_PASSING_JOBS)
 
     result, client = _run(
         _spec(), toolkit_root=tmp_path, worktree_base=tmp_path / "wt", run_gate=flaky_gate
@@ -615,7 +637,7 @@ def test_direct_branch_coder_commit_auto_reverted_before_gate(tmp_path):
         assert _git_out(worktree, "rev-parse", "HEAD").strip() == base
         # … and left the work in the working tree (visible to the scan).
         assert _git_out(worktree, "status", "--porcelain").strip()
-        return GateReport(passed=True)
+        return GateReport(passed=True, jobs=_PASSING_JOBS)
 
     mon = _RecordingMonitor()
     result, _ = _run(
@@ -639,7 +661,7 @@ def test_direct_branch_committed_does_not_reset(tmp_path):
 
     async def writing_gate(worktree, spec):
         (worktree / "demo_utils" / "lib" / "tool.py").write_text("def t():\n    return 1\n")
-        return GateReport(passed=True)
+        return GateReport(passed=True, jobs=_PASSING_JOBS)
 
     head_before = _git_out(repo, "rev-parse", "HEAD").strip()
     result, _ = _run(
@@ -691,58 +713,6 @@ def test_reset_direct_tree_swallows_errors(tmp_path):
     mon = _RecordingMonitor()
     asyncio.run(_reset_direct_tree(bad, artifact_dir=None, monitor=mon))  # no raise
     assert mon.of("coder.tree_reset.error")
-
-
-# ── coder filesystem jail — the PreToolUse hook (todo #3 Stage B) ─────────────────
-
-
-@pytest.mark.parametrize("jailed", [False, True])
-def test_fs_guard_hook_allows_inside_denies_outside_and_governance(tmp_path, monkeypatch, jailed):
-    """The hook denies when it is the only layer, and stands down when the kernel jail is on.
-
-    Swept over both settings because the jail flag is gitignored machine-local config, and because
-    the standing-down half is what stopped the hook from vetoing an author's own files.
-    """
-    from auto_research.sandbox import jail
-    from auto_research.sandbox.fs_guard import PathGuard
-    from auto_research.sandbox.merge_flow import _make_fs_guard_hook
-
-    monkeypatch.setattr(jail, "jail_enabled", lambda: jailed, raising=True)
-
-    tk = tmp_path / "research_toolkit"
-    tk.mkdir()
-    hook = _make_fs_guard_hook(PathGuard([tk]))
-
-    def call(tool, ti):
-        return asyncio.run(hook(
-            {"tool_name": tool, "tool_input": ti, "hook_event_name": "PreToolUse"}, None, None,
-        ))
-
-    def denied(out):
-        return out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
-
-    assert call("Read", {"file_path": str(tk / "xspec_utils" / "lib" / "x.py")}) == {}  # inside → allow
-    # Under the jail these paths are simply absent from the author's mount namespace, so the hook
-    # allows and the kernel refuses; unjailed, the hook is the only layer and must deny.
-    expect = (lambda out: out == {}) if jailed else denied
-    assert expect(call("Read", {"file_path": str(tmp_path / "auto_research" / "gate.py")}))
-    assert expect(call("Read", {"file_path": str(tk / "CLAUDE.md")}))  # governance, even inside
-    assert call("Glob", {"pattern": "**/*.py"}) == {}  # no path arg → defaults to cwd → allow
-    # Bash: named-path enforcement (best-effort)
-    assert call("Bash", {"command": 'python -c "import xspec_utils"'}) == {}  # no abs path named
-    assert expect(call("Bash", {"command": f"cat {tmp_path}/auto_research/gate.py"}))
-
-
-def test_fs_guard_hook_inactive_when_allowlist_empty():
-    from auto_research.sandbox.fs_guard import PathGuard
-    from auto_research.sandbox.merge_flow import _make_fs_guard_hook
-
-    hook = _make_fs_guard_hook(PathGuard([]))  # unconfigured → allow-all
-    out = asyncio.run(hook(
-        {"tool_name": "Read", "tool_input": {"file_path": "/etc/passwd"},
-         "hook_event_name": "PreToolUse"}, None, None,
-    ))
-    assert out == {}
 
 
 # ── gate feedback message (handoff #3): fix ALL; warn tests not run on structural fail ──
@@ -992,7 +962,7 @@ def test_a_session_commits_only_what_its_gate_judged(tmp_path):
     gate = asyncio.run(session.run_gate_step())
     assert gate.passed, gate.reason
     (repo / "demo_utils" / "lib" / "retbb.py").write_text("def add_retbb(i):\n    return -i\n")
-    with pytest.raises(RuntimeError, match="changed after the gate"):
+    with pytest.raises(RuntimeError, match="changed after the CI pipeline"):
         asyncio.run(session.commit("m"))
     # Reviewed one tree, re-gated another (a rebuttal path): no commit either.
     asyncio.run(session.run_review_step(gate))
@@ -1579,30 +1549,39 @@ def test_f1_a_clean_close_writes_no_patch_artifact(tmp_path):
 # ── the author's environment carries no host-tooling variables ────────────────
 
 
-def test_author_env_drops_host_tooling_variables(monkeypatch):
+@pytest.mark.skipif(not jail.jail_available()[0], reason="the OS jail is required and bwrap cannot run here")
+def test_author_env_drops_host_tooling_variables(tmp_path, monkeypatch):
     """Measured 2026-09-03 (run fbb93f26, seq 922): the coder ran `env | grep -i path` and read
     `CLAUDE_CODE_EXECPATH=…/anthropic.claude-code-…/claude` and a Copilot variable, inherited from
-    the VS Code terminal that launched the backend. The science stack's own variables and the
-    vendor key must survive the filter untouched."""
-    from auto_research.sandbox import merge_flow, runner
+    the VS Code terminal that launched the backend. The author's shell starts from the toolkit's
+    default environment's activation (sourced by the shared launcher); the science stack's own
+    variables survive the filter untouched, host-tooling ones do not, whoever sets them."""
+    import sys
 
-    sourced = {
-        "PATH": "/opt/heasoft/bin", "HEADAS": "/opt/heasoft", "HOME": "/home/x",
-        "ANTHROPIC_API_KEY": "sk-test", "CLAUDE_CODE_EXECPATH": "/ext/anthropic.claude-code/claude",
-        "CLAUDECODE": "1", "COPILOT_OTEL_FILE_EXPORTER_PATH": "/dev/null", "VSCODE_PID": "42",
-    }
-    monkeypatch.setattr(runner, "_source_ini_env", lambda ini: dict(sourced))
-    monkeypatch.setattr(
-        merge_flow, "_orchestration_config",
-        lambda: {"analyze_env": "/envs/astropy", "analyze_ini_sh": "/x/ini.sh"},
-    )
-    env = merge_flow._author_env(pathlib.Path("/tk"))
+    from auto_research import toolkit_contract
+    from auto_research.config_paths import CONFIG_DIR_ENV
+    from auto_research.sandbox import merge_flow
+    from tests.fixtures import toolkit as fixture
+
+    root = fixture.build_toolkit(tmp_path / "toolkit", env_base=pathlib.Path(sys.prefix).name)
+    (root / "envs" / fixture.ENV_ID / "activate.sh").write_text(
+        "export HEADAS=/opt/heasoft CLAUDE_CODE_EXECPATH=/ext/anthropic.claude-code/claude CLAUDECODE=1 "
+        "COPILOT_OTEL_FILE_EXPORTER_PATH=/dev/null VSCODE_PID=42 TOOLPARAMS=\"$HOME/pfiles;/opt/sys\"\n")
+    config = fixture.write_config(tmp_path / "config", root, analysis_prefix=pathlib.Path(sys.prefix))
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(config))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")  # the parent's key never reaches the activation
+    toolkit_contract.reset()
+    env = merge_flow._author_env(pathlib.Path("/tk"), home=pathlib.Path("/author/home"))
+    toolkit_contract.reset()
     assert env is not None
     for gone in ("CLAUDE_CODE_EXECPATH", "CLAUDECODE", "COPILOT_OTEL_FILE_EXPORTER_PATH", "VSCODE_PID"):
         assert gone not in env, gone
-    assert env["HEADAS"] == "/opt/heasoft" and env["HOME"] == "/home/x"
-    assert env["ANTHROPIC_API_KEY"] == "sk-test"
-    assert env["PATH"].startswith("/envs/astropy/bin:") and env["PYTHONPATH"].startswith("/tk")
+    assert env["HEADAS"] == "/opt/heasoft" and "ANTHROPIC_API_KEY" not in env
+    assert env["PATH"].startswith(f"{sys.prefix}/bin:") and env["PYTHONPATH"].split(":")[0] == "/tk"
+    assert str(root) not in env["PYTHONPATH"]  # the live toolkit never shadows the author's tree
+    # The activation ran in the analysis jail; a value derived from that jail's home is on the
+    # author's own jail home, where the author's process finds it.
+    assert env["TOOLPARAMS"] == "/author/home/pfiles;/opt/sys"
 
 
 # ══════════════════════════════════════════════ B1/B2: the coder runs beside the lead

@@ -86,7 +86,7 @@ def test_a_user_path_is_expanded(monkeypatch):
 # One test per reader, because the failure mode is a reader nobody remembered, and that is not
 # observable from the outside: the run simply uses the wrong configuration and looks fine.
 
-_ORCH = "runtime_dir: /tmp/elsewhere-runtime\ntoolkit_root: /tmp/elsewhere-toolkit\nmax_iterations: 7\nreact_loop_cap: 11\nprovider_retry_max: 2\nhuman_channel: none\ngate_test_timeout_s: 42\ntool_author_cap: 9\nagent_fs_allow:\n  - /tmp/elsewhere-toolkit\n"
+_ORCH = "runtime_dir: /tmp/elsewhere-runtime\ntoolkits:\n  - {name: research_toolkit, root: /tmp/elsewhere-toolkit, template_package: demo_utils, authoring_branch: ai, default_env: analysis}\nmax_iterations: 7\nreact_loop_cap: 11\nprovider_retry_max: 2\nhuman_channel: none\ngate_test_timeout_s: 42\ntool_author_cap: 9\nagent_fs_allow:\n  - /tmp/elsewhere-toolkit\n"
 
 
 def _write_orchestration(directory: Path) -> None:
@@ -154,12 +154,14 @@ def test_the_human_channel_resolver_reads_it(elsewhere):
 
 
 def test_the_analysis_stack_probe_reads_it(elsewhere):
-    """No ``analyze_probe`` configured is a documented no-op, so reaching it without raising is
-    the observation: it read this directory rather than the repository's."""
-    from auto_research.sandbox.runner import check_analyze_probe
+    """The probe reads the default environment's definition under this directory's toolkit, which
+    does not exist: the refusal naming that folder is the observation that it read this directory
+    rather than the repository's."""
+    from auto_research.sandbox.runner import check_analysis_probe
 
     _write_orchestration(elsewhere)
-    check_analyze_probe()
+    with pytest.raises(ValueError, match="elsewhere-toolkit"):
+        check_analysis_probe()
 
 
 def test_the_model_registry_reads_it(elsewhere):

@@ -8,9 +8,10 @@ on rejection); the provider-decorrelated co-lead emits a :class:`ToolReviewVerdi
 review hooks are stubs that pass; steps 3/4 fill them in — but the protocol is typed now.
 """
 
+from collections.abc import Sequence
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, model_validator
 
 from auto_research.schemas.base import MessageModel
 
@@ -29,6 +30,39 @@ class CheckResult(MessageModel):
     detail: str = ""
 
 
+#: The gate's CI pipeline: its jobs, in the order a report lists them. Every one is required: the
+#: orchestration holds this list (``sandbox.gate`` maps each check to its job), and nothing a toolkit
+#: declares removes a job.
+GATE_JOBS: tuple[str, ...] = (
+    "change_scope",      # what the change may touch, and that it stays as judged while the tests run
+    "environments",      # each environment definition the change touches or its packages name
+    "no_fabrication",    # the no-fabrication scan of every changed file
+    "structural",        # a test, a manifest entry, manifest keys and the one manifest literal
+    "minting",           # argument kinds, figure shape, the dynamic return check (G15): every result mintable
+    "tests",             # the change's own tests, twice, every one run and passed, the same outcomes
+    "regression",        # the toolkit's earlier fast tests, once
+)
+
+
+def jobs_pass(jobs: Sequence["GateJob"]) -> bool:
+    """The verdict the jobs give: every required job listed, none failed, and the tests job passed."""
+    return ([j.name for j in jobs] == list(GATE_JOBS) and all(j.status != "fail" for j in jobs)
+            and any(j.name == "tests" and j.status == "pass" for j in jobs))
+
+
+class GateJob(MessageModel):
+    """One job of the gate's CI pipeline (``sandbox.gate.JOBS``): its status, why, and the checks it
+    ran. ``fail`` names its failing checks; ``skip`` says why it did not run. Frozen: a job's verdict
+    is the gate's, never edited after."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: NonEmptyStr
+    status: Literal["pass", "fail", "skip"]
+    reason: str = ""
+    checks: list[str] = Field(default_factory=list)
+
+
 class GateReport(MessageModel):
     """The deterministic gate's verdict (CLAUDE.md §9.4) — the arbiter, not an LLM opinion.
 
@@ -44,6 +78,9 @@ class GateReport(MessageModel):
     """
 
     passed: bool
+    jobs: tuple[GateJob, ...] = ()
+    """The pipeline's jobs in order, every one required; the gate derives ``passed`` from them. A
+    tuple of frozen jobs, so the verdict the validator checked stays the one the report carries."""
     layer_a: list[CheckResult] = Field(default_factory=list)
     layer_b: list[CheckResult] = Field(default_factory=list)
     findings: list[CheckResult] = Field(default_factory=list)
@@ -56,6 +93,16 @@ class GateReport(MessageModel):
     """Every file the gate judged, by path: its sha256, or ``deleted``. ``approve_edit`` commits
     exactly these and refuses when any changed after the gate ([G3]: a test writing into the
     worktree, or a file swapped in before the commit, would otherwise land unjudged)."""
+
+    @model_validator(mode="after")
+    def _passed_is_the_jobs_verdict(self) -> "GateReport":
+        """A pass is the jobs' verdict: ``passed=True`` needs every required job listed, none failed
+        and the tests job passed; a report listing its jobs states the verdict they give."""
+        if (self.passed or self.jobs) and self.passed != jobs_pass(self.jobs):
+            raise ValueError(f"passed={self.passed} disagrees with the jobs "
+                             f"{[(j.name, j.status) for j in self.jobs]} (every job of {list(GATE_JOBS)} "
+                             "listed, none failed, the tests job passed)")
+        return self
 
 
 class ToolReviewVerdict(MessageModel):

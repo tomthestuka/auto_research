@@ -2,8 +2,9 @@
 
     AUTO_RESEARCH_LIVE_STOP_TELEGRAM=1 pytest tests/test_live_stop_telegram.py --live -s
 
-A real `run_research` on the configured roles, with the reviewer and the status monitor seated on
-`anthropic:claude-sonnet-5` (the config-dir seam, `tests/seats.py`), a real Telegram connector
+A real `run_research` on the configured roles, with the reviewer seated on the configured worker
+tier (`tests.seats.configured_seat`, the config-dir seam; every other role, the status monitor
+included, is the configured one, `--seats` included), a real Telegram connector
 (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) and its real MCP shell server and sandboxes. Once the
 reviewer's turn starts, `/status` and then `/stop` enter the connector the way the bot receives
 them — as Telegram updates on the Application's own update queue, through python-telegram-bot's
@@ -93,7 +94,6 @@ def _live_cell(tmp_path, *, wait_for_answer: bool):
     from auto_research.run_control import UserInterruptionError
     from auto_research.schemas import ResearchRequest
     from auto_research.hitl.commands import STATUS_ACK
-    from tests.seats import seat, seated
 
     handler = TelegramHandler()
     sent: list[tuple[float, str]] = []  # every message the connector sent, with when
@@ -141,8 +141,9 @@ def _live_cell(tmp_path, *, wait_for_answer: bool):
             driver.cancel()
             marks["cancelling"] = asyncio.current_task().cancelling()
 
-    with seated(reviewer=seat("anthropic", "claude-sonnet-5"),
-                status_monitor=seat("anthropic", "claude-sonnet-5")):
+    from tests.seats import configured_seat, seated
+
+    with seated(reviewer=configured_seat("analyst_worker")):
         with pytest.raises(UserInterruptionError) as caught:
             asyncio.run(asyncio.wait_for(_main(), timeout=900))
 

@@ -37,7 +37,9 @@ pytestmark = pytest.mark.live
 
 
 def _scratch_clone(tmp_path) -> Path:
-    root = Path(load_orchestration_config().get("toolkit_root", "")).expanduser()
+    from auto_research.toolkit_contract import toolkit as toolkit_contract_of
+
+    root = toolkit_contract_of(load_orchestration_config()).root
     if not (root / ".git").exists():
         pytest.skip(f"toolkit_root {root} is not a git checkout")
     clone = tmp_path / "toolkit_clone"

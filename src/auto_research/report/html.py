@@ -38,11 +38,12 @@ from auto_research.provenance.bindings import (
     referenced_value,
 )
 from auto_research.provenance.calls import LedgerCall, calls_by_receipt, ledger_calls
-from auto_research.provenance.store import NOT_EVIDENCE_NAMES, TOOLKIT_PRODUCER_PREFIX, is_evidence
+from auto_research.provenance.store import NOT_EVIDENCE_NAMES, is_evidence
 from auto_research.report.figures import stage_figure_receipts
 from auto_research.report.render import MAX_TABLE_ROWS, parse_delimited, report_attributions
 from auto_research.schemas.artifacts import InputFile, Receipt
 from auto_research.schemas.review import ReviewerReport
+from auto_research.toolkit_contract import is_toolkit_producer
 
 HTML_NAME = "report.html"
 
@@ -201,9 +202,9 @@ def _output_html(receipt: Receipt, final: bool) -> str:
 
 def _tool_name(receipt: Receipt) -> tuple[str, bool]:
     """``(display name, is a toolkit tool)``: ``<toolkit root>/<package>.<function>``."""
-    if receipt.produced_by.startswith(TOOLKIT_PRODUCER_PREFIX):
+    if is_toolkit_producer(receipt.produced_by):
         root = str(receipt.toolkit_root) if receipt.toolkit_root else "<toolkit root>"
-        return f"{root}/{receipt.produced_by[len(TOOLKIT_PRODUCER_PREFIX):]}", True
+        return f"{root}/{receipt.produced_by.split('.', 1)[1]}", True
     what = NOT_EVIDENCE_NAMES.get(receipt.produced_by)
     return (f"{receipt.produced_by} ({what})" if what else receipt.produced_by), False
 
@@ -223,7 +224,7 @@ def _env_record(fingerprint: str | None) -> dict:
 
 def _env_label(receipt: Receipt) -> str:
     if not receipt.env:
-        return "environment not recorded" if receipt.produced_by.startswith(TOOLKIT_PRODUCER_PREFIX) else ""
+        return "environment not recorded" if is_toolkit_producer(receipt.produced_by) else ""
     name = _env_record(receipt.env).get("environment") or "its environment"
     return name + (", untested" if receipt.env_untested else "")
 
@@ -344,7 +345,8 @@ def reproduce_code(
     fn = str(call.context.get("fn") or receipt.produced_by.rsplit(".", 1)[-1])
     module = str(call.context.get("module") or "")
     importable = fn.isidentifier() and all(part.isidentifier() for part in module.split(".")) and bool(module)
-    package = (module if importable else receipt.produced_by.removeprefix(TOOLKIT_PRODUCER_PREFIX)).split(".", 1)[0]
+    # A toolkit producer is ``<toolkit name>.<package>.<tool>``: the package is its second segment.
+    package = module.split(".", 1)[0] if importable else receipt.produced_by.split(".")[1]
     record = _env_record(receipt.env)
 
     def one_line(text: object) -> str:

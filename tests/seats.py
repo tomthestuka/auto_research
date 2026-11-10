@@ -62,6 +62,7 @@ from typing import Any
 import yaml
 
 from auto_research.config_paths import CONFIG_DIR_ENV, repo_config_dir
+from auto_research.config_paths import config_dir as current_config_dir
 
 #: Environment variable holding a whole-session seat assignment, read by ``tests/conftest.py``.
 SEATS_ENV = "AUTO_RESEARCH_SEATS"
@@ -85,6 +86,7 @@ class SeatOverride:
     harness: str | None = None
     base_url: str | None = None
     key_env: str | None = None
+    context_tokens: int | None = None
 
     def member(self) -> dict[str, Any]:
         """This override as one ``models.yaml`` member entry.
@@ -102,7 +104,7 @@ class SeatOverride:
             entry["parameters"] = dict(self.parameters)
         if self.priceMTk:
             entry["priceMTk"] = dict(self.priceMTk)
-        for key in ("harness", "base_url", "key_env"):
+        for key in ("harness", "base_url", "key_env", "context_tokens"):
             value = getattr(self, key)
             if value is not None:
                 entry[key] = value
@@ -147,6 +149,45 @@ def from_seat(sweep_seat: Any) -> SeatOverride:
         parameters=sweep_seat.parameters(),
         priceMTk=sweep_seat.price(),
     )
+
+
+def configured_seat(role: str, index: int = 0) -> SeatOverride:
+    """The ``index``-th member the configuration seats in ``role``, as an override for another role.
+
+    For a cell whose ruling picks a cheaper tier than its own seat: it names the configured role
+    that holds that tier, never a model, so the member follows the configuration (and ``--seats``).
+    Read through the configuration pointer, with every field of the member; a field an override
+    cannot carry is refused rather than dropped.
+    """
+    from auto_research.config_paths import models_yaml
+
+    with models_yaml().open("r", encoding="utf-8") as stream:
+        members = ((yaml.safe_load(stream) or {}).get("roles") or {})[role]["members"]
+    entry = dict(members[index])
+    entry.pop("name", None)  # an override is named for its model (`SeatOverride.member`)
+    carried = {f for f in SeatOverride.__dataclass_fields__}
+    unknown = sorted(set(entry) - carried)
+    if unknown:
+        raise ValueError(f"configured member {role}[{index}] has fields a seat override cannot carry: {unknown}")
+    return SeatOverride(**{**entry, "parameters": dict(entry.get("parameters") or {}),
+                           "priceMTk": dict(entry.get("priceMTk") or {})})
+
+
+def env_seat(variable: str) -> SeatOverride | None:
+    """The seat ``provider:model`` named by environment variable ``variable``, or ``None`` when unset.
+
+    Parsed strictly, as ``--seats`` is: a value that is not ``provider:model`` raises.
+    """
+    value = os.environ.get(variable)
+    if value is None or not value.strip():
+        return None
+    if any(mark in value for mark in ",=|"):
+        raise ValueError(f"{variable} names one seat, provider:model; got {value!r}")
+    try:
+        [member] = parse_seats(f"seat={value.strip()}")["seat"]
+    except ValueError as exc:
+        raise ValueError(f"{variable} must be provider:model, got {value!r}: {exc}") from None
+    return member
 
 
 def parse_seats(spec: str) -> dict[str, list[SeatOverride]]:
@@ -255,7 +296,9 @@ def seated(
     target = Path(config_dir) if config_dir is not None else Path(mkdtemp(prefix="seats-"))
     previous = os.environ.get(CONFIG_DIR_ENV)
     try:
-        write_config_dir(target, normalised)
+        # Composed with the configuration in force (a session's `--seats`, an enclosing block), so
+        # an override replaces only the roles it names.
+        write_config_dir(target, normalised, source=current_config_dir())
         os.environ[CONFIG_DIR_ENV] = str(target)
         yield target
     finally:
@@ -270,6 +313,8 @@ def seated(
 __all__ = [
     "SEATS_ENV",
     "SeatOverride",
+    "configured_seat",
+    "env_seat",
     "from_seat",
     "models_config",
     "parse_seats",

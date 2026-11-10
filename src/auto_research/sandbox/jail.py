@@ -29,9 +29,9 @@ Two policies are per-process rather than global, because the right answer differ
   jailed home hides. That single file is bound read-only rather than exposing the home directory,
   so the subscription path keeps working and every cost figure measured so far stays comparable.
 
+The jail is unconditional (ruling D25, 2026-11-09): every process a unit starts runs inside it.
 Availability is a machine fact, so it is a launch check rather than an assumption: see
-:func:`check_os_jail_available`, which warns (never blocks) when the jail is configured on a host
-that cannot run it.
+:func:`check_os_jail_available`, which refuses the launch on a host that cannot run it.
 """
 
 from __future__ import annotations
@@ -96,11 +96,6 @@ def _config() -> dict:
         return load_orchestration_config() or {}
     except Exception:  # noqa: BLE001 — an unreadable config means "not configured"
         return {}
-
-
-def jail_enabled() -> bool:
-    """Whether ``config/orchestration.yaml`` asks for the jail (default off)."""
-    return bool(_config().get("agent_os_jail", False))
 
 
 @lru_cache(maxsize=1)
@@ -287,16 +282,12 @@ def analysis_policy(
 
 
 def jail_argv(policy: JailPolicy) -> list[str]:
-    """The ``bwrap`` prefix for one process, or ``[]`` when there is nothing to prefix.
-
-    Returning an empty list when the jail is unavailable is deliberate: a host without ``bwrap``
-    runs exactly as it does today (the guard, the harness sandbox), and the launch check is what
-    tells the operator the stronger enforcement is not in effect. A silent hard failure here
-    would turn a missing optional dependency into an unrunnable pipeline.
+    """The ``bwrap`` prefix for one process. Raises when ``bwrap`` is absent: nothing runs unjailed
+    (the launch check :func:`check_os_jail_available` refuses such a host before any process starts).
     """
     binary = bwrap_path()
     if not binary:
-        return []
+        raise RuntimeError("the OS jail needs bwrap, which is not installed here (conda-forge: bubblewrap)")
 
     # ``--die-with-parent`` matters for the interrupt path: the jailed process is pid 1 of its own
     # namespace, so when the runtime kills what it spawned, everything inside goes with it rather
@@ -359,31 +350,19 @@ def jail_argv(policy: JailPolicy) -> list[str]:
 
 
 def wrap(argv: list[str], policy: JailPolicy) -> list[str]:
-    """``argv`` prefixed with the jail, or unchanged when the jail is off or unavailable."""
-    if not jail_enabled():
-        return list(argv)
-    prefix = jail_argv(policy)
-    return [*prefix, "--", *argv] if prefix else list(argv)
+    """``argv`` prefixed with the jail (:func:`jail_argv`; raises when ``bwrap`` is absent)."""
+    return [*jail_argv(policy), "--", *argv]
 
 
 def check_os_jail_available() -> None:
-    """Launch check: when the jail is configured, say whether this host can actually run it.
-
-    A warning rather than a failure. The jail is defence in depth over the ``PathGuard``
-    allow-list, so a host without it is the configuration every run used before this existed —
-    worth stating on the record, not worth refusing to start.
-    """
-    if not jail_enabled():
-        return
+    """Launch check: this host runs the jail. Every process a unit starts runs inside it (ruling
+    D25), so a host that cannot run it refuses the launch, with the reason."""
     ok, reason = jail_available()
-    if ok:
-        return
-    from auto_research.preflight import PreflightWarning
-
-    raise PreflightWarning(
-        f"agent_os_jail is on but this host cannot run it ({reason}); runtime processes will run "
-        "with the PathGuard allow-list only, which cannot see a subprocess's implicit reads."
-    )
+    if not ok:
+        raise RuntimeError(
+            f"this host cannot run the OS jail ({reason}); every runtime process runs inside it, "
+            "so the launch is refused. Install bubblewrap and allow unprivileged user namespaces."
+        )
 
 
 def write_launcher(path: Path, target: str, policy: JailPolicy) -> Path:
@@ -413,8 +392,7 @@ def write_launcher(path: Path, target: str, policy: JailPolicy) -> Path:
 
     # Every other field carried over, the mask included (a field added later is never dropped).
     policy = replace(policy, ro=(*policy.ro, target_dir) if target_dir not in policy.ro else policy.ro)
-    prefix = jail_argv(policy)
-    command = [*prefix, "--", resolved_target] if prefix else [resolved_target]
+    command = [*jail_argv(policy), "--", resolved_target]
     body = "#!/bin/sh\nexec " + " ".join(_quote(part) for part in command)
     # Not through a symlink: the launcher's folder can be writable to the author it launches, which
     # could plant one there and have this write (and chmod 755) land on a host file of its choice.
@@ -435,65 +413,6 @@ def _quote(part: str) -> str:
 
     return shlex.quote(part)
 
-def check_os_jail_probe() -> None:
-    """Launch check: the analysis stack still imports **inside** the jail.
-
-    The allow-list was written for a guard that inspects the paths a model names, so nobody had to
-    know whether it was *complete* as a mount plan. It was not: every file in PyXspec's package
-    directory is a symlink four levels up into a sibling of ``$HEADAS``, so jailing exactly the
-    configured roots produced an importable-looking namespace package and an ``ImportError`` on the
-    first real symbol — thirty Layer-B suites deep, not at launch (2026-08-19).
-
-    So when the jail is on, the configured ``analyze_probe`` runs inside it before any model is
-    built. This is a **failure**, not a warning: with a jail that breaks the science stack every
-    tool call and every Layer-B test would fail, and refusing to start says so once instead of
-    forty times.
-    """
-    if not jail_enabled():
-        return
-    ok, _ = jail_available()
-    if not ok:
-        return  # check_os_jail_available already warns; nothing to probe
-
-    config = _config()
-    probe = str(config.get("analyze_probe") or "").strip()
-    if not probe:
-        return
-    from auto_research.env import analysis_environment
-
-    environment = analysis_environment(config)
-    interpreter = environment.python if environment is not None else Path("bin") / "python"
-    if not interpreter.is_file():
-        return  # the analyze_probe check owns that failure
-
-
-    env = environment.activation_env() if environment is not None else dict(os.environ)
-    toolkit = str(config.get("toolkit_root") or "")
-    if toolkit:
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = toolkit + (":" + existing if existing else "")
-    home = jail_home("probe")  # under `runtime_data_dir()`, as every jailed process's (D4)
-    env["HOME"] = str(home)
-
-    policy = policy_from_config(network=True, label="probe")
-    policy = JailPolicy(
-        ro=policy.ro, rw=(*policy.rw, str(home)), network=True, home=str(home), label="probe"
-    )
-    try:
-        result = subprocess.run(
-            [*jail_argv(policy), "--", str(interpreter), "-c", probe],
-            capture_output=True, text=True, timeout=300, env=env,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError(f"the jailed analysis probe could not run: {exc}") from exc
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise ValueError(
-            f"`{probe}` fails inside the OS jail: {detail[-1] if detail else 'no output'}. "
-            "Something the analysis stack needs is outside `agent_fs_allow` — often a directory "
-            "whose contents symlink out of it, which only a mount plan notices. Add the missing "
-            "root (read-only in `agent_fs_readonly`), or set `agent_os_jail: false`."
-        )
 
 def binary_reachable_in_jail(binary: str, *, label: str) -> tuple[bool, str]:
     """Whether ``binary`` is executable **inside** the jail, and why not when it is not.
@@ -502,11 +421,9 @@ def binary_reachable_in_jail(binary: str, *, label: str) -> tuple[bool, str]:
     ``--version`` may authenticate, reach the network, or write a config directory, none of which
     this needs to know. What failed on 2026-08-20 was the mount, so the mount is what is checked.
     """
-    if not jail_enabled():
-        return True, ""
-    ok, _ = jail_available()
+    ok, reason = jail_available()
     if not ok:
-        return True, ""  # check_os_jail_available already warns
+        return False, reason
     resolved = Path(binary).resolve()
     if not resolved.is_file():
         return False, f"{binary} does not exist outside the jail either"
@@ -556,13 +473,11 @@ def harness_binary(harness: str) -> str | None:
 def check_os_jail_harness() -> None:
     """Launch check: the configured author harness's CLI is reachable inside the jail.
 
-    The sibling probe runs the analysis stack inside the jail, which is why it passed while every
+    The analysis probe (``runner.check_analysis_probe``) runs the stack inside the jail, which is why it passed while every
     author died: it never execs a *harness* binary. Both harnesses ship their CLI inside the
     orchestration environment, a tree the allow-list does not name, so this is the one check that
     would have caught the first jailed sweep's failure at launch rather than in forty trials.
     """
-    if not jail_enabled():
-        return
     from auto_research.sandbox.coder.harness import coder_member
 
     try:
@@ -582,7 +497,7 @@ def check_os_jail_harness() -> None:
             "Its wrapper execs that path inside the mount namespace, so an unbound one fails as "
             "`execvp: No such file or directory` in every authoring attempt. `write_launcher` "
             "binds the binary's own directory; if that is not enough, add what it needs to "
-            "`agent_fs_readonly`, or set `agent_os_jail: false`."
+            "`agent_fs_readonly`."
         )
 
 

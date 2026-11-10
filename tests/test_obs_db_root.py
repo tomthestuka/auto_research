@@ -19,7 +19,7 @@ import yaml
 
 from auto_research.agents.react import DATA_CATALOG_TOOL, SandboxToolProvider
 from auto_research.observations import check_catalog_health, load_observations_config
-from tests.test_observations import TOOLKIT_ROOT, _needs_obsdb
+from tests.test_observations import TOOLKIT_ROOT, _needs_obsdb, jail_sees_tmp  # noqa: F401 — a fixture
 from tests.test_sandbox import _FakeRegistry, _FakeSandbox
 
 ACQUIRE = "research_toolkit.heasarc_utils.acquire"
@@ -109,7 +109,7 @@ def test_the_analysts_task_names_an_empty_root(root):
 
 
 @_needs_obsdb
-def test_an_empty_root_is_healthy_and_a_missing_one_is_named(root, tmp_path):
+def test_an_empty_root_is_healthy_and_a_missing_one_is_named(root, tmp_path, jail_sees_tmp):
     check_catalog_health(toolkit_root=TOOLKIT_ROOT)  # an empty, writable root: no raise
     root.rmdir()
     with pytest.raises(RuntimeError, match="is not a directory. Create it"):

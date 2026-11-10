@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from auto_research.toolkit_contract import toolkit
 from tests.dev_logs import dev_log_path
 
 
@@ -66,9 +67,10 @@ def test_persistent_sandboxes_do_not_share_xspec_state(monkeypatch, tmp_path: Pa
 
     orch = load_orchestration_config()
     obs = load_observations_config()
-    toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
-    analyze_env = Path(orch["analyze_env"]) if orch.get("analyze_env") else None
-    analyze_ini_sh = orch.get("analyze_ini_sh") or None
+    toolkit_root = toolkit(orch).root
+    from auto_research.env import analysis_environment
+
+    environment = analysis_environment(orch)  # the workers' own REPL environment, as the run path resolves it
     ixpe_path = obs.mission("ixpe").obs_db_path
 
     run_id = f"sandbox_isolation_{uuid.uuid4().hex}"
@@ -78,14 +80,12 @@ def test_persistent_sandboxes_do_not_share_xspec_state(monkeypatch, tmp_path: Pa
     loader = PersistentSandbox(
         toolkit_root=toolkit_root,
         workdir=agent_dir(run_id, keys[0]),
-        analyze_env=analyze_env,
-        analyze_ini_sh=analyze_ini_sh,
+        environment=environment,
     )
     observer = PersistentSandbox(
         toolkit_root=toolkit_root,
         workdir=agent_dir(run_id, keys[1]),
-        analyze_env=analyze_env,
-        analyze_ini_sh=analyze_ini_sh,
+        environment=environment,
     )
 
     async def run() -> dict:

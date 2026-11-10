@@ -21,7 +21,11 @@ from auto_research.sandbox.review import (
     make_review_hook,
     select_decorrelated_member,
 )
-from auto_research.schemas import GateReport, ToolReviewVerdict, ToolSpec, ValidationDataset
+from auto_research.schemas import GATE_JOBS, GateJob, GateReport, ToolReviewVerdict, ToolSpec, ValidationDataset
+
+#: Every job of the gate's pipeline passed: what a passing gate report lists (``GateReport`` refuses a
+#: pass without them).
+_PASSING_JOBS = [GateJob(name=job, status="pass") for job in GATE_JOBS]
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -142,7 +146,7 @@ def test_review_hook_maps_verdict_and_carries_diff_and_gate(tmp_path):
     colead = AnalystColeadAgent(model=fake)  # fake has no .config → decorrelation skipped
     hook = make_review_hook(colead=colead, author_provider="anthropic")
 
-    gate = GateReport(passed=True, findings=[])
+    gate = GateReport(passed=True, jobs=_PASSING_JOBS, findings=[])
     verdict = asyncio.run(hook(repo, _spec(), gate))
 
     assert isinstance(verdict, ToolReviewVerdict)
@@ -168,7 +172,7 @@ def test_review_hook_rejects_injected_colead_sharing_author_provider(tmp_path):
     from auto_research.sandbox.review import ReviewSetupError
 
     with pytest.raises(ReviewSetupError, match="provider-decorrelated") as raised:
-        asyncio.run(hook(repo, _spec(), GateReport(passed=True)))
+        asyncio.run(hook(repo, _spec(), GateReport(passed=True, jobs=_PASSING_JOBS)))
     assert isinstance(raised.value.__cause__, ValueError)
 
 
@@ -187,7 +191,7 @@ def test_review_hook_allows_a_correlated_colead_only_when_measurement_asks(tmp_p
     hook = make_review_hook(
         colead=colead, author_provider="anthropic", allow_correlated=True
     )
-    verdict = asyncio.run(hook(repo, _spec(), GateReport(passed=True)))
+    verdict = asyncio.run(hook(repo, _spec(), GateReport(passed=True, jobs=_PASSING_JOBS)))
     assert verdict.approved is True
 
 
@@ -208,7 +212,7 @@ def test_a_correlated_review_is_recorded_so_the_verdict_stays_readable_as_such(t
     hook = make_review_hook(
         colead=colead, author_provider="openai", monitor=_Monitor(), allow_correlated=True
     )
-    asyncio.run(hook(repo, _spec(), GateReport(passed=True)))
+    asyncio.run(hook(repo, _spec(), GateReport(passed=True, jobs=_PASSING_JOBS)))
 
     correlated = [d for name, d in events if name == "review.correlated"]
     assert correlated, f"expected a review.correlated event, saw {[n for n, _ in events]}"
@@ -232,5 +236,5 @@ def test_a_decorrelated_review_records_nothing_about_correlation(tmp_path):
     hook = make_review_hook(
         colead=colead, author_provider="anthropic", monitor=_Monitor(), allow_correlated=True
     )
-    asyncio.run(hook(repo, _spec(), GateReport(passed=True)))
+    asyncio.run(hook(repo, _spec(), GateReport(passed=True, jobs=_PASSING_JOBS)))
     assert "review.correlated" not in events

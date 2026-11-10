@@ -75,7 +75,8 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   `{{h "key": 2.71}}` read `key` as the quote and hid 46 of 83 numbers in the unchecked locator.
 - **Evidence vs record** (human ruling 2026-09-25: "citing in a report must be to sth it has
   produced, not just read"). Every receipt is a record; only `store.is_evidence(receipt)` receipts
-  back a number: a toolkit tool's return and its files/figures (producer `research_toolkit.*`), a
+  back a number: a toolkit tool's return and its files/figures (producer `<name>.<package>.<tool>` of
+  a toolkit the contract declares, `toolkit_contract.is_toolkit_producer`), a
   `commit`, a paper (attributed), and the request (`input:`, `research_request`, cite-only).
   `_Resolved.entry` is the one gate: a cited non-evidence receipt is refused by name
   (`NOT_EVIDENCE_NAMES`: "a file you read", "a web page", "shell output", "a task brief", "a tool brief", …); in
@@ -156,8 +157,12 @@ report prose ──► check_bindings / check_report_fields ──► problems (
 - `RunView(store)` — a `ScopedLookup` that sees every receipt of the run (viewing, never citing).
 - `ReceiptStore.for_run(run_dir) -> ReceiptStore` — the one store per run in this process; every
   role gets its store here (two instances on one directory would mint duplicate handles).
-- `store.is_evidence(receipt) -> bool`; `TOOLKIT_PRODUCER_PREFIX = "research_toolkit."`,
-  `REQUEST_PRODUCER = "research_request"`, `NOT_EVIDENCE_NAMES` (producer → how a refusal names it).
+- `store.is_evidence(receipt) -> bool` (a toolkit producer per `toolkit_contract.is_toolkit_producer`);
+  `REQUEST_PRODUCER = "research_request"`, `NOT_EVIDENCE_NAMES` (producer → how a refusal names it);
+  `HARNESS_PRODUCERS` — every producer the runtime mints that is not a toolkit tool (`mcp` for every
+  MCP kind, `docling` for a parsed document's figures): a toolkit's declared name equals and prefixes
+  none of them (`toolkit_contract`), so no configuration makes one evidence. A new harness producer
+  is added here.
 - `calls.resolve_call_args(arguments, context) -> dict` — the arguments a worker's call runs with
   (the model's, completed by the runtime's context; `output_args` + `products_dir` place every
   output argument in the call's own folder); `calls.args_digest(args)` — the
@@ -461,3 +466,5 @@ Compacted 2026-10-07 (the 2026-10-06/07 entries) and 2026-10-19 (every entry); d
 - 2026-11-04 — `_product_problem(anchor=)` / an artifact's optional sixth element: the folder's resolved place recorded before the call (the gate's recorder); the runtime computes it from the workdir as before.
 - 2026-11-04 — H2: `hash_obsdb_entry` finds the ObsID's folder through `observations.obsid_folder` (catalog record, then HEASARC's tree rule), so an obs-db laid out as HEASARC's archive is hashed at the folder the tool reads.
 - 2026-11-04 — H2 review: `inputs_before` passes each mission folder's configured name and a lazy tree index (`functools.cache` of `observations.obsid_index`) to `hash_obsdb_entry`, which returns before any lookup for an uncatalogued name with no digit.
+- 2026-11-09 — Phase 3 step 0a W2: `TOOLKIT_PRODUCER_PREFIX` removed; `is_evidence` and the commit stamp in `capture.receipt_call` ask `toolkit_contract.is_toolkit_producer` (a producer starting with the declared toolkit name and a dot; the registry serves only `<name>.<package>.<tool>` keys). New `store.HARNESS_PRODUCERS`, the names the contract refuses (B2; invariant tests in `tests/test_toolkit_contract.py`).
+- 2026-11-09 — Phase 3 step 0a W10 (ruling D25): `capture._allow_listed` always excludes the host `/tmp` (every process has a private one in its jail); an allow-list naming only the host `/tmp` admits nothing.

@@ -6,6 +6,7 @@ human-channel ping is exercised with fake handlers.
 """
 
 import asyncio
+import re
 
 import pytest
 
@@ -14,6 +15,7 @@ from auto_research.preflight import (
     PreflightError,
     build_default_preflight,
 )
+from auto_research.sandbox import jail
 from auto_research.sandbox.review import check_author_reviewer_decorrelation
 from auto_research.schemas import HumanQuery, HumanResponse
 
@@ -75,34 +77,94 @@ def test_build_default_preflight_registers_known_checks():
     names = build_default_preflight().names()
     assert "required_env" in names
     assert "author_reviewer_decorrelation" in names
-    assert "toolkit_root_configured" in names
+    assert "toolkit_contract" in names
     assert "toolkit_git_identity" in names
     assert "toolkit_branch_clean" in names
     assert "toolkit_manifests" in names
-    # toolkit_root must be validated before the git-identity check that assumes it exists.
-    assert names.index("toolkit_root_configured") < names.index("toolkit_git_identity")
+    assert "private_variables" in names
+    # The toolkit contract must be validated before the git-identity check that assumes its root.
+    assert names.index("toolkit_contract") < names.index("toolkit_git_identity")
     # The human-channel ping is only registered when a handler is resolved.
     assert "human_channel" not in names
 
 
-def test_check_toolkit_root_configured(tmp_path, monkeypatch):
-    import auto_research.sandbox.merge_flow as mf
+def test_a_malformed_private_declaration_fails_the_launch(monkeypatch):
+    """D19: `env_externals.<name>.private` is checked at launch, before any process starts."""
+    from auto_research import env as app_env
+    from auto_research.preflight import check_private_variables
 
-    # Configured + existing → passes.
-    monkeypatch.setattr(mf, "_orchestration_config", lambda: {"toolkit_root": str(tmp_path)})
-    mf.check_toolkit_root_configured()
+    monkeypatch.setattr(app_env, "_orch_config", lambda: {"env_externals": {"tool": {"private": {"1BAD": ";"}}}})
+    with pytest.raises(ValueError, match="VARIABLE: separator"):
+        check_private_variables()
 
-    # Missing key → fails loudly naming the key.
-    monkeypatch.setattr(mf, "_orchestration_config", lambda: {})
-    with pytest.raises(RuntimeError, match="toolkit_root is not set"):
-        mf.check_toolkit_root_configured()
 
-    # Set but not a directory → fails.
-    monkeypatch.setattr(
-        mf, "_orchestration_config", lambda: {"toolkit_root": str(tmp_path / "nope")}
-    )
+@pytest.mark.skipif(not jail.jail_available()[0], reason="the OS jail is required and bwrap cannot run here")
+def test_a_declaration_the_activation_does_not_match_fails_the_launch(tmp_path, monkeypatch):
+    """D19: the default environment's activation (sourced as its processes source it, by the shared
+    launcher) must set each declared variable with its separator; a misspelt name or a wrong
+    separator would isolate nothing."""
+    import sys
+    from pathlib import Path
+
+    from auto_research import toolkit_contract
+    from auto_research.config_paths import CONFIG_DIR_ENV
+    from auto_research.preflight import check_private_variables
+    from tests.fixtures import toolkit as fixture
+
+    root = fixture.build_toolkit(tmp_path / "toolkit", env_base=Path(sys.prefix).name)
+    (root / "envs" / fixture.ENV_ID / "activate.sh").write_text('export TOOLPARAMS="$HOME/params;/opt/tool/sys"\n')
+
+    def configure(private):
+        config = fixture.write_config(tmp_path / "config", root, analysis_prefix=Path(sys.prefix),
+                                      env_externals={"tool": {"root": "/opt/tool", "private": private}})
+        monkeypatch.setenv(CONFIG_DIR_ENV, str(config))
+        toolkit_contract.reset()
+
+    configure({"TOOLPARAMS": ";"})
+    check_private_variables()
+    for private, says in (({"TOOLPARAM": ";"}, "TOOLPARAM: the default environment's activation leaves it unset"),
+                          ({"TOOLPARAMS": "|"}, "without the separator '|'")):
+        configure(private)
+        with pytest.raises(RuntimeError, match=re.escape(says)):
+            check_private_variables()
+    toolkit_contract.reset()
+
+
+def test_check_toolkit_contract(tmp_path, monkeypatch):
+    import yaml
+
+    from auto_research.config_paths import CONFIG_DIR_ENV
+    from auto_research.toolkit_contract import check_toolkit_contract, reset
+
+    (tmp_path / "toolkit" / "demo_utils").mkdir(parents=True)
+    (tmp_path / "toolkit" / "demo_utils" / "__init__.py").write_text("", encoding="utf-8")
+    for folder in (tmp_path / "toolkit", tmp_path / "toolkit" / "demo_utils"):  # the roles' briefings
+        (folder / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "toolkit" / "envs" / "demo").mkdir(parents=True)
+    (tmp_path / "toolkit" / "envs" / "demo" / "env.yaml").write_text("purpose: demo\n", encoding="utf-8")
+    entry = {"name": "research_toolkit", "root": str(tmp_path / "toolkit"),
+             "template_package": "demo_utils", "authoring_branch": "ai", "default_env": "demo"}
+
+    def configure(index: int, config: dict) -> None:
+        folder = tmp_path / f"config{index}"
+        folder.mkdir()
+        (folder / "orchestration.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+        monkeypatch.setenv(CONFIG_DIR_ENV, str(folder))
+        reset()
+
+    # Declared, with its root and template package present → passes.
+    configure(0, {"toolkits": [entry]})
+    check_toolkit_contract()
+
+    # No block → fails loudly naming it.
+    configure(1, {})
+    with pytest.raises(ValueError, match="toolkits"):
+        check_toolkit_contract()
+
+    # A root that is not a directory → fails.
+    configure(2, {"toolkits": [entry | {"root": str(tmp_path / "nope")}]})
     with pytest.raises(RuntimeError, match="not a directory"):
-        mf.check_toolkit_root_configured()
+        check_toolkit_contract()
 
 
 def test_build_default_preflight_registers_channel_check_when_handler_present():
@@ -318,3 +380,24 @@ def test_a_warning_alongside_a_real_failure_still_fails_the_launch():
         asyncio.run(preflight.run_checklist())
     assert "broken" in str(excinfo.value)
     assert "unproven" not in str(excinfo.value)
+
+
+def test_a_retired_config_key_or_an_empty_allow_list_fails_the_launch(monkeypatch):
+    """No aliases (D16): each retired `orchestration.yaml` key is named with what to do instead; an
+    empty `agent_fs_allow` (read as allow-all) or one naming `/` is refused (D25)."""
+    from auto_research import env as app_env
+    from auto_research.preflight import RETIRED_KEYS, build_default_preflight, check_config_keys
+
+    assert "config_keys" in build_default_preflight().names()
+    monkeypatch.setattr(app_env, "_orch_config", lambda: {"agent_fs_allow": ["/data"]})
+    check_config_keys()
+    monkeypatch.setattr(app_env, "_orch_config", lambda: {**{key: 1 for key in RETIRED_KEYS}, "agent_fs_allow": []})
+    with pytest.raises(RuntimeError) as refused:
+        check_config_keys()
+    for key, instruction in RETIRED_KEYS.items():
+        assert f"`{key}` {instruction}" in str(refused.value)
+    assert "`agent_os_jail` is retired (every runtime process runs in the jail); delete the key" in str(refused.value)
+    assert "list in `agent_fs_allow` the roots" in str(refused.value)
+    monkeypatch.setattr(app_env, "_orch_config", lambda: {"agent_fs_allow": ["/data", "/"]})
+    with pytest.raises(RuntimeError, match="in place of `/`"):
+        check_config_keys()

@@ -24,6 +24,7 @@ from pathlib import Path
 
 from auto_research.schemas.artifacts import KIND_LETTER, InputFile, Receipt
 from auto_research.provenance.calls import args_digest
+from auto_research.toolkit_contract import is_toolkit_producer
 
 #: A marked synthetic ObsID (§9.5): ``…/synth<YYMMDD>-<sha>/…``.
 #: Also the hand-authored validation fixtures in an obs-db (``synth_pa_pd_constant``, 2026-10-17).
@@ -40,9 +41,6 @@ SHELL_TOOLS = frozenset({"mcp.builtin.bash_exec"})
 #: Kinds whose bytes are text a quote or a grounded number can be checked against.
 TEXT_KINDS = frozenset({"result", "web", "paper", "human"})
 
-#: The producer prefix of every toolkit tool (its registry kind, ``research_toolkit.<pkg>.<tool>``).
-TOOLKIT_PRODUCER_PREFIX = "research_toolkit."
-
 #: The one input that grounds (where cited): the human's research request, restating the question.
 REQUEST_PRODUCER = "research_request"
 
@@ -51,7 +49,8 @@ def is_evidence(receipt: Receipt) -> bool:
     """Whether a receipt can back a number: what the analysis produced, never what a role read.
 
     Human ruling 2026-09-25: "citing in a report must be to sth it has produced, not just read."
-    Evidence is a toolkit tool's return and the files and figures it produced; a ``commit`` the
+    Evidence is a toolkit tool's return and the files and figures it produced (a producer
+    ``<name>.<package>.<tool>`` of a declared toolkit, ``toolkit_contract``); a ``commit`` the
     coding pipeline minted; a paper (attributed with its place, never text-matched); and the
     human's research request, which grounds only where cited. Everything else is the record of
     where a role looked or what it was told — ``read_file``, ``list_dir``, searches, web pages,
@@ -61,7 +60,7 @@ def is_evidence(receipt: Receipt) -> bool:
         return True
     if receipt.source == INPUT_SOURCE:
         return receipt.produced_by == REQUEST_PRODUCER
-    return receipt.produced_by.startswith(TOOLKIT_PRODUCER_PREFIX)
+    return is_toolkit_producer(receipt.produced_by)
 
 
 #: How a refusal names a receipt that is not evidence, by producer (the rest: "a tool return").
@@ -75,6 +74,15 @@ NOT_EVIDENCE_NAMES = {
     "search_literature": "a search result",
     "list_env": "an environment listing",
 }
+
+#: Every producer the runtime mints that is not a toolkit tool. ``mcp`` stands for every MCP kind
+#: (``mcp.<server>.<tool>``, the shell among them) and ``docling`` for a parsed document's figures. A
+#: toolkit's declared name equals and prefixes none of them (``toolkit_contract``), so no
+#: configuration makes one of them evidence. A new harness producer is added here.
+HARNESS_PRODUCERS = frozenset({
+    *NOT_EVIDENCE_NAMES, *SHELL_TOOLS, "mcp", "use_env", "approve_edit", "read_paper", "preflight",
+    "docling", REQUEST_PRODUCER, INPUT_SOURCE,
+})
 
 
 def sha256_bytes(data: bytes) -> str:

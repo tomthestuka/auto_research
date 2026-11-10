@@ -26,7 +26,7 @@ class ToolCallRequest(MessageModel):
     kind: NonEmptyStr = Field(
         description=(
             "Exact tool kind string — e.g. 'mcp.builtin.bash_exec' or "
-            "'research_toolkit.xspec_utils.plot_fit'. Set from the native tool call name."
+            "'<toolkit>.<package>.<tool>'. Set from the native tool call name."
         )
     )
     purpose: str = ""

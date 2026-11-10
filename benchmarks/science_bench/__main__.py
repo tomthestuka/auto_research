@@ -105,7 +105,12 @@ def preflight(slots: list[RunSlot], *, workspace: Path) -> list[str]:
         return problems  # nothing below can be decided without it
 
     source = yaml.safe_load(orchestration_yaml().read_text(encoding="utf-8")) or {}
-    toolkit_source = Path(str(source.get("toolkit_root", ""))).expanduser()
+    from auto_research.toolkit_contract import toolkit
+
+    try:
+        toolkit_source = toolkit(source).root
+    except ValueError as exc:  # a missing or invalid `toolkits:` block
+        return problems + [f"the toolkit contract does not load: {exc}"]
     obs_source = Path(
         str((yaml.safe_load(observations_yaml().read_text(encoding="utf-8")) or {}).get("obs_db_root", ""))
     ).expanduser()
@@ -131,9 +136,9 @@ def preflight(slots: list[RunSlot], *, workspace: Path) -> list[str]:
             problems.append(f"the frozen answer key is missing: {key_path}")
         readable = [
             str(source.get(name))
-            for name in ("runtime_dir", "papers_dir", "toolkit_root")
+            for name in ("runtime_dir", "papers_dir")
             if source.get(name)
-        ] + [str(root) for root in (source.get("agent_fs_allow") or [])]
+        ] + [str(toolkit_source)] + [str(root) for root in (source.get("agent_fs_allow") or [])]
         for root in readable:
             try:
                 resolved_root = Path(root).expanduser().resolve()
@@ -149,7 +154,7 @@ def preflight(slots: list[RunSlot], *, workspace: Path) -> list[str]:
 
     # ── the toolkit the trees author from ───────────────────────────────────
     if not (toolkit_source / ".git").is_dir():
-        problems.append(f"toolkit_root {toolkit_source} is not a git checkout")
+        problems.append(f"the toolkit root {toolkit_source} is not a git checkout")
     else:
         import subprocess
 
@@ -623,7 +628,9 @@ def main(argv: list[str] | None = None) -> int:
     source = yaml.safe_load(
         (Path(__import__("auto_research.config_paths", fromlist=["x"]).orchestration_yaml())).read_text()
     )
-    stamps = trial.collect_stamps(Path(source["toolkit_root"]).expanduser())
+    from auto_research.toolkit_contract import toolkit
+
+    stamps = trial.collect_stamps(toolkit(source).root)
     (out_dir / "batch.json").write_text(
         json.dumps({"slots": [s.index for s in slots], "stamps": stamps,
                     "workspace": str(args.workspace), "concurrency": args.concurrency}, indent=2),

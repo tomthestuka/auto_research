@@ -10,9 +10,10 @@ where ToolSpec is a TypedDict with keys:
   description – human-readable description shown to analyst workers (str)
   args_schema – JSON Schema object describing the args dict (dict)
 
-The registry imports each manifest lazily, so no network activity occurs on
-startup. toolkit_root is prepended to sys.path only during manifest loading,
-then removed.
+The registry reads each manifest **statically**: ``<package>/skills/__init__.py`` is parsed and its
+one ``TOOL_MANIFEST = {...}`` dict literal evaluated as data (:func:`manifest_literal`; the gate's
+``structural.manifest_literal`` check keeps that shape). No toolkit code runs in the orchestrator:
+toolkit code runs only inside the jail (ruling D25).
 
 Each package may also carry an optional, pure-data ``tool_config.yaml`` at its root
 (read here, never imported) declaring per-tool sandbox call-timeout ceilings — see
@@ -23,10 +24,9 @@ hand-editable.
 
 from __future__ import annotations
 
-import importlib
+import ast
 import logging
 import re
-import sys
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -132,20 +132,85 @@ def provider_schema(schema: dict | None, *, references: bool = True) -> dict:
     return out
 
 
-def _discover_manifest_packages(root: Path) -> list[str]:
-    """Find every ``<domain>_utils`` package under ``root`` that could expose TOOL_MANIFEST.
+def manifest_literal(source: str) -> dict | None:
+    """The ``TOOL_MANIFEST`` of a ``<package>/skills/__init__.py`` evaluated as data (no code runs):
+    its one top-level dict literal, or ``None`` when the source does not parse, holds no such
+    literal, or binds, assigns or touches ``TOOL_MANIFEST`` anywhere else (:func:`manifest_rebinding`,
+    the rule the gate's ``structural.manifest_literal`` check applies), so the data read is the
+    manifest the package exposes."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    try:
+        if _manifest_rebinding_in("package/skills/__init__.py", tree, source):
+            return None
+    except (RecursionError, MemoryError):
+        return None
+    for node in tree.body:
+        target = (node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1
+                  else node.target if isinstance(node, ast.AnnAssign) else None)
+        if isinstance(target, ast.Name) and target.id == "TOOL_MANIFEST" and isinstance(node.value, ast.Dict):
+            try:
+                value = ast.literal_eval(node.value)
+            except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
+                return None
+            return value if isinstance(value, dict) else None
+    return None
 
-    Convention (CLAUDE.md §9.2): each toolkit is a top-level ``*_utils`` package directory
-    with an ``__init__.py``. Discovered dynamically so a newly authored toolkit (e.g.
-    ``heasarc_utils``) is picked up on :meth:`ToolkitRegistry.reload` with no code change.
-    """
-    if not root.is_dir():
+
+def manifest_rebinding(rel: str, source: str) -> list[str]:
+    """Where a changed toolkit source binds or touches ``TOOL_MANIFEST`` other than as its one dict
+    literal in ``<package>/skills/__init__.py`` or its re-export by name from ``.skills`` in
+    ``<package>/__init__.py`` (static: no code runs). A source that does not parse, or nests too deep
+    to walk, fails the no-fabrication scan already."""
+    try:
+        return _manifest_rebinding_in(rel, ast.parse(source), source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
         return []
-    return sorted(
-        p.name
-        for p in root.iterdir()
-        if p.is_dir() and p.name.endswith("_utils") and (p / "__init__.py").exists()
-    )
+
+
+def _manifest_rebinding_in(rel: str, tree: ast.AST, source: str) -> list[str]:
+    parts = Path(rel).parts
+    is_manifest = parts[1:] == ("skills", "__init__.py")
+    literal = None  # the one literal assignment's target node
+    if is_manifest:
+        for node in tree.body:
+            target = (node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1
+                      else node.target if isinstance(node, ast.AnnAssign) else None)
+            if isinstance(target, ast.Name) and target.id == "TOOL_MANIFEST" and isinstance(node.value, ast.Dict):
+                literal = target
+                break
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Name, ast.Attribute)) and node is not literal and \
+                (node.id if isinstance(node, ast.Name) else node.attr) == "TOOL_MANIFEST":
+            out.append(f"{rel}:{node.lineno} names TOOL_MANIFEST beyond its one literal")
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if bound != "TOOL_MANIFEST" and alias.name.split(".")[-1] != "TOOL_MANIFEST":
+                    continue
+                reexport = (isinstance(node, ast.ImportFrom) and len(parts) == 2 and parts[1] == "__init__.py"
+                            and alias.name == "TOOL_MANIFEST" and alias.asname in (None, "TOOL_MANIFEST")
+                            and (node.module, node.level) in (("skills", 1), (f"{parts[0]}.skills", 0)))
+                if not reexport:
+                    out.append(f"{rel}:{node.lineno} imports or binds TOOL_MANIFEST")
+    if is_manifest and literal is None and "TOOL_MANIFEST" in source:
+        out.append(f"{rel} holds no top-level TOOL_MANIFEST = {{...}} dict literal")
+    return out
+
+
+def _discover_manifest_packages(root: Path) -> list[str]:
+    """Find every package under ``root`` that could expose TOOL_MANIFEST.
+
+    A package is a top-level folder matching the toolkit contract's ``package_glob``
+    (``toolkit_contract.ToolkitContract.packages``) with an ``__init__.py``. Discovered dynamically
+    so a newly authored package is picked up on :meth:`ToolkitRegistry.reload` with no code change.
+    """
+    from auto_research.toolkit_contract import toolkit
+
+    return [name for name in toolkit().packages(root) if (root / name / "__init__.py").exists()]
 
 
 class ToolkitRegistry:
@@ -156,7 +221,6 @@ class ToolkitRegistry:
         self._tools: dict[str, ToolSpec] = {}
         self._mcp_tools: dict[str, str] = {}  # kind -> description
         self._mcp_schemas: dict[str, dict] = {}  # kind -> input JSON schema
-        self._mcp_jailed: dict[str, bool] = {}  # kind -> its server runs inside the OS jail
         self._disabled: set[str] = set(disabled_tools or [])
         # Per-tool sandbox call-timeout ceiling (seconds), from each package's
         # ``tool_config.yaml``; absent tools fall back to the global default
@@ -171,6 +235,9 @@ class ToolkitRegistry:
         self.import_errors: dict[str, str] = {}
         #: why a loaded tool's arguments cannot be validated (``provenance.inputs.manifest_problems``).
         self.manifest_errors: list[str] = []
+        #: manifest keys outside ``<toolkit name>.<package>.<tool>`` (``ToolkitContract.key_problem``);
+        #: their tools are not served.
+        self.key_errors: list[str] = []
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -178,41 +245,47 @@ class ToolkitRegistry:
     # ------------------------------------------------------------------
 
     def load(self) -> None:
-        """Import TOOL_MANIFEST from every discovered ``*_utils`` package. Idempotent."""
+        """Read ``TOOL_MANIFEST`` from every discovered package, statically (no import). Idempotent."""
         if self._loaded:
             return
         self._call_timeout_ceiling = {}
         self.import_errors = {}
+        self.key_errors = []
+        from auto_research.toolkit_contract import toolkit
+
+        contract = toolkit()
         try:
             from auto_research.env import sandbox_call_timeout_default
 
             self._default_call_timeout_s = sandbox_call_timeout_default()
         except Exception:  # noqa: BLE001 — fall back to the module constant if config is unreadable
             self._default_call_timeout_s = _CALL_TIMEOUT_FALLBACK_S
-        root_str = str(self._root)
-        inserted = root_str not in sys.path
-        if inserted:
-            sys.path.insert(0, root_str)
-        try:
-            self._manifest_packages = _discover_manifest_packages(self._root)
-            for pkg in self._manifest_packages:
-                try:
-                    mod = importlib.import_module(pkg)
-                    # The manifest entry IS the agent-facing interface (§9.2 two halves):
-                    # ``skills/TOOL_MANIFEST`` is the ai-half, ``lib/`` docstrings are the
-                    # human-half. The description is taken verbatim from the manifest.
-                    manifest: dict[str, ToolSpec] | None = getattr(mod, "TOOL_MANIFEST", None)
-                    if not manifest:
-                        self.import_errors[pkg] = "it exposes no TOOL_MANIFEST"
-                        continue
-                    self._tools.update(manifest)
-                    self._load_tool_config(pkg, list(manifest.keys()))
-                except Exception as exc:  # noqa: BLE001 — recorded, and refused at launch
-                    self.import_errors[pkg] = f"{type(exc).__name__}: {exc}"
-                    _log.warning("toolkit package %s exposes no tools: %s", pkg, self.import_errors[pkg])
-        finally:
-            if inserted:
-                sys.path.remove(root_str)
+        self._manifest_packages = _discover_manifest_packages(self._root)
+        for pkg in self._manifest_packages:
+            # The manifest entry IS the agent-facing interface (§9.2 two halves): the
+            # ``skills/__init__.py`` literal is the ai-half, ``lib/`` docstrings are the human-half.
+            source = self._root / pkg / "skills" / "__init__.py"
+            try:
+                manifest = manifest_literal(source.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as exc:
+                manifest = None
+                self.import_errors[pkg] = f"{source.relative_to(self._root)} cannot be read: {exc}"
+            if not manifest:
+                self.import_errors.setdefault(
+                    pkg, f"{pkg}/skills/__init__.py holds no TOOL_MANIFEST = {{...}} dict literal")
+                _log.warning("toolkit package %s exposes no tools: %s", pkg, self.import_errors[pkg])
+                continue
+            bad = [key for key, spec in manifest.items() if not isinstance(key, str) or not isinstance(spec, dict)]
+            if bad:
+                self.import_errors[pkg] = f"{pkg}/skills/__init__.py maps {bad[:3]} to something other than a spec dict"
+                continue
+            wrong = {key: why for key in manifest if (why := contract.key_problem(key, pkg))}
+            self.key_errors.extend(wrong.values())
+            for why in wrong.values():  # recorded, refused at launch, said after a reload
+                _log.warning("toolkit manifest key not served: %s", why)
+            manifest = {key: spec for key, spec in manifest.items() if key not in wrong}
+            self._tools.update(manifest)
+            self._load_tool_config(pkg, list(manifest.keys()))
         for name in self._disabled:
             self._tools.pop(name, None)
         from auto_research.provenance.inputs import manifest_problems
@@ -223,46 +296,17 @@ class ToolkitRegistry:
         self._loaded = True
 
     def reload(self) -> None:
-        """Re-import toolkit manifests to pick up newly committed/authored tools (§9.10 step 7).
+        """Re-read toolkit manifests to pick up newly committed/authored tools (§9.10 step 7).
 
-        Used after the runtime authors a tool (``merge_flow`` commits to branch ``ai``): the
-        manifest is pure data discovered in the orchestration env, so reloading it surfaces a
-        new ``extend_existing`` entry or a brand-new ``*_utils`` package to analyst workers.
-        Drops the toolkit tool index and re-runs :meth:`load`, force-reimporting any already
-        cached manifest modules (Python would otherwise serve the stale ``skills/__init__``).
-        The MCP index and the ``disabled`` filter are preserved.
+        Used after the runtime authors a tool (``merge_flow`` commits to the authoring branch): the
+        manifest is pure data read from the tree, so reloading it surfaces a new ``extend_existing``
+        entry or a brand-new package to analyst workers. Drops the toolkit tool index and re-runs
+        :meth:`load`; the MCP index and the ``disabled`` filter are preserved.
         """
-        import importlib
-
-        importlib.invalidate_caches()
-        # Force a fresh import of every cached manifest package + its skills submodule, so an
-        # edited TOOL_MANIFEST is re-read rather than served from sys.modules.
-        candidates = set(self._manifest_packages) | set(_discover_manifest_packages(self._root))
-        root_str = str(self._root)
-        inserted = root_str not in sys.path
-        if inserted:
-            sys.path.insert(0, root_str)
-        failed: dict[str, str] = {}
-        try:
-            for pkg in candidates:
-                for mod_name in (f"{pkg}.skills", pkg):
-                    mod = sys.modules.get(mod_name)
-                    if mod is not None:
-                        try:
-                            importlib.reload(mod)
-                        except Exception as exc:  # noqa: BLE001 — recorded, never crashes discovery
-                            failed.setdefault(pkg, f"reload: {type(exc).__name__}: {exc}")
-                            for stale in [m for m in sys.modules if m.split(".")[0] == pkg]:
-                                del sys.modules[stale]  # so load() imports afresh and records why
-        finally:
-            if inserted:
-                sys.path.remove(root_str)
         self._tools = {}
         self._tool_env = {}
         self._loaded = False
         self.load()
-        for pkg, why in failed.items():
-            self.import_errors.setdefault(pkg, why)
 
     def load_mcp(self, client: Any) -> None:
         """Index tools from a started MCPToolClient into the registry."""
@@ -270,14 +314,9 @@ class ToolkitRegistry:
             self._mcp_tools[kind] = client.describe(kind)
             schema = client.schema(kind) if hasattr(client, "schema") else None
             self._mcp_schemas[kind] = schema or {"type": "object", "properties": {}}
-            self._mcp_jailed[kind] = bool(getattr(client, "is_jailed", lambda _k: False)(kind))
 
     def is_mcp(self, kind: str) -> bool:
         return kind in self._mcp_tools
-
-    def mcp_jailed(self, kind: str) -> bool:
-        """Whether the MCP server serving ``kind`` was launched inside the OS jail."""
-        return self._mcp_jailed.get(kind, False)
 
     def is_known(self, tool_name: str) -> bool:
         self.load()
@@ -417,7 +456,9 @@ class ToolkitRegistry:
             return "(no tools registered)"
         lines = []
         if has_toolkit:
-            lines.append("Available tools in research_toolkit:")
+            from auto_research.toolkit_contract import toolkit
+
+            lines.append(f"Available tools in {toolkit().name}:")
             for name, spec in self._tools.items():
                 lines.append(f"  {name}: {spec['description']}")
         if has_mcp:
@@ -428,17 +469,18 @@ class ToolkitRegistry:
 
 
 def check_toolkit_manifests(root: Path | None = None) -> None:
-    """Launch-time preflight (no LLM): every ``*_utils`` package of ``toolkit_root`` imports in the
-    orchestration environment and exposes a ``TOOL_MANIFEST``. A package that does not would
-    reach the analysts as missing tools and nothing else (found 2026-10-27: the loader skipped
-    such a package silently). Registered in ``auto_research.preflight``.
+    """Launch-time preflight (no LLM): every package of the toolkit holds a ``TOOL_MANIFEST`` dict
+    literal in ``skills/__init__.py`` (read statically, no import) and keys each tool ``<toolkit name>.<package>.<tool>``
+    (the toolkit contract). A package that does not would reach the analysts as missing tools and
+    nothing else (found 2026-10-27: the loader skipped such a package silently). Registered in
+    ``auto_research.preflight``.
     """
     disabled: list[str] = []
     if root is None:
         from auto_research.graph.runtime import load_orchestration_config
-        from auto_research.sandbox.merge_flow import _resolve_toolkit_root
+        from auto_research.toolkit_contract import toolkit
 
-        root = _resolve_toolkit_root()
+        root = toolkit().root
         disabled = list(load_orchestration_config().get("disabled_tools") or [])
     registry = ToolkitRegistry(root, disabled_tools=disabled)  # the tools the run will load
     registry.load()
@@ -447,6 +489,11 @@ def check_toolkit_manifests(root: Path | None = None) -> None:
             "toolkit packages expose no tools: "
             + "; ".join(f"{pkg} ({why})" for pkg, why in sorted(registry.import_errors.items()))
             + f". Fix them in {root} before launching."
+        )
+    if registry.key_errors:
+        raise RuntimeError(
+            "manifest keys outside the toolkit contract's <name>.<package>.<tool>: "
+            + "; ".join(registry.key_errors) + f". Rename them in {root}, or declare the toolkit's name."
         )
     if registry.manifest_errors:
         raise RuntimeError(

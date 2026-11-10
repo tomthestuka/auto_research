@@ -52,18 +52,6 @@ from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
 from auto_research.sandbox.runner import PROTOCOL_KEYS, normalize_tool_raw, parse_tool_figures, tool_text
 
 
-def _jail_supersedes_command_check(registry: Any, kind: str) -> bool:
-    """Whether the server running ``kind`` was launched inside the OS jail.
-
-    Read from how that server was actually started (recorded at launch, F20 review 2026-10-06),
-    never from the config file: a server built without the jail -- a configured ``mcp_servers``
-    entry, the jail off, ``bwrap`` absent, a config edited mid-run -- keeps the best-effort
-    command scan, because nothing in the kernel stands behind it.
-    """
-    try:
-        return bool(registry.mcp_jailed(kind))
-    except Exception:  # noqa: BLE001 — a guard that cannot decide keeps the stricter behaviour
-        return False
 from auto_research.schemas import (
     AuthoringDecision,
     MergeFlowResult,
@@ -147,6 +135,18 @@ async def _run_extra_tool(
         if definition.get("name") == name:
             return await executor(arguments)
     return None
+
+
+def _environment_stamp(environment: Any) -> str | None:
+    """``environment``'s fingerprint, its lock written (as a worker's REPL stamps its receipts), or
+    ``None`` when it cannot be read: the receipt is then unstamped, never the call failed."""
+    from auto_research.env import env_lock_dir
+    from auto_research.sandbox.envs import fingerprint_and_lock
+
+    try:
+        return fingerprint_and_lock(environment, env_lock_dir())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _sandbox_env_fingerprint(sandbox: Any) -> str | None:
@@ -260,10 +260,9 @@ def use_env_tool_def() -> dict:
     }
 
 
-def execute_use_env(sandbox: Any, arguments: Mapping[str, Any], *, shell_jailed: bool) -> ToolOutcome:
-    """Set ``sandbox.shell_environment`` (``None`` = the sandbox's own) from the catalogue. A
-    pipeline environment's activation is coder-written, so the shell takes one only when it runs
-    jailed (``shell_jailed``: what the shell server's launch recorded)."""
+def execute_use_env(sandbox: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
+    """Set ``sandbox.shell_environment`` (``None`` = the sandbox's own) from the catalogue; the
+    shell sources the chosen activation inside its jail."""
     environment = getattr(sandbox, "environment", None)
     if environment is None:
         return ToolOutcome(text="No software environment is attached to your tools.", is_error=True)
@@ -279,12 +278,6 @@ def execute_use_env(sandbox: Any, arguments: Mapping[str, Any], *, shell_jailed:
     if match is None:
         names = ", ".join(env.name for env in available)
         return ToolOutcome(text=f"No environment named {wanted!r}; available: {names}.", is_error=True)
-    if match.owner == "pipeline" and not shell_jailed:
-        return ToolOutcome(
-            text=f"{match.name} is available to your shell when the shell runs in the OS jail; "
-                 "this run's shell runs without it. Use a toolkit tool, or ask for the jail.",
-            is_error=True,
-        )
     sandbox.shell_environment = match.name
     return ToolOutcome(text=(
         f"Your shell (bash_exec) now runs in {match.name}; your toolkit tools still run in "
@@ -322,11 +315,13 @@ def _receipted(
     fields: Mapping[str, Any] | None = None,
     toolkit_root: Path | None = None,
     state: Any = None,
+    env: str | None = None,
 ) -> ToolOutcome:
     """Mint a receipt for an in-process tool's outcome and label the text the model sees with it.
 
-    ``toolkit_root``: given for a toolkit tool run in-process (the lead's ``data_catalog``), so its
-    receipt names the toolkit and commit like the same tool run in a worker's sandbox.
+    ``toolkit_root``: given for a toolkit tool the lead runs (``data_catalog``, a jailed one-shot
+    call), so its receipt names the toolkit and commit like the same tool run in a worker's sandbox;
+    ``env``: the fingerprint of the environment it ran in.
 
     The blob is the outcome text as the tool produced it, before the label, so a quote the model
     copies from the text it read is checked against exactly that text.
@@ -336,6 +331,7 @@ def _receipted(
     minted = receipt_call(
         receipts, source=source, produced_by=name, args=arguments, text=outcome.text,
         failed=outcome.is_error, kind=kind, fields=fields, toolkit_root=toolkit_root, state=state,
+        **({"env": env} if env else {}),
     )
     return replace(outcome, text=f"{minted.header()}\n{outcome.text}",
                    receipt_call_id=minted.result.call_id)
@@ -618,11 +614,9 @@ def _made_from(receipt: Any) -> str:
     took by reference and the inputs it read (files its arguments named, and an observation named
     by ObsID; a data root itself and other identifier-located inputs are not recorded, CLAUDE.md
     §13). Other receipts carry no such line."""
-    from auto_research.provenance.store import TOOLKIT_PRODUCER_PREFIX
+    from auto_research.toolkit_contract import is_toolkit_producer
 
-    if getattr(receipt, "kind", None) != "result" or not str(getattr(receipt, "produced_by", "")).startswith(
-        TOOLKIT_PRODUCER_PREFIX
-    ):
+    if getattr(receipt, "kind", None) != "result" or not is_toolkit_producer(str(getattr(receipt, "produced_by", ""))):
         return ""
     inputs = list(getattr(receipt, "inputs", None) or [])
     from_files = {item.receipt for item in inputs if getattr(item, "receipt", None)}
@@ -685,34 +679,43 @@ async def execute_wait_for_reply(
 # in the sandbox like any toolkit tool); the analyst lead, which has no sandbox, is handed this
 # def and runs the same pure-standard-library read in-process. Its agent-facing name is the
 # registry-sanitized manifest kind, so both paths present the identical tool.
-_CATALOG_UTILS_KIND = "research_toolkit.catalog_utils.data_catalog"
-DATA_CATALOG_TOOL = re.sub(r"[^A-Za-z0-9_-]", "_", _CATALOG_UTILS_KIND)
-_catalog_read_fn = None  # memoized in-process catalog_utils.lib.catalog_read.data_catalog
+# The kind is the bound toolkit contract's (``<name>.catalog_utils.data_catalog``), read when used,
+# so the lead's catalog receipts are evidence under any declared toolkit name. The agent-facing name
+# stays this toolkit's until the lead's in-process path moves (Phase 3 step 3).
+DATA_CATALOG_TOOL = "research_toolkit_catalog_utils_data_catalog"
 
 
-def _import_from_toolkit(module_path: str, attr: str):
-    """Import ``attr`` from a research_toolkit module with ``toolkit_root`` on sys.path.
+def _catalog_kind() -> str:
+    """The catalog read's registry kind under the bound toolkit contract."""
+    from auto_research.toolkit_contract import toolkit
 
-    ``catalog_utils`` (and ``obsdb_catalog`` beneath it) live in ``research_toolkit``; the
-    analyst lead runs the catalog read in-process, so we import it the transient way
-    ``ToolkitRegistry`` does — prepend ``toolkit_root`` for the import, then remove it (the
-    module stays cached in ``sys.modules``).
-    """
-    import importlib
-    import sys
+    return f"{toolkit().name}.catalog_utils.data_catalog"
 
+
+def _catalog_spec() -> dict:
+    """The catalog read's manifest entry, read as data from ``catalog_utils/skills/__init__.py``
+    (``registry.manifest_literal``: no toolkit code runs in the orchestrator, D25)."""
     from auto_research.env import toolkit_root
+    from auto_research.sandbox.registry import manifest_literal
 
-    root = str(toolkit_root())
-    inserted = bool(root) and root not in sys.path
-    if inserted:
-        sys.path.insert(0, root)
-    try:
-        module = importlib.import_module(module_path)
-    finally:
-        if inserted:
-            sys.path.remove(root)
-    return getattr(module, attr)
+    source = Path(toolkit_root()) / "catalog_utils" / "skills" / "__init__.py"
+    manifest = manifest_literal(source.read_text(encoding="utf-8"))
+    if not manifest or not isinstance(manifest.get(_catalog_kind()), dict):
+        raise ValueError(f"{source} holds no {_catalog_kind()} entry in a TOOL_MANIFEST dict literal")
+    return manifest[_catalog_kind()]
+
+
+def _jailed_catalog_read(spec: Mapping[str, Any], obs_db_path: str, min_level: int | None, *,
+                         environment: Any, timeout: int) -> str:
+    """The manifest entry's ``module``/``fn`` run once inside the analysis jail, in ``environment``
+    (``runner.call_in_jail``), within the tool's ``tool_config.yaml`` timeout; raises with the
+    read's own error when it fails."""
+    from auto_research.env import toolkit_root
+    from auto_research.sandbox.runner import call_in_jail
+
+    return str(call_in_jail(str(spec["module"]), str(spec["fn"]), [obs_db_path, min_level],
+                            toolkit_root=Path(toolkit_root()), label="data-catalog", timeout=timeout,
+                            environment=environment))
 
 
 def _toolkit_clean_head() -> str | None:
@@ -729,14 +732,13 @@ def _toolkit_clean_head() -> str | None:
 def data_catalog_tool_def() -> dict | None:
     """Provider-neutral definition for the read-only ``data_catalog`` tool.
 
-    The tool is defined in ``research_toolkit``'s ``catalog_utils`` manifest; its description
-    + args_schema are sourced from there so orchestration never restates them. Returns None if
-    ``catalog_utils`` cannot be imported (a misconfigured toolkit), so a role's tool set still
-    builds — the preflight is where a missing toolkit fails loudly.
+    The tool is defined in the toolkit's ``catalog_utils`` manifest; its description + args_schema
+    are read from there as data (:func:`_catalog_spec`) so orchestration never restates them.
+    Returns None when that manifest cannot be read (a misconfigured toolkit), so a role's tool set
+    still builds — the preflight is where a missing toolkit fails loudly.
     """
     try:
-        manifest = _import_from_toolkit("catalog_utils", "TOOL_MANIFEST")
-        spec = manifest[_CATALOG_UTILS_KIND]
+        spec = _catalog_spec()
     except Exception:  # noqa: BLE001 — toolkit absent/misconfigured; skip the tool, don't crash
         return None
     from auto_research.sandbox.registry import provider_schema
@@ -767,15 +769,17 @@ def _empty_obs_db_note() -> str | None:
 
 
 async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
-    """Run the ``catalog_utils`` local-data read in-process (the analyst-lead path).
+    """Run the ``catalog_utils`` local-data read for the sandbox-less analyst lead: a one-shot call
+    inside the analysis jail (:func:`_jailed_catalog_read`, D25), in the toolkit's default
+    environment, whose fingerprint the outcome carries (``call_context["env"]``) for its receipt.
+    The toolkit is checked clean before the read and unchanged after it.
 
     The mission's ``obs_db_path`` is supplied by the caller — it is listed in the analyst's
     local-observation-databases context, exactly as ``acquire`` receives it. Delegates the read
     + listing to ``catalog_utils.lib.catalog_read`` (the single domain read); a malformed catalog
-    raises there and is surfaced as a recoverable error. (Workers run the same tool in the sandbox
-    via ``ToolkitRegistry``; this in-process path serves the sandbox-less lead.)
+    raises there and is surfaced as a recoverable error. (Workers run the same tool in their
+    sandbox via ``ToolkitRegistry``.)
     """
-    global _catalog_read_fn
     obs_db_path = str(arguments.get("obs_db_path") or "").strip()
     empty = None if obs_db_path else _empty_obs_db_note()
     if empty is not None:  # no catalog was read: a failed result, which grounds nothing
@@ -787,10 +791,9 @@ async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
             is_error=True,
         )
     try:
-        # Committed code only, as a worker's sandbox would run it after a commit: the lead imports
-        # this in the orchestrator itself, unjailed, and its output is evidence. While the toolkit
-        # holds uncommitted changes (an authoring session's work) the read waits; a new commit
-        # re-imports (B3c-1 review 31: an edited, later rejected module kept running from memory).
+        # Committed code only, as a worker's sandbox would run it after a commit: its output is
+        # evidence. While the toolkit holds uncommitted changes (an authoring session's work) the
+        # read waits (B3c-1 review 31: an edited, later rejected module kept running).
         head = _toolkit_clean_head()
         if head is None:
             return ToolOutcome(
@@ -799,32 +802,14 @@ async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
                      "authoring has finished.",
                 is_error=True,
             )
-        if _catalog_read_fn is None or _catalog_read_fn[0] != head:
-            import sys
-            import tempfile
-
-            from auto_research.env import toolkit_root
-            from auto_research.sandbox.merge_flow import purge_bytecode
-
-            for name in [m for m in sys.modules if m.split(".")[0] in ("catalog_utils", "obsdb_catalog")]:
-                del sys.modules[name]
-            # Git ignores bytecode, so the clean check above cannot see a planted `.pyc`: none is
-            # left to read, and this import writes and reads its own in a private folder.
-            purge_bytecode(toolkit_root())
-            previous = sys.pycache_prefix
-            sys.pycache_prefix = tempfile.mkdtemp(prefix="ar-lead-pycache-")
-            try:
-                _catalog_read_fn = (head, _import_from_toolkit("catalog_utils.lib.catalog_read", "data_catalog"),
-                                    _import_from_toolkit("catalog_utils", "TOOL_MANIFEST")[_CATALOG_UTILS_KIND])
-            finally:
-                sys.pycache_prefix = previous
         # The input validator, as on a worker's call: each argument arrives the way its kind
-        # allows (the committed manifest's kinds, read with the committed code above).
+        # allows (the committed manifest's kinds, read as data).
         from auto_research.provenance.calls import resolve_call_args
         from auto_research.provenance.inputs import RefError, check_arguments, declared_defaults, tool_values
 
-        schema = _catalog_read_fn[2].get("args_schema")
-        problem = check_arguments(_CATALOG_UTILS_KIND, arguments, schema)
+        spec = _catalog_spec()
+        schema = spec.get("args_schema")
+        problem = check_arguments(_catalog_kind(), arguments, schema)
         if problem is not None:
             return ToolOutcome(text=problem, is_error=True)
         completed = resolve_call_args(arguments, {"defaults": declared_defaults(schema)})
@@ -834,10 +819,24 @@ async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
             return ToolOutcome(text=str(exc), is_error=True)
         obs_db_path = str(arguments.get("obs_db_path") or "").strip()
         raw_min = arguments.get("min_level")
-        text = _catalog_read_fn[1](obs_db_path, min_level=int(raw_min) if raw_min is not None else None)
+        from auto_research.env import analysis_environment, toolkit_root
+        from auto_research.sandbox.registry import ToolkitRegistry
+
+        environment = analysis_environment()
+        stamp = await asyncio.to_thread(_environment_stamp, environment)
+        timeout = ToolkitRegistry(Path(toolkit_root())).call_timeout_ceiling(_catalog_kind())
+        text = await asyncio.to_thread(partial(
+            _jailed_catalog_read, spec, obs_db_path, int(raw_min) if raw_min is not None else None,
+            environment=environment, timeout=timeout))
+        if _toolkit_clean_head() != head:
+            return ToolOutcome(
+                text="The toolkit changed while data_catalog read (a commit or an edit landed), so "
+                     "this answer is not from one committed version. Call it again.",
+                is_error=True,
+            )
     except Exception as exc:  # noqa: BLE001 — malformed catalog / missing toolkit → recoverable
         return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
-    return ToolOutcome(text=text)
+    return ToolOutcome(text=text, call_context={"env": stamp})
 
 
 WEB_SEARCH_TOOL = "web_search"
@@ -854,8 +853,8 @@ def web_search_tool_def() -> dict:
     return {
         "name": WEB_SEARCH_TOOL,
         "description": (
-            "Search the web for authoritative documentation — mission analysis threads, "
-            "calibration memos, official references, demo slides. Returns the top matches, each "
+            "Search the web for authoritative documentation — official analysis guides, "
+            "calibration notes, official references, demo slides. Returns the top matches, each "
             "with a title, URL, and a short relevance teaser. Use it to confirm an uncertain "
             "science or code point; call web_fetch on a result's URL to read that page in full."
         ),
@@ -1623,7 +1622,7 @@ def write_report_tool_def(
 _BRIEF_TEXT = (
     "Each tool brief author_chain files (one per link, ids spec1, spec2, ...) is a report of its "
     "own: write or edit it the same way, with report set to its id. While its link's coding "
-    "session runs, the coder reads each revision at its next turn as a diff, and the gate and the "
+    "session runs, the coder reads each revision at its next turn as a diff, and the CI pipeline and the "
     "co-lead read the current version at each submission; the link's commit locks its brief, and "
     "turn_end locks every report of the turn. A brief's document:\n"
 )
@@ -1946,7 +1945,7 @@ def _edit_brief(workspace: ReportWorkspace, arguments: Mapping[str, Any], tool: 
         f"Brief {target} ({new.proposed_tool_name}) is version {brief.sha256[:8]}"
         + (" (unchanged)" if brief.sha256 == before else "")
         + ("; its running coding session reads this version: the coder at its next turn, as a "
-           "diff, and the gate and the co-lead at the next submission." if brief.bound else ".")
+           "diff, and the CI pipeline and the co-lead at the next submission." if brief.bound else ".")
     )
     handles = brief_problems(brief, _brief_viewable(workspace))
     if brief.stranded:
@@ -2068,19 +2067,20 @@ def submit_tool_def() -> dict:
     return {
         "name": SUBMIT_TOOL,
         "description": (
-            "Submit the coder's current work to the deterministic gate and the independent "
-            "co-lead review. The gate is mechanical (determinism, no-fabrication, structure, the "
-            "tool's own tests, and the toolkit's earlier fast tests, which the change keeps passing) "
-            "— you can only satisfy it, by fixing the code through message to the coder. The "
-            "review judges whether the plan and its tests are right and strict enough. On gate-pass "
-            "AND review-pass the tool is committed automatically — you never self-approve. If the "
-            "gate fails, fix and submit again; if the review rejects, either message the coder to address "
+            "Submit the coder's current work to the toolkit's CI pipeline and the independent "
+            "co-lead review. The pipeline is mechanical (its jobs: change scope, environments, "
+            "no-fabrication, structure, minting, the change's own tests, and the toolkit's earlier "
+            "fast tests, which the change keeps passing) — you satisfy it by fixing the code through "
+            "message to the coder. The review judges whether the plan and its tests are right and "
+            "strict enough. On pipeline-pass AND review-pass the tool is committed automatically; "
+            "approval rests with the pipeline and the co-lead. If the pipeline fails, fix and submit "
+            "again; if the review rejects, either message the coder to address "
             "it or respond_to_review to debate it. This is the ONLY way to finish: your authored "
             "tool is committed solely through this call — if your turn ends without calling it (or "
             "respond_to_review), the work is discarded as a failure. When the tool and its tests are "
             "right, call it; if after your best effort it genuinely cannot be made mergeable, say so "
             "explicitly in one line rather than stopping silently. While the coder is still "
-            "working, this first waits for it to stop, then runs the gate. Takes no arguments."
+            "working, this first waits for it to stop, then runs the CI pipeline. Takes no arguments."
         ),
         "input_schema": {"type": "object", "properties": {}},
     }
@@ -2128,7 +2128,7 @@ async def execute_coder_message(
         return ToolOutcome(
             text=(response or "").strip()
             or "(coder produced no narration; inspect the worktree with read_file, or "
-            "submit_for_review to run the gate.)"
+            "submit_for_review to run the CI pipeline.)"
         )
     outcome = await session.send(instructions, mid_turn=bool(mid_turn))
     if outcome == "answered":
@@ -2336,7 +2336,7 @@ async def _wait_before_submit(session: Any) -> tuple[str, ToolOutcome | None]:
     waited = time.monotonic() - started
     if not narration and waited < 1:
         return "", None
-    prefix = f"[waited {_fmt_s(waited)} for the coder to stop before running the gate]\n\n"
+    prefix = f"[waited {_fmt_s(waited)} for the coder to stop before running the CI pipeline]\n\n"
     if narration:
         prefix += "\n\n".join(narration) + "\n\n"
     return prefix, None
@@ -2359,7 +2359,7 @@ async def execute_submit(session: Any, cycle: "LeadCycle | None" = None) -> Tool
         if not hasattr(session, "wait_for_event"):
             return ToolOutcome(
                 text=(
-                    "The coder is still working, and the gate reads the working tree. Submit "
+                    "The coder is still working, and the CI pipeline reads the working tree. Submit "
                     "once it has stopped."
                 ),
                 is_error=True,
@@ -2447,11 +2447,14 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
             for c in (*gate.layer_a, *gate.layer_b)
             if not c.passed
         ]
-        body = "\n".join(failed) or gate.reason
+        from auto_research.sandbox.merge_flow import gate_jobs_line
+
+        body = "\n".join(filter(None, (gate_jobs_line(gate), *failed))) or gate.reason
         return ToolOutcome(
             text=(
-                "GATE FAILED — mechanical checks you can only satisfy. Fix the underlying cause by "
-                f"messaging the coder (never weaken a check to pass), then submit_for_review again:\n{body}"
+                "CI PIPELINE FAILED — mechanical checks you satisfy by fixing the code. Fix the underlying "
+                f"cause by messaging the coder (keep every check at its strength), then submit_for_review "
+                f"again:\n{body}"
             )
         )
     try:
@@ -2472,7 +2475,7 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
         issues = "\n".join(f"- {i}" for i in review.issues) or review.rationale
         return ToolOutcome(
             text=(
-                "GATE PASSED, but the independent co-lead REVIEW REJECTED the tool:\n"
+                "CI PIPELINE PASSED, but the independent co-lead REVIEW REJECTED the tool:\n"
                 f"{issues}\n\n{review.rationale}\n\nEither message the coder to address these, or "
                 "respond_to_review to defend the design if you believe a challenge is unfounded."
             )
@@ -2480,7 +2483,7 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
     return await _commit_and_advance(
         session, review, cycle,
         lambda name, sha: (
-            f"COMMITTED {name} → {sha}. Gate passed and the co-lead approved — the tool is on the "
+            f"COMMITTED {name} → {sha}. The CI pipeline passed and the co-lead approved — the tool is on the "
             "authoring branch. Authoring for this tool is done."
         ),
     )
@@ -2619,7 +2622,7 @@ def respond_to_review_tool_def() -> dict:
             "test choice when you believe the challenge is unfounded or already addressed. The "
             "independent co-lead reconsiders your argument and re-issues its verdict: it concedes "
             "only if genuinely persuaded (a sound argument, or evidence the issue is already handled) "
-            "and holds firm against pressure. If it is persuaded and the gate still passes, the tool "
+            "and holds firm against pressure. If it is persuaded and the CI pipeline still passes, the tool "
             "commits. Use this for a genuine disagreement; when the co-lead is right, fix the code by messaging "
             "the coder instead. Write 'message' as Markdown."
         ),
@@ -2723,16 +2726,19 @@ async def _respond_now(session: Any, message: str, cycle: "LeadCycle | None") ->
             for c in (*gate.layer_a, *gate.layer_b)
             if not c.passed
         ) or gate.reason
+        from auto_research.sandbox.merge_flow import gate_jobs_line
+
+        failed = "\n".join(filter(None, (gate_jobs_line(gate), failed)))
         return ToolOutcome(
             text=(
-                "The co-lead is persuaded, but the gate no longer passes (did the tree change?):\n"
+                "The co-lead is persuaded, but the CI pipeline no longer passes (did the tree change?):\n"
                 f"{failed}\nFix it by messaging the coder, then submit_for_review."
             )
         )
     return await _commit_and_advance(
         session, review, cycle,
         lambda name, sha: (
-            f"The co-lead was PERSUADED and the gate passed — COMMITTED {name} → {sha}. "
+            f"The co-lead was PERSUADED and the CI pipeline passed — COMMITTED {name} → {sha}. "
             "Authoring for this tool is done."
         ),
     )
@@ -3195,6 +3201,14 @@ def _observation_path_args() -> dict[str, str]:
     return paths
 
 
+def _toolkit_root_text() -> str:
+    """The bound toolkit contract's root, resolved, as model-facing text: where a role's tool
+    descriptions say the toolkit (and its README briefings) lives."""
+    from auto_research.toolkit_contract import toolkit
+
+    return str(Path(toolkit().root).resolve())
+
+
 class SandboxToolProvider:
     """Analyst tool surface: ``ToolkitRegistry`` tools run in a ``PersistentSandbox``.
 
@@ -3270,9 +3284,10 @@ class SandboxToolProvider:
         ]
         # The one paged read every role has (the builtin server's 64 KB read is gone, 2026-10-17).
         defs.append(read_file_tool_def(
-            "Give a path inside the allow-list (your folder, the toolkit, the observation data); "
-            "a relative path is read from your folder. Files your shell wrote to /tmp are its own: "
-            "read those with bash_exec.",
+            f"Give a path inside the allow-list (your folder, the toolkit at {_toolkit_root_text()}, "
+            "the observation data); a relative path is read from your folder. The toolkit's "
+            "README.md files (its root and each package) brief its domain. Files your shell wrote "
+            "to /tmp are its own: read those with bash_exec.",
             path_hint="Path to the file: absolute, or relative to your folder.",
         ))
         if self.web_source is not None:
@@ -3333,11 +3348,12 @@ class SandboxToolProvider:
                     refused.append(True)
                     return ToolOutcome(
                         text=(f"path not permitted: {raw or '(none)'} — outside the agent filesystem "
-                              "allow-list (your folder, research_toolkit, the observation data, HEASoft)."),
+                              "allow-list (your folder, the toolkit, the observation data, the analysis "
+                              "software)."),
                         is_error=True,
                     )
                 if _in_host_tmp(target, guard, own=own):
-                    # With the jail on, the shell's /tmp is private to it; the host's is someone else's.
+                    # The jail gives the shell a private /tmp; the host's is someone else's.
                     refused.append(True)
                     return ToolOutcome(
                         text=(f"{raw}: /tmp here is not your shell's /tmp (that one is private to the "
@@ -3355,33 +3371,17 @@ class SandboxToolProvider:
             outcome = await asyncio.to_thread(execute_list_env, self.sandbox, arguments)
             return _receipted(self.receipts, self.receipt_source, name, arguments, outcome)
         if name == USE_ENV_TOOL:
-            jailed = self.registry.mcp_jailed("mcp.builtin.bash_exec") if hasattr(self.registry, "mcp_jailed") else False
-            outcome = await asyncio.to_thread(
-                partial(execute_use_env, self.sandbox, arguments, shell_jailed=jailed)
-            )
+            outcome = await asyncio.to_thread(partial(execute_use_env, self.sandbox, arguments))
             return _receipted(self.receipts, self.receipt_source, name, arguments, outcome)
         kind = self.registry.kind_for_function(name)
 
-        # Filesystem allow-list on the builtin file tools (the raw read/list/bash surface).
+        # Filesystem allow-list on the builtin file tools (the raw read/list surface).
         # read_file/list_dir are checked by their target and always: they run IN THIS PROCESS, so
         # no OS jail can reach them, and this guard is the only thing standing between the lead or
-        # the reviewer and the filesystem (§2/§4). bash_exec is different -- see below.
+        # the reviewer and the filesystem (§2/§4). bash_exec runs in the shell server's jail, which
+        # holds only the allow-list.
         denied = None
-        if kind == "mcp.builtin.bash_exec":
-            # Superseded by the OS jail where one is running. The command check scans a command
-            # STRING for absolute-looking substrings, which enforces nothing the kernel jail does
-            # not already enforce -- and the jail also catches the implicit reads a string scan
-            # cannot see. What the string scan does add is false positives: a python glob
-            # `f'{root}/{o}/event_l2/ixpe{o}_det*'` reads as a path `/event_l2/ixpe`, and a path
-            # relative to a `cwd` reads as `/pcube_timeseg_01002901.csv`. Measured 2026-09-01: four
-            # rejections in one run across two actors, three of them consecutive on one worker,
-            # each costing a loop iteration. A model that exhausts its budget fighting a path
-            # checker is indistinguishable from one that could not do the work.
-            # `None` means "nothing denied" here -- an empty list would be a *rejection* with an
-            # empty reason, i.e. every shell command blocked. The suite caught exactly that.
-            denied = None if _jail_supersedes_command_check(self.registry, kind) else \
-                self._guard.forbidden_in_command(arguments.get("command", ""))
-        elif kind == "mcp.builtin.list_dir":
+        if kind == "mcp.builtin.list_dir":
             target = arguments.get("path")
             if target is not None and not self._guard.is_allowed(target):
                 denied = str(target)
@@ -3389,8 +3389,7 @@ class SandboxToolProvider:
             return ToolOutcome(
                 text=(
                     f"path not permitted: {denied} — outside the agent filesystem allow-list "
-                    f"(research_toolkit / obsdb / analyst-env / HEASoft). The auto_research "
-                    f"orchestration repo and governance files are off-limits (§2/§4)."
+                    f"(your folder, the toolkit, the observation data, the analysis software)."
                 ),
                 is_error=True,
             )
@@ -3564,10 +3563,6 @@ class SandboxToolProvider:
             return None, (f"Environment {want} is not available here (list_env lists what is)."
                           + ("" if chosen else " It is this tool's tested environment and has not been "
                              "built: say so in your report's tool_request.")), False
-        from auto_research.sandbox.jail import jail_enabled
-
-        if match.owner == "pipeline" and not jail_enabled():
-            return None, f"{want} runs only in the jail, which is off for this run.", False
         # A build of an earlier definition kept in use (its rebuild failed, D3b) is not the tested one.
         return match, None, untested or bool(getattr(match, "superseded", False))
 
@@ -3925,7 +3920,7 @@ class MonitorToolProvider:
                     "type": "object",
                     "description": (
                         "Returns index rows, never raw payload text: open a hit with ledger_event "
-                        "to read it. Use for names, ObsIDs, error strings, paths."
+                        "to read it. Use for names, identifiers, error strings, paths."
                     ),
                     "properties": {
                         "pattern": {
@@ -4230,13 +4225,9 @@ async def _bounded_read(target: Path, arguments: Mapping[str, Any], *, max_chars
 
 
 def _in_host_tmp(path: Path, guard: Any, *, own: Path | None = None) -> bool:
-    """Whether an in-process read of ``path`` is allowed only through the host's ``/tmp`` while the
-    jail gives the worker's shell a private one (the rule receipting applies too,
+    """Whether an in-process read of ``path`` is allowed only through the host's ``/tmp``, which the
+    jail replaces with the worker's shell's private one (the rule receipting applies too,
     ``capture._allow_listed``). A path inside another allowed folder is that folder's."""
-    from auto_research.sandbox.jail import jail_enabled
-
-    if not jail_enabled():
-        return False
     try:
         resolved = Path(path).resolve()
     except (OSError, ValueError):
@@ -4366,7 +4357,9 @@ class ReadOnlyToolProvider:
         self.opened_paths: list[Path] = []
 
     def _roots_text(self) -> str:
-        return ", ".join(str(r) for r in self.roots)
+        toolkit_root = _toolkit_root_text()
+        return ", ".join(f"{r} (the toolkit; its README.md files brief its domain)"
+                         if str(r) == toolkit_root else str(r) for r in self.roots)
 
     def tool_definitions(self) -> list[dict]:
         roots_text = self._roots_text()
@@ -4528,7 +4521,7 @@ class ReadOnlyToolProvider:
             return await _web_receipted(self.receipts, self.receipt_source, arguments, outcome)
         # A toolkit tool the lead runs in-process is receipted under its registry kind, so it is
         # evidence like the same tool run in a worker's sandbox (`provenance.store.is_evidence`).
-        producer = _CATALOG_UTILS_KIND if name == DATA_CATALOG_TOOL else name
+        producer = _catalog_kind() if name == DATA_CATALOG_TOOL else name
         root = state = None
         if name == DATA_CATALOG_TOOL and self.receipts is not None:
             from auto_research.env import toolkit_root
@@ -4539,8 +4532,9 @@ class ReadOnlyToolProvider:
                 partial(inputs_before, self.receipts, arguments, skip_keys={"obs_db_path"},
                         observation_paths={"obs_db_path": arguments.get("obs_db_path")})
             )
+        env = (outcome.call_context or {}).get("env") if name == DATA_CATALOG_TOOL else None
         return _receipted(self.receipts, self.receipt_source, producer, arguments, outcome, kind=kind,
-                          toolkit_root=root, state=state)
+                          toolkit_root=root, state=state, env=env)
 
     def _commit_receipted(self, session: Any, before: str | None, outcome: ToolOutcome) -> ToolOutcome:
         """A submit that committed becomes a ``commit`` receipt the runtime writes from the session.

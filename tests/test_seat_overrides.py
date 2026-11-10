@@ -18,6 +18,8 @@ from auto_research.config_paths import CONFIG_DIR_ENV, config_dir, models_yaml, 
 from auto_research.models.registry import REQUIRED_ROLES, load_registry
 from auto_research.models.types import ModelsConfig
 from tests.seats import (
+    configured_seat,
+    env_seat,
     from_seat,
     models_config,
     parse_seats,
@@ -179,6 +181,7 @@ def test_the_previous_configuration_pointer_is_restored_either_way(tmp_path):
         pass
     assert CONFIG_DIR_ENV not in os.environ
 
+    write_config_dir(tmp_path, {})  # a whole configuration, as a session's `--seats` writes
     os.environ[CONFIG_DIR_ENV] = str(tmp_path)
     try:
         with seated(reviewer=seat("anthropic", "claude-fable-5")):
@@ -197,6 +200,87 @@ def test_a_temporary_directory_is_removed_and_a_given_one_is_kept(tmp_path):
     with seated(reviewer=seat("anthropic", "claude-fable-5"), config_dir=kept):
         pass
     assert (kept / "models.yaml").is_file()
+
+
+# ── configured_seat: a configured member as another role's seat ───────────────────────────────
+
+
+def test_a_configured_seat_reads_the_member_through_the_configuration_pointer():
+    """Inside an override it returns the overriding member, settings and prices included."""
+    second = seat("dashscope", "qwen3.7-plus", parameters={"reasoning": {"effort": "low"}},
+                  priceMTk={"input": 0.4, "output": 1.2})
+    with seated(analyst_worker=[seat("anthropic", "claude-sonnet-5"), second]):
+        got = configured_seat("analyst_worker", 1)
+    assert (got.provider, got.model, got.parameters, got.priceMTk) == (
+        "dashscope", "qwen3.7-plus", {"reasoning": {"effort": "low"}}, {"input": 0.4, "output": 1.2})
+
+
+def test_a_configured_seat_seats_another_role_as_the_registry_resolves_its_own():
+    """The cells' path: the lead seated on the configured worker tier resolves to that member."""
+    worker = load_registry().resolve("analyst_worker").handles[0].config
+    with seated(analyst_lead=configured_seat("analyst_worker")):
+        lead = load_registry().resolve("analyst_lead").handles[0]
+    assert lead.role == "analyst_lead"
+    assert (lead.config.provider, lead.config.model, lead.config.parameters) == (
+        worker.provider, worker.model, worker.parameters)
+    assert lead.config.priceMTk == worker.priceMTk
+
+
+def test_a_configured_coder_seat_keeps_its_harness_fields():
+    raw = yaml.safe_load(models_yaml().read_text(encoding="utf-8"))["roles"]["coder"]["members"][0]
+    got = configured_seat("coder")
+    assert (got.harness, got.base_url, got.key_env) == (
+        raw.get("harness"), raw.get("base_url"), raw.get("key_env"))
+
+
+def test_a_configured_seat_of_an_unconfigured_role_raises():
+    with pytest.raises(KeyError):
+        configured_seat("no_such_role")
+
+
+def test_a_configured_seat_carries_context_tokens_and_refuses_a_field_it_cannot_carry(tmp_path):
+    source = yaml.safe_load(models_yaml().read_text(encoding="utf-8"))
+    source["roles"]["analyst_worker"]["members"][0]["context_tokens"] = 70000
+    write_config_dir(tmp_path / "ok", {})
+    (tmp_path / "ok" / "models.yaml").write_text(yaml.safe_dump(source), encoding="utf-8")
+    os.environ[CONFIG_DIR_ENV] = str(tmp_path / "ok")
+    try:
+        got = configured_seat("analyst_worker")
+        assert got.context_tokens == 70000 and got.member()["context_tokens"] == 70000
+        with seated(analyst_lead=got):
+            assert load_registry().resolve("analyst_lead").handles[0].config.context_tokens == 70000
+        source["roles"]["analyst_worker"]["members"][0]["unheard_of"] = 1
+        (tmp_path / "ok" / "models.yaml").write_text(yaml.safe_dump(source), encoding="utf-8")
+        with pytest.raises(ValueError, match="unheard_of"):
+            configured_seat("analyst_worker")
+    finally:
+        os.environ.pop(CONFIG_DIR_ENV, None)
+
+
+def test_nested_overrides_compose_with_the_configuration_in_force():
+    """An inner block replaces only the roles it names: a session's (or outer block's) seats stay."""
+    lead = load_registry().resolve("analyst_lead").handles[0].config.model
+    reviewer = load_registry().resolve("reviewer").handles[0].config.model
+    with seated(analyst_worker=seat("openai", "gpt-5.6-terra")):
+        with seated(reviewer=configured_seat("analyst_worker")):
+            registry = load_registry()
+            assert registry.resolve("reviewer").handles[0].config.model == "gpt-5.6-terra"
+            assert registry.resolve("analyst_worker").handles[0].config.model == "gpt-5.6-terra"
+            assert registry.resolve("analyst_lead").handles[0].config.model == lead
+        assert load_registry().resolve("reviewer").handles[0].config.model == reviewer
+        assert load_registry().resolve("analyst_worker").handles[0].config.model == "gpt-5.6-terra"
+
+
+def test_an_environment_seat_is_parsed_strictly(monkeypatch):
+    monkeypatch.delenv("AR_TEST_SEAT", raising=False)
+    assert env_seat("AR_TEST_SEAT") is None
+    monkeypatch.setenv("AR_TEST_SEAT", "openai:gpt-5.6-terra")
+    got = env_seat("AR_TEST_SEAT")
+    assert (got.provider, got.model) == ("openai", "gpt-5.6-terra")
+    for bad in ("gpt-5.6-terra", "openai:", "openai:a|anthropic:b", "openai:a,reviewer=x:y"):
+        monkeypatch.setenv("AR_TEST_SEAT", bad)
+        with pytest.raises(ValueError, match="AR_TEST_SEAT"):
+            env_seat("AR_TEST_SEAT")
 
 
 def test_a_role_name_that_is_not_an_identifier_goes_through_the_mapping_form():

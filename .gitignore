@@ -4,6 +4,7 @@
 # machine-local config (tracked as *.example templates; live copies written by install.sh)
 /config/orchestration.yaml
 /config/observations.yaml
+# retired (W4) but still written by the frozen installer until Phase 3 ends (D16)
 /src/auto_research/sandbox/analyst_env.sh
 /src/auto_research/sandbox/repl_init.py
 

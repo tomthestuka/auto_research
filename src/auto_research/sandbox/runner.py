@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
-import textwrap
-import time
 from pathlib import Path
 
-from auto_research.config_paths import orchestration_yaml
 from auto_research.schemas.figures import FigureRef
-from auto_research.schemas.tools import ToolResult
 
 # Cache: ini_sh path → env dict sourced from that script.
 _ini_env_cache: dict[str, dict[str, str]] = {}
@@ -95,7 +91,7 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
 def builtin_function_source(name: str) -> str:
     """The source text of one function of ``builtin_server.py``, read without importing the server
     (it starts an MCP instance on import): the one definition of a rule the REPL script and the
-    gate's recorder run too (``private_param_dir``)."""
+    gate's recorder run too (``private_folders``)."""
     import ast
 
     path = Path(__file__).with_name("builtin_server.py")
@@ -104,80 +100,166 @@ def builtin_function_source(name: str) -> str:
     return ast.get_source_segment(text, node) + "\n"
 
 
-def with_private_param_dir(
-    env: dict[str, str], private: Path | str, *, create: Path | str | None = None,
-) -> dict[str, str]:
-    """``env`` with the writable half of ``PFILES`` replaced by a folder of this process's own.
-
-    HEASoft tools read their parameters from ``PFILES`` (``<user dir>;<system dir>``) and write the
-    last-used values back into the user dir. A user dir shared by every worker, run and the human
-    let one process's ``pset`` (or one call's learned value) silently change what the next call
-    used, anywhere, with no receipt (F23, 2026-10-06). The private dir starts empty, so every tool
-    starts from the system defaults. ``private`` is the path *as the process sees it* (``/tmp/...``
-    inside a jail whose ``/tmp`` is private); ``create`` is the same folder as the host sees it,
-    created here. An env without a two-part ``PFILES`` is returned unchanged.
-    """
-    value = env.get("PFILES", "")
-    if ";" not in value:
-        return env
-    Path(create if create is not None else private).mkdir(parents=True, exist_ok=True)
-    system = value.split(";", 1)[1]
-    return {**env, "PFILES": f"{private};{system}"}
+def _builtin_function(name: str):
+    """One function of ``builtin_server.py`` as this process runs it: the same source the REPL
+    script and the gate's recorder carry, so the rule has one definition."""
+    namespace: dict = {}
+    exec(compile(builtin_function_source(name), f"<builtin_server.{name}>", "exec"), namespace)
+    return namespace[name]
 
 
-def check_analyze_probe(*, config_path: str | Path | None = None) -> None:
-    """Preflight: run the configured stack smoke-test under ``analyze_env`` (skip if unset).
+#: ``builtin_server.private_folders``: each declared private variable's first folder replaced by one
+#: of the process's own (F23) or of one call's (G4); the declaration comes from ``env.private_variables``.
+private_folders = _builtin_function("private_folders")
 
-    Reads ``analyze_probe``/``analyze_env``/``analyze_ini_sh``/``toolkit_root`` from
-    ``config/orchestration.yaml``, sources the analyst env + sets PYTHONPATH the same way the
-    sandbox does, then runs ``{analyze_env}/bin/python -c "{analyze_probe}"``. A non-zero exit
-    (broken or missing analysis stack) fails the launch with the captured error. An empty or
-    absent ``analyze_probe`` is a no-op — the escape hatch for a domain (or a literature-only
-    deployment) that configures no probe.
-    """
-    import yaml  # local — keep the preflight import-light
 
-    config_path = Path(config_path) if config_path is not None else orchestration_yaml()
+def run_in_environment(
+    environment, command: str, *, toolkit_root: Path, label: str, timeout: int = 300,
+    toolkit_on_path: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run one shell ``command`` in ``environment`` the way a unit's REPL and shell start: the
+    shared launcher (``envs.in_environment``: a clean start, the activation sourced there, the
+    toolkit on ``PYTHONPATH``) inside the analysis jail (``jail.analysis_policy``, the environment's
+    prefix, activation and boot file bound read-only). A pipeline environment's
+    activation is never sourced in this process. Used by the launch checks (the probe, the private
+    variables) and the coder's shell variables. ``toolkit_on_path=False``: the toolkit is bound but
+    left off ``PYTHONPATH``."""
+    from auto_research.sandbox.envs import in_environment
+    from auto_research.sandbox.jail import analysis_policy, jail_home, private_tmp, wrap
+
+    home = jail_home(label)
+    tmp = private_tmp(label, home)
+    script = in_environment(environment, command, toolkit_root if toolkit_on_path else None)
+    readonly = tuple(str(p) for p in (environment.prefix, environment.activate, environment.boot) if p is not None)
+    argv = wrap(["/bin/bash", "--noprofile", "--norc", "-c", script],
+                analysis_policy(label=label, toolkit_root=toolkit_root, tmp=tmp, home=home,
+                                readonly=readonly))
+    env = {name: os.environ[name] for name in _INI_BASE_VARS if name in os.environ}
+    env.update(PATH=_INI_BASE_PATH, HOME=str(home), TMPDIR="/tmp")
+    return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout, cwd=str(home),
+                          stdin=subprocess.DEVNULL)
+
+
+#: The jailed one-shot call: ``argv[1]`` a JSON ``[module, fn, args, result file]``; the return is
+#: written as JSON to the result file, in the jail's private ``/tmp`` (stdout stays the activation's).
+_CALL_SCRIPT = (
+    "import importlib, json, sys\n"
+    "module, fn, args, out = json.loads(sys.argv[1])\n"
+    "value = getattr(importlib.import_module(module), fn)(*args)\n"
+    "with open(out, 'w', encoding='utf-8') as handle:\n"
+    "    json.dump(value, handle, default=str)\n"
+)
+
+
+#: The largest return a jailed one-shot call may hand back.
+_CALL_RESULT_CAP = 64 * 1024 * 1024
+
+
+def call_in_jail(module: str, fn: str, args: list, *, toolkit_root: Path, label: str, timeout: int = 300,
+                 environment=None):
+    """``module.fn(*args)`` from the toolkit at ``toolkit_root``, run once inside the analysis jail in
+    ``environment`` (default: the toolkit's default one; :func:`run_in_environment`, ``python -P``,
+    bytecode in the jail's private ``/tmp``), and its JSON-decoded return, written by the call to a
+    file in that private ``/tmp`` and read here. The orchestrator never imports toolkit code (D25):
+    the lead's catalog read and the launch's catalog health check come here. Raises
+    ``RuntimeError`` naming the call when it fails or its return does not decode."""
+    import shlex
+    import uuid
+
+    from auto_research.env import analysis_environment
+    from auto_research.sandbox.jail import jail_home, private_tmp
+
+    environment = environment if environment is not None else analysis_environment()
+    name = f"ar-call-{uuid.uuid4().hex}.json"
+    command = ("PYTHONPYCACHEPREFIX=/tmp/ar-pycache "  # never a planted in-tree `.pyc`
+               + " ".join(shlex.quote(part) for part in (
+                   str(environment.python), "-P", "-c", _CALL_SCRIPT,
+                   json.dumps([module, fn, list(args), f"/tmp/{name}"]))))
+    completed = run_in_environment(environment, command, toolkit_root=Path(toolkit_root), label=label,
+                                   timeout=timeout)
+    # The host side of the jail's /tmp (run_in_environment's own: the label's private folder).
+    result = private_tmp(label, jail_home(label)) / name
+    call = f"{module}.{fn}"
     try:
-        with Path(config_path).open("r", encoding="utf-8") as stream:
-            orch = yaml.safe_load(stream) or {}
-    except OSError:
-        return  # missing live config is reported by the config-loader checks, not here
-    probe = (orch.get("analyze_probe") or "").strip()
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            raise RuntimeError(f"{call} failed in the jail: "
+                               + (detail[-1] if detail else f"exit {completed.returncode}"))
+        try:
+            # Written by toolkit code: opened without following a link, a regular file, capped.
+            import stat
+
+            fd = os.open(result, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise ValueError("not a regular file")
+                data = handle.read(_CALL_RESULT_CAP + 1)
+            if len(data) > _CALL_RESULT_CAP:
+                raise ValueError(f"larger than {_CALL_RESULT_CAP} bytes")
+            return json.loads(data.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise RuntimeError(f"{call} returned no readable JSON from the jail: {exc}") from None
+    finally:
+        result.unlink(missing_ok=True)
+
+
+def analysis_activation_env(orch: dict, *, home: str | None = None) -> dict[str, str]:
+    """The variables the toolkit's default environment's activation (``env.analysis_environment``)
+    sets: sourced by :func:`run_in_environment` inside the analysis jail and read back, without the
+    launcher's own variables (``HOME``, ``TMPDIR``, ``AR_*``, the toolkit on ``PYTHONPATH``): a
+    caller adds its own. What the activation derived from that jail's home (``/home/ar``) is
+    rewritten onto ``home``, the home of the jail the caller hands these values to (an author
+    harness's, ``jail.coder_home``); ``None`` leaves them as the activation set them (a launch check
+    reading a separator). Raises when the activation fails."""
+    from auto_research.env import analysis_environment
+    from auto_research.toolkit_contract import toolkit
+
+    completed = run_in_environment(analysis_environment(orch), "/usr/bin/env -0",
+                                   toolkit_root=toolkit().root, label="activation", toolkit_on_path=False)
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip()[-800:]
+        raise RuntimeError(f"the default environment's activation failed (exit {completed.returncode}): {detail}")
+    pairs = [entry.partition("=") for entry in completed.stdout.split("\0") if "=" in entry]
+    seen_home = next((value for name, _, value in pairs if name == "HOME"), "").rstrip("/")
+    home = (home or "").rstrip("/")
+    # The launcher's home as a whole leading path (a value's start, or after ':', ';', '='), as the
+    # environment fingerprint normalises HOME.
+    at_home = (re.compile(r"(^|[:;=])" + re.escape(seen_home) + r"(?=/|[:;]|$)")
+               if len(seen_home) > 1 and home and home != seen_home else None)
+    env = {name: (at_home.sub(lambda m: m.group(1) + home, value) if at_home else value)
+           for name, _, value in pairs
+           if name not in _INI_SHELL_VARS and name not in ("HOME", "TMPDIR") and not name.startswith("AR_")}
+    # The launcher's empty toolkit entry would read as the working folder on sys.path.
+    path = os.pathsep.join(part for part in env.pop("PYTHONPATH", "").split(os.pathsep) if part)
+    return {**env, **({"PYTHONPATH": path} if path else {})}
+
+
+def check_analysis_probe() -> None:
+    """Preflight: the toolkit's default environment runs its definition's ``probe`` (one line of
+    Python in ``env.yaml``; none, nothing runs), started as a unit's REPL is
+    (:func:`run_in_environment`, inside the jail). A non-zero exit fails the launch with the captured
+    error, which usually names a root the jail does not bind. The definition comes
+    from the process's bound toolkit contract, as every other reader takes it."""
+    import shlex
+
+    from auto_research.env import analysis_environment, default_definition
+    from auto_research.toolkit_contract import toolkit
+
+    probe = default_definition().probe
     if not probe:
         return
-    from auto_research.env import analysis_environment
-
-    environment = analysis_environment(orch)
-    toolkit_root = orch.get("toolkit_root")
-    python_exec = str(environment.python) if environment is not None else sys.executable
-    if environment is not None:
-        base_env = environment.activation_env()
-    elif orch.get("analyze_ini_sh"):  # an init script with no prefix: sourced clean, as before
-        base_env = _source_ini_env(orch["analyze_ini_sh"])
-    else:
-        base_env = dict(os.environ)
-    if toolkit_root:
-        existing = base_env.get("PYTHONPATH", "")
-        base_env = {
-            **base_env,
-            "PYTHONPATH": str(toolkit_root) + (":" + existing if existing else ""),
-        }
+    environment = analysis_environment()
+    command = f"{shlex.quote(str(environment.python))} -c {shlex.quote(probe)}"
     try:
-        completed = subprocess.run(
-            [python_exec, "-c", probe],
-            capture_output=True,
-            text=True,
-            env=base_env,
-            timeout=120,
-        )
+        completed = run_in_environment(environment, command, toolkit_root=toolkit().root, label="probe")
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"analyze_probe failed to run ({python_exec}): {exc}") from exc
+        raise RuntimeError(f"the probe of {environment.name} failed to run: {exc}") from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()[-800:]
-        raise RuntimeError(
-            f"analyze_probe `{probe}` exited {completed.returncode} under {python_exec}:\n{detail}"
-        )
+        hint = (" Inside the OS jail this usually means something the stack needs lies outside "
+                "`agent_fs_allow` (often a folder whose contents symlink out of it): add that root to "
+                "`agent_fs_readonly`.")
+        raise RuntimeError(f"probe `{probe}` of {environment.name} exited {completed.returncode}:\n{detail}{hint}")
 
 
 PROTOCOL_KEYS: frozenset[str] = frozenset(
@@ -240,122 +322,3 @@ def parse_tool_figures(raw_figures: object) -> tuple[list[FigureRef], list[str]]
         except Exception as exc:  # noqa: BLE001 — any malformed figure is dropped, never fatal
             notes.append(f"figure[{index}] dropped — invalid FigureRef: {exc}")
     return figures, notes
-
-
-async def run_tool(
-    module: str,
-    fn: str,
-    args: dict,
-    *,
-    timeout_s: int = 300,
-    workdir: Path,
-    toolkit_root: Path,
-    analyze_env: Path | None = None,
-    analyze_ini_sh: str | None = None,
-) -> ToolResult:
-    """Execute a research_toolkit callable in an isolated subprocess.
-
-    The subprocess uses the Python interpreter from ``analyze_env`` when
-    provided (e.g. a conda env with XSPEC/HEASoft). When ``analyze_ini_sh``
-    is given, the script is sourced once (result cached) to inject HEADAS,
-    CALDB, LD_LIBRARY_PATH, and other HEASoft env vars. PYTHONPATH is always
-    overridden to point at toolkit_root. Working directory is set to workdir.
-    On timeout or non-zero exit the result captures stderr.
-    """
-    workdir = Path(workdir)
-    workdir.mkdir(parents=True, exist_ok=True)
-
-    python_exec = (
-        str(Path(analyze_env) / "bin" / "python") if analyze_env else sys.executable
-    )
-
-    # Inline runner script: deserialise args, call fn, serialise result.
-    # FigureRefs written by the tool must be JSON-serialisable paths.
-    runner_src = textwrap.dedent(f"""
-        import json, sys, importlib, os
-        os.chdir({str(workdir)!r})
-        mod = importlib.import_module({module!r})
-        fn  = getattr(mod, {fn!r})
-        args = json.loads(sys.stdin.read())
-        result = fn(**args)
-        # If the tool returns a dict, forward it; otherwise wrap as stdout.
-        if isinstance(result, dict):
-            print(json.dumps(result))
-        else:
-            print(json.dumps({{"stdout": str(result)}}))
-    """).strip()
-
-    base_env = _source_ini_env(analyze_ini_sh) if analyze_ini_sh else dict(os.environ)
-    existing = base_env.get("PYTHONPATH", "")
-    pythonpath = str(toolkit_root) + (":" + existing if existing else "")
-    env = {**base_env, "PYTHONPATH": pythonpath}
-
-    t0 = time.monotonic()
-    stdin_bytes = json.dumps(args).encode()
-    try:
-        completed = subprocess.run(
-            [python_exec, "-c", runner_src],
-            input=stdin_bytes,
-            capture_output=True,
-            env=env,
-            cwd=str(workdir),
-            timeout=timeout_s,
-        )
-        stdout_b = completed.stdout
-        stderr_b = completed.stderr
-        exit_code = completed.returncode
-    except subprocess.TimeoutExpired as exc:
-        elapsed = time.monotonic() - t0
-        stdout = (exc.stdout or b"").decode(errors="replace")
-        stderr = (exc.stderr or b"").decode(errors="replace")
-        message = f"Timed out after {timeout_s}s"
-        return ToolResult(
-            tool_name=f"{module}.{fn}",
-            stdout=stdout.strip(),
-            stderr=(stderr.strip() + "\n" + message).strip(),
-            exit_code=124,
-            elapsed_s=elapsed,
-        )
-    except Exception as exc:  # noqa: BLE001
-        elapsed = time.monotonic() - t0
-        return ToolResult(
-            tool_name=f"{module}.{fn}",
-            stdout="",
-            stderr=str(exc),
-            exit_code=1,
-            elapsed_s=elapsed,
-        )
-
-    elapsed = time.monotonic() - t0
-    stdout = stdout_b.decode(errors="replace").strip()
-    stderr = stderr_b.decode(errors="replace").strip()
-
-    if exit_code != 0:
-        return ToolResult(
-            tool_name=f"{module}.{fn}",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            elapsed_s=elapsed,
-        )
-
-    # A dict payload carries `figures` + `stdout`; anything else is plain text, left as-is.
-    figures: list[FigureRef] = []
-    try:
-        payload = json.loads(stdout) if stdout else None
-    except json.JSONDecodeError:
-        payload = None
-    if isinstance(payload, dict):
-        figures, notes = parse_tool_figures(payload.get("figures"))
-        stdout = payload.get("stdout", stdout)
-        if notes:
-            stderr = (stderr + "\n" if stderr else "") + "[figure capture] " + " | ".join(notes)
-
-    return ToolResult(
-        tool_name=f"{module}.{fn}",
-        stdout=stdout,
-        stderr=stderr,
-        exit_code=exit_code,
-        figures=figures,
-        elapsed_s=elapsed,
-    )

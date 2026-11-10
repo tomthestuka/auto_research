@@ -19,8 +19,7 @@ role or swapping a provider is a YAML edit; no Python change.
 
 **Machine-local config vs. tracked templates.** `models.yaml` and `code_gate.yaml` are
 machine-independent and tracked. The machine-specific files — `orchestration.yaml`,
-`observations.yaml`, plus the sandbox `analyst_env.sh` and `repl_init.py` hooks — are
-**gitignored**; the repo tracks a `*.example` template for each. A fresh clone runs
+`observations.yaml` — are **gitignored**; the repo tracks a `*.example` template for each. A fresh clone runs
 `bash install.sh` (writes the live copies) or copies each `*.example` by hand. The launch
 config loaders (`graph.runtime.load_orchestration_config`, `observations.load_observations_config`)
 raise a "copy the `.example` / run install.sh" message when a live file is absent.
@@ -127,6 +126,19 @@ uninstalled configuration rather than silently falling back here.
   mission's folder on its first observation, laid out as HEASARC's archive tree
   (`ixpe/data/obs/<prefix>/<obsid>/`). An empty root that exists and is writable is healthy. It is
   also in `orchestration.yaml: agent_fs_allow`. The `.example` files keep the `/path/to/` placeholder.
+- `orchestration.yaml.env_externals` — software outside conda the analysis environment uses,
+  `{name: {root, stamps, private}}`: `stamps` are files under `root` hashed into every receipt's
+  environment fingerprint; `private: {VARIABLE: separator}` (optional, D19) names a variable whose
+  value is `<folders><separator><kept>` and whose first part every process and every call gets as a
+  fresh folder of its own (`sandbox.runner.private_folders`), the rest kept. Configured:
+  `heasoft: {..., private: {PFILES: ";"}}` — HEASoft tools write learned parameters into the user half
+  of `PFILES`, so a shared folder let one call's values reach the next (F23, G4). **An undeclared
+  variable gets no isolation**: every process and call then shares the folder the activation names.
+  Preflight (`private_variables`) refuses a malformed entry, a reserved name (`AR_PRIVATE_FOLDERS`,
+  `PWD`, `MARK`, `HOME`, `PATH`, `TMPDIR`), a variable declared twice (also up to case), and a
+  declared variable the toolkit's default environment's activation leaves unset or sets without the
+  separator. The
+  `.example` ships the `heasoft` line commented.
 - `orchestration.yaml.runtime_dir` — writable runtime data directory outside both repos.
   Holds SQLite, run workspaces, figures/artifacts, report outputs, logs, and cost ledgers.
 - `orchestration.yaml.max_iterations` — hard cap for each outer reviewer
@@ -200,10 +212,6 @@ uninstalled configuration rather than silently falling back here.
 - `orchestration.yaml.tool_author_review_rework_cap` — how many times the author is
   re-driven after a co-lead review rejection (L3). All three are *pathology backstops*,
   not workflow budgets (like the ReAct caps).
-- `orchestration.yaml.tool_author_branch` — the branch in `toolkit_root` the runtime commits
-  authored tools onto directly (default `ai`; it never merges to master — §9.9). The launch
-  preflight (`check_toolkit_branch_clean`) asserts `research_toolkit` is on this branch with a
-  clean tree. Consumed by `graph.runtime` → `DebateToConverge` → `merge_flow.propose_and_pr`.
 - `orchestration.yaml.tool_author_cap` — max tool-authoring attempts per analysis (default 3),
   bounding the acquire→reduce→analyse dependency chain; a pathology backstop, not a budget.
   Consumed by `DebateToConverge`.
@@ -228,54 +236,81 @@ uninstalled configuration rather than silently falling back here.
   for the co-lead to judge (`literal_array_return`/`_plot`/`_dataframe`).
 - `code_gate.yaml.allowlist_obsid_tokens` — regexes (default `synth\d{6}`) that exempt a
   line from the vocabulary scan, so §9.5 synthetic-ObsID fixtures stay legal.
-- `orchestration.yaml.toolkit_root` — path to the sibling `research_toolkit`
-  repository used by `ToolkitRegistry` and `PersistentSandbox`.
-- `orchestration.yaml.analyze_ini_sh` — path to the dedicated headless analyst
-  env script (`src/auto_research/sandbox/analyst_env.sh`). Sourced by
-  `_source_ini_env()` in `sandbox/runner.py` before each persistent REPL subprocess
-  is spawned. Sets HEADAS, CALDB, CALDBCONFIG, CALDBALIAS, GEOMAG_PATH. No SSH
-  agent, no conda activation (the sandbox invokes `analyze_env/bin/python` directly).
-- `orchestration.yaml.repl_init_py` — path to a Python file exec'd once at each analyst REPL
-  subprocess boot (`sandbox/persistent.py`), inside `analyze_env`, for domain **session** setup
-  (imports, non-interactive settings, model/table loads). Best-effort — a failure is swallowed
-  so a missing optional model never kills the REPL. Empty/absent ⇒ bare REPL (no-op). Template:
-  `src/auto_research/sandbox/repl_init.py.example`. Replaces the formerly-hardcoded XSPEC/relxill
-  boot, so the sandbox core carries no domain code (§9.2/S1).
-- `orchestration.yaml.analyze_probe` — a one-line Python snippet run under `analyze_env` to
-  smoke-test the analysis stack (e.g. `import xspec, xspec_utils`). Used by the installer and the
-  preflight env-probe check, and it supplies the model-facing probe text in the `bash_exec`
-  description. Empty/absent ⇒ probe skipped.
-- `orchestration.yaml.analyze_env` — conda/venv prefix whose `bin/python` is used
-  for analyst sandbox subprocesses (must have PyXSPEC + analysis stack installed,
-  including `astroquery` for `heasarc_utils` HEASARC downloads).
-- `orchestration.yaml.mcp_servers` — optional stdio MCP server configs exposed
-  alongside manifest tools. Empty or omitted means use only the built-in MCP
-  server (`bash_exec`, `list_dir`, `read_file` at present).
+- `orchestration.yaml.toolkits` — the toolkit contract (`auto_research.toolkit_contract`), a list
+  of exactly one toolkit until Phase 3 step 2 gives units their own (§9.5). It replaces
+  `toolkit_root` and `tool_author_branch` (Phase 3 step 0a; no alias, ruling D16). Every fact the
+  orchestration relies on about a toolkit is a field here, so pairing with another toolkit is a
+  configuration change, never a code change:
+  - `name` — the toolkit's declared name (`research_toolkit`, D12): the first segment of every
+    manifest key (`<name>.<package>.<tool>`, refused at launch otherwise) and of every producer its
+    tools mint. It decides evidence (`provenance.store.is_evidence`), so a name that is no Python
+    identifier, or equals or prefixes a producer the harness mints (`mcp`, `read_file`, `input`, …:
+    `provenance.store.HARNESS_PRODUCERS`), is refused when the contract loads: a misconfigured name
+    can never make what a role only read count as evidence (CLAUDE.md §2b).
+  - `root` — the toolkit checkout (the coder's worktree), used by `ToolkitRegistry`,
+    `PersistentSandbox`, the gate and the run.
+  - `package_glob` — the top-level folders that are tool packages (default `*_utils`).
+  - `template_package` — the package the coder is shown as the layout to mirror; it must match
+    `package_glob`, and the launch refuses a root that lacks it (`toolkit_contract`).
+  - `authoring_branch` — the branch the runtime commits authored tools onto directly; it never
+    merges to master (§9.9). Required, no default. The launch preflight
+    (`check_toolkit_branch_clean`) asserts the checkout is on it with a clean tree. Consumed by
+    `graph.runtime` → `DebateToConverge` → `merge_flow.propose_and_pr`.
+  - `default_env` — the environment (a folder under the toolkit's `envs/`) a unit's own REPL and
+    shell run in, and where a package naming no environment runs and is tested. Required; the launch
+    refuses the config when `<root>/envs/<default_env>/env.yaml` is missing. Live: `analysis`.
+  - `test_classes.fast` — the pytest `-m` expression of the toolkit's fast tests, which the gate
+    reruns on every change for regression (default `not slow and not live`, the markers the
+    toolkit's root `conftest.py` declares). `test_classes.live` (default `live`): the expression the
+    gate deselects from a change's own tests (no network there). `test_classes.data` (default
+    `data`): the marker of a test reading a named data set, `data("<name>")`.
+- `orchestration.yaml.test_data` — `{name: folder}`: the host's data sets the toolkit's
+  `data("<name>")` tests read (the toolkit names a need, the host satisfies it by name). The gate binds
+  each existing folder read-only into its test run only (never on `agent_fs_allow`) and names it by
+  `TOOLKIT_DATA_<NAME>`; a data test skipped in the gate fails the change. Names `[a-z][a-z0-9_]*`,
+  folders absolute (launch check); every data set a toolkit test names must be declared and every
+  declared folder must exist (preflight `toolkit_test_data`). Live: `cygx1_ixpe`, `cygx1_nustar`
+  (Cyg X-1's IXPE and NuSTAR folders, read by `xspec_utils/tests/test_outputs.py`, the only tests on
+  the toolkit's `main` that read real data). Replaces `gate_readonly_roots`.
+- `orchestration.yaml.human_envs` — `{name: conda prefix}`: the human's own conda environments a
+  toolkit environment definition may name as its `base` (a derived environment layers its activation
+  on that prefix, read-only). The toolkit names its base by name and this host supplies the prefix,
+  the rule `env_externals` follows for externals (CI convention, A4). Live: `astropy:
+  /grad/fzhou/.conda/envs/astropy`, the base of `research_toolkit/envs/analysis/`. Preflight
+  (`human_envs`, `env.check_human_envs`) refuses a name that is not an environment name, a prefix
+  inside the runtime's conda folder, a declared prefix without `bin/python`, and a
+  toolkit definition whose `base` is not declared. Nothing here names the analysis environment
+  itself: the toolkit's default environment (`toolkits[].default_env`, `envs/<id>/`) is what a
+  unit's REPL and shell run in, its activation, boot file and launch `probe` in its definition
+  (W4, 2026-11-09; the keys `analyze_env`, `analyze_ini_sh`, `repl_init_py` and `analyze_probe`
+  retired with the files `sandbox/analyst_env.sh` and `sandbox/repl_init.py`). A human prefix a
+  derived environment uses must be in `agent_fs_readonly` for the jailed processes to reach it.
 
-## `agent_os_jail` and `agent_fs_readonly`
+## The OS jail and `agent_fs_readonly`
 
-`agent_fs_allow` has always been the allow-list `PathGuard` enforces on the paths a model names.
-`agent_os_jail: true` turns the same list into a **mount plan**: every runtime process that can
-touch a disk (both author harnesses, the analyst REPL, the gate's Layer-B pytest) runs under
-`bwrap`, and anything outside the list is not in its filesystem at all rather than being refused by
-a rule. `agent_fs_readonly` names the subset mounted read-only — the analysis conda environment,
+`agent_fs_allow` is the allow-list `PathGuard` enforces on the paths the runtime process itself
+opens for a model (`read_file`, `list_dir`, `file_edit`). The jail turns the same list into a
+**mount plan**, unconditionally (ruling D25, 2026-11-09): every runtime process that can touch a
+disk (both author harnesses, the analyst REPL and shell, the gate's Layer-B pytest, environment
+builds) runs under `bwrap`, and anything outside the list is not in its filesystem at all rather
+than being refused by a rule. `agent_fs_readonly` names the subset mounted read-only — the analysis conda environment,
 HEASoft and CALDB, which every run reads and nothing writes.
 
-Two things to know before turning it on, both learned by turning it on:
+Two things to know, both learned when the jail was first turned on:
 
 - **The allow-list may be incomplete as a mount plan even though it works as a guard.** Software
   reached through one allowed path can live behind another: every file in PyXspec's package
   directory is a symlink four levels up into a sibling of `$HEADAS`, so the HEASoft **release root**
-  has to be listed too, not just `$HEADAS`. `check_os_jail_probe` runs the configured
-  `analyze_probe` inside the jail at launch and fails with the missing-root hint, rather than
+  has to be listed too, not just `$HEADAS`. `runner.check_analysis_probe` runs the default
+  environment's `env.yaml` `probe` inside the jail at launch and fails with the missing-root hint, rather than
   letting every tool call fail separately.
 - **The gate's tests lose the network.** That is deliberate (§9.4: a mergeability verdict must
   depend on the data on disk), and it was verified against all 30 existing Layer-B suites before
   being wired. Author harnesses and the REPL keep the network, since one talks to a model API and
   the other downloads observations.
 
-A host without `bwrap`, or one where user namespaces are administratively denied, warns at launch
-and runs unjailed — the configuration every run used before this existed.
+A host without `bwrap`, or one where user namespaces are administratively denied, is refused at
+launch (`jail.check_os_jail_available`, with the reason).
 
 ## Published token rates for the harness vendors
 
@@ -376,3 +411,13 @@ Compacted 2026-09-01, 2026-09-24, 2026-10-07 and 2026-10-19 (every entry); detai
 - 2026-11-04 — Z1h: the coder member is `deepseek-flash` (V4.1-Flash); capability rows for `deepseek-flash` and `deepseek-v4-flash` (images yes, documents no) from DeepSeek's pages; the text-only policy is retired.
 - 2026-11-04 — `coder` member sets `model_reasoning_effort: high` (user ruling; DeepSeek's Codex integration page sets it; passed to Codex as a config key by `codex_sdk`).
 - 2026-11-05 — `model_capabilities.yaml`: `openai/gpt-6.1-sol` images true ("Input modalities: text, image", developers.openai.com/api/docs/models/gpt-6.1-sol, read 2026-11-05); documents true per the file-inputs guide, as for the GPT-5.6 rows; confirmed by the paid image+PDF probe. Used as the lead of the live figure-shape attack cells.
+- 2026-11-09 — Phase 3 step 0a W5 (D19): `env_externals.<name>.private: {VAR: separator}` declares the per-process and per-call private folders; `heasoft` declares `PFILES` with `;` (live config and the `.example` comment); the code holds no `PFILES` literal.
+- 2026-11-09 — W5 review: `.example` ships a commented `heasoft` line with `private: {PFILES: ";"}`; an undeclared variable gets no isolation; preflight checks the declaration against the analysis activation.
+- 2026-11-09 — Phase 3 step 0a W2: `toolkits:` (the toolkit contract: `name`, `root`, `package_glob`, `template_package`, `authoring_branch`, `test_classes.fast`) replaces `toolkit_root` and `tool_author_branch` in the live config and `.example`; the authoring branch has no default (the code default `ai` is gone).
+- 2026-11-09 — `toolkits[].default_env` (required): `analysis` in the live config and `.example`.
+- 2026-11-09 — Phase 3 step 0a W4: `analyze_env`, `analyze_ini_sh`, `repl_init_py` and `analyze_probe` retire (no aliases, D16); the analysis environment is the toolkit's default environment (`toolkits[].default_env`, `research_toolkit/envs/analysis/`: base, activation, probe in its definition). New `human_envs` (name → conda prefix) supplies the human bases a definition names; preflight `human_envs` checks it. `sandbox/analyst_env.sh`, `sandbox/repl_init.py` (and their `.example` templates) deleted; their `.gitignore` lines stay while the frozen installer writes them. The installer still writes the retired keys (frozen until Phase 3 ends, D16).
+- 2026-11-09 — Phase 3 step 0a W3: `test_data` (`{name: folder}`, live: `cygx1_ixpe`, `cygx1_nustar`; `.example`: `{}`) replaces `gate_readonly_roots`; the NICER folder, read by no test, is dropped. `test_classes` gains `live` and `data` (defaults; the live config keeps `fast` only).
+- 2026-11-09 — W4 review: `human_envs` names must be environment names and prefixes lie outside `agent_conda_dir()`; the `.gitignore` lines for `sandbox/analyst_env.sh` and `sandbox/repl_init.py` are restored (the frozen installer still writes them, D16).
+- 2026-11-09 — W3 review: preflight `toolkit_test_data`. An `obsdb` data set was added for the ai-xspec branch's obs-db tests and removed when the toolkit moved to `main`, whose tests read no obs-db.
+- 2026-11-09 — Phase 3 step 0a W10 (ruling D25): `agent_os_jail` retires; the jail is unconditional and a host that cannot run `bwrap` is refused at launch. `mcp_servers` retires too: a configured server ran outside the jail; the workers' shell is the jailed builtin server.
+- 2026-11-09 — W10 review: the launch refuses a retired key (`preflight.check_config_keys`: `agent_os_jail`, `mcp_servers`, `toolkit_root`, `tool_author_branch`, `analyze_env`, `analyze_ini_sh`, `repl_init_py`, `analyze_probe`, `gate_readonly_roots`, each named with its replacement) and an empty `agent_fs_allow`.

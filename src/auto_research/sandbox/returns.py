@@ -32,7 +32,8 @@ the files the call wrote are written down. The gate process then judges those re
                              fails), inside an obs-db (``.obsdb``), or scratch (interpreter
                              bytecode; the home's caches:
                              ``~/.cache``, ``~/.astropy``, ``~/.xspec``, ``~/.matplotlib``,
-                             ``~/.config/{matplotlib,astropy}``, ``$PFILES``, ``$MPLCONFIGDIR``,
+                             ``~/.config/{matplotlib,astropy}``, the first folders of each declared private variable
+                             (``env_externals.<name>.private``), ``$MPLCONFIGDIR``,
                              ``$XDG_CACHE_HOME``, ``/dev/shm``; the temp area outside pytest's
                              ``--basetemp`` and the tree under test); any other file fails. Each
                              output folder and the running test's ``tmp_path`` are walked before
@@ -305,18 +306,21 @@ def _files_under(folder, links=None):
 
 def _scratch_roots():
     """Where libraries keep their own caches: the jail home's caches and the parameter folders
-    (HEASoft's PFILES, matplotlib, astropy, XSPEC, the XDG cache), plus shared memory. Read at
-    configure time; a root that would hold the tests' tmp_path, the tree or the home is dropped."""
+    (each declared private variable's first part, matplotlib, astropy, XSPEC, the XDG cache), plus
+    shared memory. A tool's own home default for a variable nobody declared is no root: a write
+    there is unclassified, which tells the human the declaration is missing. Read at configure
+    time; a root that would hold the tests' tmp_path, the tree or the home is dropped."""
     home = os.path.expanduser("~")
     roots = [os.path.join(home, d) for d in (".cache", ".astropy", ".xspec", ".matplotlib",
                                               os.path.join(".config", "matplotlib"),
-                                              os.path.join(".config", "astropy"), "pfiles")]
+                                              os.path.join(".config", "astropy"))]
     for var in ("MPLCONFIGDIR", "XDG_CACHE_HOME", "PYTHONPYCACHEPREFIX"):
         if os.environ.get(var):
             roots.append(os.environ[var])
-    for part in os.environ.get("PFILES", "").split(";")[0].split(":"):
-        if part.strip():
-            roots.append(part.strip())
+    for name, sep in json.loads(os.environ.get("AR_PRIVATE_FOLDERS") or "{}").items():
+        for part in os.environ.get(name, "").split(sep)[0].split(os.pathsep):
+            if part.strip():
+                roots.append(part.strip())
     roots.append("/dev/shm")
     guarded = [os.path.realpath(g) for g in (_BASETEMP[0], _TREE[0], home) if g]
     return [r for r in (os.path.realpath(x) for x in roots)
@@ -420,10 +424,10 @@ def _wrap(key, fn, placed, path_args=None):
         named = [str(p) for p in _named_paths(args, cwd, ())]
         before = {p: _stat(p) for p in named}
         started = call_started_ns()
-        # The call's own, empty HEASoft parameter folder, as the analyst REPL gives each call (G4);
-        # taken before the call is marked as running, so a failure here leaves nothing half-set.
-        params, pfiles = private_param_dir()
-        pfiles_before = os.environ.get("PFILES")
+        # The call's own, empty private folders, as the analyst REPL gives each call (G4); taken
+        # before the call is marked as running, so a failure here leaves nothing half-set.
+        private_env, made = private_folders(os.environ)
+        private_before = {k: os.environ.get(k) for k in private_env if os.environ.get(k) != private_env[k]}
         _local.depth, _local.written = 1, set()
         rec = {"tool": key, "started_ns": started, "before": before}
 
@@ -444,25 +448,24 @@ def _wrap(key, fn, placed, path_args=None):
             except Exception as exc:
                 return {"(recorder)": {"error": f"{type(exc).__name__}: {exc}"}}
 
-        if pfiles:
-            os.environ["PFILES"] = pfiles
+        os.environ.update(private_env)
         try:
             result = fn(*a, **k)
         except BaseException as exc:
             # A call that raises is a failed call: what it left in an obs-db is judged all the same.
             _local.depth, written, _local.written = 0, _local.written, None
-            if pfiles:
-                os.environ["PFILES"] = pfiles_before
-                shutil.rmtree(params, ignore_errors=True)
+            os.environ.update(private_before)
+            for folder in made:
+                shutil.rmtree(folder, ignore_errors=True)
             rec["raised"] = f"{type(exc).__name__}: {exc}"
             rec["obsdb"] = obsdb_now()
             rec["classes"] = classes_now(None)
             _write(rec)
             raise
         _local.depth, written, _local.written = 0, _local.written, None
-        if pfiles:
-            os.environ["PFILES"] = pfiles_before
-            shutil.rmtree(params, ignore_errors=True)
+        os.environ.update(private_before)
+        for folder in made:
+            shutil.rmtree(folder, ignore_errors=True)
         try:
             payload = repl_payload(result)
             rec["payload"] = json.loads(json.dumps(payload))
@@ -602,7 +605,7 @@ def recorder_source() -> str:
         textwrap.dedent(inspect.getsource(_product_problem)),
         textwrap.dedent(inspect.getsource(admit_artifacts)),
         textwrap.dedent(inspect.getsource(repl_payload)),
-        builtin_function_source("private_param_dir"),
+        builtin_function_source("private_folders"),
         textwrap.dedent(inspect.getsource(normalize_tool_raw)),
         textwrap.dedent(inspect.getsource(_named_paths)),
         textwrap.dedent(inspect.getsource(call_started_ns)),
@@ -645,8 +648,8 @@ def _placed_checks(tool: str, rec: dict, artifacts: list[tuple[str, str]]) -> li
     names = rec.get("placed_names", [])
     for label, path in artifacts:
         if path in in_obsdb:
-            out.append(_fail("placed", f"{tool} returns {label} at {path}, an obs-db item; the runtime never "
-                                       "mints one. Record it in its catalog through obsdb_catalog.neutral and "
+            out.append(_fail("placed", f"{tool} returns {label} at {path}, an obs-db item: "
+                                       "record it in its catalog through obsdb_catalog.neutral and "
                                        "leave it out of 'products' and 'figures'; a science artifact goes under "
                                        "an output argument instead."))
         elif not folders and names:
@@ -845,7 +848,7 @@ def judge(out_dir: Path, tools: dict[str, tuple]) -> tuple[list[CheckResult], li
         return [CheckResult(
             name="layer_b.returns.recorder", layer="B", passed=False,
             detail=("the return check did not run: its pytest plugin never loaded. Leave pytest "
-                    "plugin loading to the gate (no -p no:... in pytest.ini, setup.cfg or conftest)."),
+                    "plugin loading to the CI pipeline (no -p no:... in pytest.ini, setup.cfg or conftest)."),
         )], []
     checks: list[CheckResult] = []
     called: set[str] = set()

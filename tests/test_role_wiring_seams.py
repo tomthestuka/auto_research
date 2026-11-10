@@ -314,3 +314,304 @@ def test_no_live_cell_builds_a_seat_without_its_call_settings():
                     and not any(k.arg == "parameters" for k in node.keywords):
                 bare.append(f"{path.name}:{node.lineno}")
     assert not bare, f"seats built without their call settings: {bare}"
+
+
+# ---------------------------------------------------------------- W9c (2026-11-09): the seams the seat cells lacked
+
+#: The live cells that drove these seams by hand before W9c (a shell server, a reviewer key, an
+#: admitted list); each now asks production for them.
+_W9C_CELLS = ("test_live_ref_chain.py", "test_live_provenance_html.py", "test_live_reviewer_paths.py")
+
+
+class _NoModel:
+    """A seat's model; the seams under test never call it."""
+
+
+def _runs_in(tmp_path, monkeypatch):
+    from auto_research import env as app_env
+    from auto_research.graph import runtime
+
+    runs = tmp_path / "runtime" / "runs"
+    monkeypatch.setattr(runtime, "agent_dir", lambda run_id, key: runs / run_id / key)
+    monkeypatch.setattr(runtime, "run_dir", lambda run_id: runs / run_id)
+    monkeypatch.setattr(app_env, "agent_conda_dir", lambda: tmp_path / "conda")
+    return runs
+
+
+def test_run_research_builds_the_workers_shell_only_through_its_seam():
+    """The workers' shell server is built in one place, `worker_mcp_client`, and the run path uses it."""
+    tree = _tree(RUNTIME)
+    owners = _enclosing_functions(tree)
+    outside = [(name, line, owners.get(line)) for name, line in _calls_to(tree, ("_builtin_server_config", "MCPToolClient"))
+               if owners.get(line) != "worker_mcp_client"]
+    assert not outside, f"the shell server is built outside worker_mcp_client: {outside}"
+    callers = {owners.get(line) for _, line in _calls_to(tree, ("worker_mcp_client",))}
+    assert "run_research" in callers, f"run_research does not call worker_mcp_client ({callers})"
+
+
+def test_the_workers_shell_seam_builds_the_builtin_server_for_the_workers_folders(tmp_path, monkeypatch):
+    from auto_research.agents.roles import AnalystWorkerAgent
+    from auto_research.graph.runtime import SandboxSettings, worker_mcp_client
+    from auto_research.sandbox import jail
+
+    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")  # the argv only; nothing starts
+
+    runs = _runs_in(tmp_path, monkeypatch)
+    ini = tmp_path / "activate.sh"
+    ini.write_text("export A=1\n")
+    (tmp_path / "toolkit").mkdir()
+    import sys
+
+    from auto_research.sandbox.envs import Environment
+
+    settings = SandboxSettings(environment=Environment(name="host", prefix=Path(sys.prefix), activate=ini),
+                               probe="probe-command")
+    workers = [AnalystWorkerAgent(model=_NoModel(), prompt="p"), object(),
+               AnalystWorkerAgent(model=_NoModel(), prompt="p")]
+    client = worker_mcp_client(workers, run_id="r1", toolkit_root=tmp_path / "toolkit",
+                               sandbox_settings=settings)
+    [server] = client._servers
+    assert server["name"] == "builtin" and server["cwd"] == str(runs / "r1")
+    assert server["env"]["AR_ENV_PROBE"] == "probe-command"
+    # Each worker's own folder is made writable (created for the bind); a seat that is not a worker gets none.
+    assert (runs / "r1" / "analyst_worker_0").is_dir() and (runs / "r1" / "analyst_worker_2").is_dir()
+    assert not (runs / "r1" / "analyst_worker_1").exists()
+    assert Path(server["command"]).name == "bwrap"  # the workers' shell runs inside the jail
+
+
+def test_the_reviewer_seam_wires_key_stop_channel_and_productions_web_tools(tmp_path, monkeypatch):
+    from auto_research.agents.roles import ReviewerAgent
+    from auto_research.graph import runtime
+    from auto_research.provenance import ReceiptStore
+    from auto_research.retrieval import SqliteRetrievalBackend
+    from auto_research.run_control import RunControl
+    from auto_research.sources import WebSource
+
+    runs = _runs_in(tmp_path, monkeypatch)
+    control = RunControl()
+    reviewer = ReviewerAgent(model=_NoModel(), prompt="p")
+    runtime.attach_reviewer_runtime(reviewer, run_id="r1", toolkit_root=tmp_path / "toolkit", run_control=control)
+    assert (reviewer.agent_key, reviewer.run_control) == ("reviewer", control)
+    assert reviewer.report_dir == runs / "r1" / "reviewer"
+    assert reviewer.receipts is ReceiptStore.for_run(runs / "r1")
+    # A caller that passes neither still gets production's knowledge base and web source.
+    assert isinstance(reviewer.tools.retrieval, SqliteRetrievalBackend)
+    assert isinstance(reviewer.tools.web_source, WebSource)
+
+    mine, web = SqliteRetrievalBackend(), WebSource()
+    prewired = ReviewerAgent(model=_NoModel(), prompt="p")
+    prewired.agent_key = "reviewer_x"
+    runtime.attach_reviewer_runtime(prewired, run_id="r1", toolkit_root=tmp_path / "toolkit",
+                                    retrieval=mine, web_source=web)
+    assert prewired.agent_key == "reviewer_x" and prewired.run_control is None  # a pre-wired key stays
+    assert prewired.tools.retrieval is mine and prewired.tools.web_source is web
+
+
+def test_run_research_keys_the_reviewer_only_through_its_seam():
+    tree = _tree(RUNTIME)
+    run = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_research")
+    inline = [
+        f"{sub.attr} (line {node.lineno})" for node in ast.walk(run) if isinstance(node, ast.Assign)
+        for target in node.targets for sub in ast.walk(target)
+        if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name) and sub.value.id == "reviewer"
+        and sub.attr in _SEAM_OWNED
+    ]
+    assert not inline, f"run_research sets the reviewer's fields inline: {inline}"
+
+
+def test_a_reviewer_turn_keeps_the_scope_it_admitted(tmp_path, monkeypatch):
+    """`ReviewerAgent.review` derives what it admits once (`reviewer_admitted_receipts`) and keeps it
+    as `admitted_receipts`: the request's receipt, the literature's, what the analysis report cites,
+    its figures' receipts and the human's files. Kept even when the turn's model call fails, since the
+    scope is set before the loop; a check outside the turn reads it and mints nothing."""
+    import asyncio
+
+    from auto_research.agents.roles import ModelCallFailed, ReviewerAgent
+    from auto_research.graph import runtime
+    from auto_research.models.types import ModelHandle, RoleModelConfig
+    from auto_research.schemas import AnalystReport, FigureRef, ResearchRequest
+    from tests.test_provider_containment import _BrokenAdapter
+
+    _runs_in(tmp_path, monkeypatch)
+    reviewer = ReviewerAgent(model=ModelHandle(
+        role="reviewer", config=RoleModelConfig(name="fake", provider="anthropic", model="fake-rev"),
+        provider=_BrokenAdapter(ValueError("offline"))), prompt="p")
+    runtime.attach_reviewer_runtime(reviewer, run_id="r1", toolkit_root=tmp_path / "toolkit")
+    store = reviewer.receipts
+    result = store.mint(source="analyst_lead", kind="result", produced_by="research_toolkit.t.fit", data="PD = 4.0")
+    png = tmp_path / "plot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\nfigure")
+    figure = store.mint(source="analyst_lead", kind="figure", produced_by="research_toolkit.t.plot", path=png,
+                        caption="PD", mime_type="image/png")
+    report = AnalystReport(summary=f"The fit gives {{{{{result.handle}#/pd}}}}.",
+                           figures=[FigureRef(path=png, caption="PD", mime_type="image/png",
+                                              produced_by="t.plot", sha256=figure.sha256,
+                                              created_at="2026-11-09T00:00:00Z")])
+    request = ResearchRequest(question="What is the polarization degree?")
+
+    with pytest.raises(ModelCallFailed):
+        asyncio.run(reviewer.review(request, arrived="analysts", literature_receipts={"lib:p1": None},
+                                    report=report, human_files=["input:h9"]))
+    (minted,) = [r for r in store.receipts(source="input") if r.produced_by == "research_request"]
+    assert reviewer.admitted_receipts == [minted.handle, "lib:p1", result.handle, figure.handle, "input:h9"]
+
+
+def test_reviewer_review_builds_its_scope_from_the_admitted_receipts():
+    """One definition: `ReviewerAgent.review` derives its scope with `reviewer_admitted_receipts`."""
+    roles = REPO / "src" / "auto_research" / "agents" / "roles.py"
+    tree = _tree(roles)
+    review = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "review"
+                  and any(isinstance(p, ast.ClassDef) and p.name == "ReviewerAgent" and n in p.body
+                          for p in ast.walk(tree)))
+    assert len(_calls_to(review, ("reviewer_admitted_receipts",))) == 1, "ReviewerAgent.review derives its scope inline"
+    assert len(_calls_to(review, ("_request_receipt",))) == 1  # the request's receipt is derived once
+
+
+def _hand_built_admitted(tree: ast.AST) -> list[int]:
+    """Lines where an admitted scope is built from a literal list rather than read from the agent:
+    an `admitted=` keyword, or an assignment to `admitted` / `[...]["admitted"]`, whose value is a
+    list (or comprehension) or names no `admitted_receipts`."""
+    def names_the_kept_list(value: ast.AST) -> bool:
+        return any(isinstance(n, ast.Attribute) and n.attr == "admitted_receipts" for n in ast.walk(value)) or \
+            any(isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and n.slice.value == "admitted"
+                for n in ast.walk(value))
+
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg == "admitted" and not names_the_kept_list(node.value):
+            found.append(node.value.lineno)
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                for sub in (target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]):
+                    named = (isinstance(sub, ast.Name) and sub.id == "admitted") or (
+                        isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Constant)
+                        and sub.slice.value == "admitted")
+                    if named and not names_the_kept_list(node.value):
+                        found.append(node.lineno)
+    return found
+
+
+def test_the_hand_built_admitted_guard_sees_a_literal_list():
+    assert _hand_built_admitted(ast.parse('out["admitted"] = [a, b]'))
+    assert _hand_built_admitted(ast.parse('ScopedLookup(s, admitted=[*x, y.handle])'))
+    assert _hand_built_admitted(ast.parse('admitted = reviewer_admitted_receipts("input:h1")'))
+    assert not _hand_built_admitted(ast.parse('out["admitted"], out["receipts"] = reviewer.admitted_receipts, s'))
+    assert not _hand_built_admitted(ast.parse('ScopedLookup(s, admitted=out["admitted"])'))
+
+
+@pytest.mark.parametrize("cell", _W9C_CELLS)
+def test_the_w9c_cells_build_no_shell_key_or_admitted_list_by_hand(cell):
+    tree = _tree(Path(__file__).with_name(cell))
+    assert not _calls_to(tree, ("_builtin_server_config", "MCPToolClient")), f"{cell} builds a shell server itself"
+    keyed = [field for field in _restated_fields(tree) if field.startswith("agent_key")]
+    assert not keyed, f"{cell} keys a seat itself: {keyed}"
+    # Every reviewer runs its configured seat (no model passed), as `run_research` builds it.
+    explicit = [line for name, line in _calls_to(tree, ("ReviewerAgent",))
+                for node in ast.walk(tree) if isinstance(node, ast.Call) and node.lineno == line
+                and any(k.arg == "model" for k in node.keywords)]
+    assert not explicit, f"{cell} seats a reviewer by hand at {explicit}"
+    assert not _hand_built_admitted(tree), f"{cell} builds an admitted scope by hand at {_hand_built_admitted(tree)}"
+    if cell == "test_live_reviewer_paths.py":
+        source = Path(__file__).with_name(cell).read_text(encoding="utf-8")
+        assert ".admitted_receipts" in source, "the reviewer cells do not read the scope the turn kept"
+
+
+def test_the_launch_stamps_the_runs_default_environment_through_its_seam(tmp_path, monkeypatch):
+    """`stamp_run_environments` is the run path's own stamping (env plan B1): the run's store takes the
+    orchestrator's fingerprint, and that state's lock is written beside the others."""
+    from auto_research import env as app_env
+    from auto_research.graph import runtime
+    from auto_research.provenance import ReceiptStore
+
+    runs = _runs_in(tmp_path, monkeypatch)
+    monkeypatch.setattr(app_env, "env_lock_dir", lambda: tmp_path / "locks")
+    fingerprint = runtime.stamp_run_environments("r1")
+    assert len(fingerprint) == 64 and ReceiptStore.for_run(runs / "r1").default_env == fingerprint
+    assert any((tmp_path / "locks").iterdir())
+
+    tree = _tree(RUNTIME)
+    owners = _enclosing_functions(tree)
+    assert "run_research" in {owners.get(line) for _, line in _calls_to(tree, ("stamp_run_environments",))}
+    outside = [line for _, line in _calls_to(tree, ("fingerprint_and_lock",))
+               if owners.get(line) != "stamp_run_environments"]
+    assert not outside, f"runtime.py fingerprints an environment outside its seam: {outside}"
+
+
+def test_each_run_binds_the_contract_of_the_configuration_it_was_launched_with(tmp_path, monkeypatch):
+    """A run reads its configuration once and binds its toolkit contract before its preflight; a
+    second run in the same process with a changed configuration sees that configuration's contract
+    whole, in its preflight and in the readers of the default environment (chosen over refusing:
+    every other setting is read per run too)."""
+    import asyncio
+
+    from auto_research import toolkit_contract
+    from auto_research.env import default_definition
+    from auto_research.graph import runtime
+
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    async def preflight(*, human_handler=None, monitor=None):
+        seen.append((toolkit_contract.toolkit().root, default_definition().purpose))
+        raise _Stop  # the run ends at its preflight: what was bound is all this test asks
+
+    def config(name: str) -> dict:
+        root = tmp_path / name
+        (root / "envs" / "analysis").mkdir(parents=True)
+        (root / "envs" / "analysis" / "env.yaml").write_text(f"purpose: {name}'s\nbase: host\n")
+        return {"toolkits": [{"name": "research_toolkit", "root": str(root), "template_package": "demo_utils",
+                              "authoring_branch": "ai", "default_env": "analysis"}]}
+
+    monkeypatch.setattr(runtime, "run_preflight", preflight)
+    for name in ("first", "second"):
+        monkeypatch.setattr(runtime, "load_orchestration_config", lambda *a, name=name, **k: config(name))
+        with pytest.raises(_Stop):
+            asyncio.run(runtime.run_research("q", human_channel="none", monitor_jsonl=tmp_path / f"{name}.jsonl"))
+    assert seen == [(tmp_path / "first", "first's"), (tmp_path / "second", "second's")]
+    assert toolkit_contract.toolkit().root == tmp_path / "second"
+
+
+def test_a_run_started_while_another_holds_the_contract_cannot_change_it(tmp_path, monkeypatch):
+    """A second in-process run whose configuration declares another contract is refused while the
+    first still runs (its readers would see the contract change under them); one with the same
+    contract shares it; once the first has finished, a changed configuration binds."""
+    import asyncio
+
+    from auto_research import toolkit_contract
+    from auto_research.graph import runtime
+
+    class _Stop(Exception):
+        pass
+
+    def config(name: str) -> dict:
+        return {"toolkits": [{"name": "research_toolkit", "root": str(tmp_path / name), "template_package": "demo_utils",
+                              "authoring_branch": "ai", "default_env": "analysis"}]}
+
+    configs: list[dict] = []
+    nested: list[object] = []
+
+    async def preflight(*, human_handler=None, monitor=None):
+        if not nested:  # the first run, at its preflight: start others in this process meanwhile
+            for name in ("second", "first"):
+                configs.append(config(name))
+                try:
+                    await runtime.run_research("q", human_channel="none", monitor_jsonl=tmp_path / f"n{len(nested)}.jsonl")
+                except (RuntimeError, _Stop) as exc:
+                    nested.append(exc)
+            assert toolkit_contract.toolkit().root == tmp_path / "first"  # unchanged under the first run
+        raise _Stop
+
+    monkeypatch.setattr(runtime, "run_preflight", preflight)
+    monkeypatch.setattr(runtime, "load_orchestration_config", lambda *a, **k: configs.pop(0))
+    configs.append(config("first"))
+    with pytest.raises(_Stop):
+        asyncio.run(runtime.run_research("q", human_channel="none", monitor_jsonl=tmp_path / "first.jsonl"))
+    refused, shared = nested
+    assert isinstance(refused, RuntimeError) and "another toolkit contract" in str(refused)
+    assert isinstance(shared, _Stop)  # the same contract: it reached its own preflight
+    configs.append(config("third"))  # every run has finished: a changed configuration binds
+    with pytest.raises(_Stop):
+        asyncio.run(runtime.run_research("q", human_channel="none", monitor_jsonl=tmp_path / "third.jsonl"))
+    assert toolkit_contract.toolkit().root == tmp_path / "third" and not runtime._CONTRACT_RUNS

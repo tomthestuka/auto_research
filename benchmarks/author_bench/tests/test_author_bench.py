@@ -122,9 +122,9 @@ class _FakeLead:
 
 
 def _toolkit_root() -> Path:
-    return Path(yaml.safe_load(
-        (REPO_ROOT / "config" / "orchestration.yaml").read_text(encoding="utf-8")
-    )["toolkit_root"])
+    from auto_research.toolkit_contract import toolkit
+
+    return toolkit(yaml.safe_load((REPO_ROOT / "config" / "orchestration.yaml").read_text(encoding="utf-8"))).root
 
 
 def _skip_without_toolkit() -> Path:

@@ -18,7 +18,7 @@ directory, so a path named for the experiment is prompt content.
 **The configuration directory is deliberately outside the filesystem allow-list.** It is the one
 file in the trial that names the whole arm at once, and no actor has any reason to read it. The
 allow-list the trial is given covers its toolkit, its data and its runtime directory, so the guard
-denies the configuration and -- with the kernel jail on -- it is not even mounted.
+denies the configuration and the kernel jail does not even mount it.
 
 ### Why the observation database is copied rather than linked, and filtered rather than copied whole
 
@@ -200,18 +200,20 @@ def orchestration_config(
     The filesystem allow-list is rewritten alongside them, and forgetting that is the failure this
     function exists to prevent: the list names the old roots literally, so a trial pointed at
     private paths whose allow-list still named the shared ones would have every one of its own
-    file reads denied by the guard, and -- with the kernel jail on -- its private data simply
-    absent from the mount namespace.
+    file reads denied by the guard, and its private data simply absent from the jail's mount
+    namespace.
     """
+    from auto_research.toolkit_contract import toolkit
+
     config = json.loads(json.dumps(source))  # deep copy through plain data
-    old = {
+    old = {str(toolkit(config).root)} | {
         str(Path(str(config.get(key, ""))).expanduser())
-        for key in ("toolkit_root", "runtime_dir", "papers_dir")
+        for key in ("runtime_dir", "papers_dir")
         if config.get(key)
     }
     old |= {str(obs) for obs in _source_obs_roots(config)}
 
-    config["toolkit_root"] = str(toolkit_root)
+    config["toolkits"][0]["root"] = str(toolkit_root)
     config["runtime_dir"] = str(runtime_dir)
     config["papers_dir"] = str(papers_dir)
 
@@ -395,7 +397,9 @@ def materialize(
 
     source_config_dir = Path(source_config_dir or live_config_dir())
     source_orchestration = _read_yaml(source_config_dir / "orchestration.yaml")
-    toolkit_source = Path(toolkit_source or source_orchestration["toolkit_root"]).expanduser()
+    from auto_research.toolkit_contract import toolkit
+
+    toolkit_source = Path(toolkit_source or toolkit(source_orchestration).root).expanduser()
     if obs_source is None:
         obs_source = Path(_read_yaml(source_config_dir / "observations.yaml")["obs_db_root"])
     obs_source = Path(obs_source).expanduser()
@@ -446,7 +450,7 @@ def materialize(
 
     base_sha = clone_toolkit(
         toolkit_root, toolkit_source, base_ref,
-        str(source_orchestration.get("tool_author_branch", "ai")),
+        toolkit(source_orchestration).authoring_branch,
     )
     build_observation_database(obs_root, obs_source, obsids, mission, toolkit_root)
 

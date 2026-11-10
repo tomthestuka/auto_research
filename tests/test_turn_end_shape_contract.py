@@ -4,8 +4,8 @@
 A claim like that decays the moment someone adds a clause to the validator, and it decays
 silently: the live file still passes, having simply never met the new state.
 
-So the claim is asserted here, from the contract itself, for free. Same discipline as
-`test_no_hitl_probe_helpers.py` (2026-09-01): the code that *reads* a result needs its own tests,
+So the claim is asserted here, from the contract itself, for free. The same discipline
+applies everywhere: the code that *reads* a result needs its own tests,
 because one pointed at the wrong thing looks exactly like a boring finding.
 """
 

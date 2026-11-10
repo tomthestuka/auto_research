@@ -147,6 +147,17 @@ def _agent_conda_dir_in_tmp(tmp_path_factory: pytest.TempPathFactory, monkeypatc
 
 
 @pytest.fixture(autouse=True)
+def _toolkit_contract_unbound():
+    """Each test starts and ends with the toolkit contract unbound (``toolkit_contract.reset``): the
+    process binds it on first use, and a test may point the configuration elsewhere or bind one."""
+    from auto_research import toolkit_contract
+
+    toolkit_contract.reset()
+    yield
+    toolkit_contract.reset()
+
+
+@pytest.fixture(autouse=True)
 def _private_parse_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Each test parses documents into its own cache, never the configured runtime dir (A2: every
     member without a native document channel is sent the local parse)."""

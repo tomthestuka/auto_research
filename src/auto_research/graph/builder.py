@@ -142,12 +142,10 @@ def build_graph(
     if registry is not None:
         _registry = registry
     else:
-        # Standalone/Studio path (real runs always inject a registry). Read the toolkit root
-        # from config rather than a hardcoded literal so it stays portable; lazy import keeps
-        # builder ⇍ runtime (runtime imports build_graph) acyclic.
-        from auto_research.graph.runtime import load_orchestration_config
+        # Standalone/Studio path (real runs always inject a registry): the toolkit contract's root.
+        from auto_research.toolkit_contract import toolkit
 
-        _registry = ToolkitRegistry(Path(load_orchestration_config()["toolkit_root"]))
+        _registry = ToolkitRegistry(toolkit().root)
     consensus_strategy = consensus or DebateToConverge(
         max_rounds=max_iterations, monitor=monitor, registry=_registry
     )

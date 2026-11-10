@@ -12,7 +12,9 @@ from auto_research.schemas.figures import (
 )
 from auto_research.schemas.hitl import HumanAttachment, HumanQuery, HumanQueryKind, HumanResponse
 from auto_research.schemas.merge import (
+    GATE_JOBS,
     CheckResult,
+    GateJob,
     GateReport,
     MergeFlowResult,
     ToolReviewVerdict,
@@ -40,6 +42,8 @@ __all__ = [
     "AnalystToolRequest",
     "AuthoringDecision",
     "CheckResult",
+    "GATE_JOBS",
+    "GateJob",
     "FigureRef",
     "FigureCitation",
     "FiguredReport",

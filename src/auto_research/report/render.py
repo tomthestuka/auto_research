@@ -33,7 +33,8 @@ from pathlib import Path
 from urllib.parse import quote as url_quote
 
 from auto_research.provenance import ReceiptLookup, paper_attributions, parse_bindings
-from auto_research.provenance.store import NOT_EVIDENCE_NAMES, TOOLKIT_PRODUCER_PREFIX
+from auto_research.provenance.store import NOT_EVIDENCE_NAMES
+from auto_research.toolkit_contract import is_toolkit_producer
 from auto_research.report.figures import stage_figure_receipts
 from auto_research.report.writers import _errors_with_context
 from auto_research.schemas.artifacts import PaperAttribution, Receipt
@@ -214,7 +215,7 @@ def check_table(
                 f"{label} cites {table.receipt}, which is marked {', '.join(receipt.flags)}: its values "
                 "cannot stand in a table. Cite a result without that mark."
             ]
-        if receipt is not None and not receipt.produced_by.startswith(TOOLKIT_PRODUCER_PREFIX):
+        if receipt is not None and not is_toolkit_producer(receipt.produced_by):
             # The table stands for what a tool computed (user ruling 2026-10-17): a toolkit result or
             # file, never a read, the shell, a paper, a commit or the request.
             what = NOT_EVIDENCE_NAMES.get(receipt.produced_by) or f"a {receipt.kind}, not a toolkit result"

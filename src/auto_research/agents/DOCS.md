@@ -484,7 +484,8 @@ Role wrappers:
   guidance only) and files (`_human_file`). Its scope is a `ScopedLookup` over the run's store: its
   own `rev:` receipts, the request (`input:hN`, minted via `store.mint_input`), the human's files
   (`input:`), the librarian's receipts across passes, every handle the lead's report cites and the
-  lead's figures (matched to receipts by hash), with their ancestors. Requires `tools`, `receipts`
+  lead's figures (matched to receipts by hash), with their ancestors; what it admits beside its own
+  comes from `reviewer_admitted_receipts`. Requires `tools`, `receipts`
   and `report_dir` (the runtime sets all three, `graph/runtime.attach_reviewer_runtime`); raises
   if the loop ends without an accepted `turn_end`. One JSONL per turn, `review{n}.jsonl`, beside
   the ledger (`sandbox.workspace.report_record_path`), out of every role's reach.
@@ -637,10 +638,11 @@ Role wrappers:
   Role-originated monitor events include the configured model string when the
   backing model exposes it; ReAct loops additionally emit visible per-tool
   result summaries at `chatter=7`.
-- Live role verification is opt-in:
-  `pytest tests/test_live_agents.py --live -s`.
-  It runs one real model call for each role and writes JSONL plus Markdown logs
-  under `logs/dev/step-8/`.
+- Live role verification is opt-in (`--live`), one canonical cell per role through the
+  production seams: reviewer `tests/test_live_reviewer_paths.py` (its
+  `test_a_real_librarian_report_reaches_the_reviewer` runs the graph through a real librarian pass), librarian
+  `tests/test_live_librarian.py`, lead `tests/test_live_turn_end_shapes.py`, worker
+  `tests/test_live_ref_chain.py`.
 
 Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
 `ReviewerAgent.review`):
@@ -707,7 +709,15 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
   sanitiser's decision, A3); `execute_wait_for_reply(run_control, agent_key,
   arguments, *, outstanding)` (a seat with no coder; `execute_wait_coder` serves the lead's coder).
 - `ReviewerAgent` — the reviewer as a unit. Method: `review(...)` (see Interfaces); attributes
-  `receipts`, `report_dir`.
+  `receipts`, `report_dir`, and `admitted_receipts` (what the latest turn admitted, set by `review`
+  before its loop; `None` before the first turn).
+- `reviewer_admitted_receipts(request_handle, *, literature_receipts=None, report=None,
+  figure_handles=(), human_files=()) -> list[str]` — what a reviewer turn admits to its scope
+  beside its own receipts: the request's receipt, the documents the literature reports cite, every
+  handle the analysis report cites, its figures' receipts, the human's files. Mints nothing.
+  `ReviewerAgent.review` calls it once per turn (the request's receipt and the figures' receipts are
+  derived once, in `review`), builds its `ScopedLookup` from it and keeps it as
+  `admitted_receipts`, which a check outside the turn (the reviewer live cells) reads.
 - `LibrarianIOAgent(sources, storage, ...)` — the librarian. Method: `research()`.
 - `agents/paper_tools.py` — **the shared paper reader** (human ruling 2026-09-24: every role opens a
   paper the librarian's way). `PaperReader(store, lookup, *, source, storage=None, allowed=None,
@@ -1146,3 +1156,20 @@ entries) and 2026-10-19 (every entry); detail in git history.
 - 2026-11-04 — Z1h review: `_media_trigger` counts images only for a member that takes them (`media_load(images=)`), so a text-only seat's withheld figures never cut its history.
 - 2026-11-04 — Item 2: the `submit_for_review` description names the toolkit's earlier fast tests among the gate's checks.
 - 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire.
+- 2026-11-09 — Phase 3 step 0a W9c: `reviewer_admitted_receipts` (roles.py) is the reviewer's admitted-receipts derivation, extracted from `ReviewerAgent.review`, which calls it; the reviewer live cells re-check a filed report against it instead of a hand-named list. Behaviour unchanged. Tests: `tests/test_role_wiring_seams.py`.
+- 2026-11-09 — Phase 3 step 0a W2: `_made_from` tells a toolkit result by `toolkit_contract.is_toolkit_producer` (the declared toolkit name) instead of the `research_toolkit.` prefix.
+- 2026-11-09 — Phase 3 step 0a W9c review: `ReviewerAgent.review` derives its scope once (`reviewer_admitted_receipts(request_handle, *, ..., figure_handles=...)`, which mints nothing) and keeps it as `admitted_receipts`; the reviewer live cells read that instead of re-deriving. Behaviour unchanged.
+- 2026-11-09 — Phase 3 step 0a W9d: stale live files deleted (ruling D23): `test_live_agents.py` (called the removed `AnalystWorkerAgent.request_tools`), `test_live_lead_cycle.py` (read the removed `LeadCycleOutcome.verdict`), `test_live_no_hitl.py` and its helper guards `test_no_hitl_probe_helpers.py` (probed the retired `ask_human`/`plan_and_debate` role tools), `test_live_honest_failure.py`; each purpose is covered by a named cell (triage in the session scratch). The live-verification note names the canonical cells.
+- 2026-11-09 — W2 re-review: `_CATALOG_UTILS_KIND` becomes `_catalog_kind()`, the bound toolkit contract's `<name>.catalog_utils.data_catalog`, so the lead's in-process catalog receipts are evidence under any declared toolkit name; `DATA_CATALOG_TOOL` stays the agent-facing name until Phase 3 step 3.
+- 2026-11-09 — Phase 3 step 0a W10 (ruling D25, jailing unconditional): `SandboxToolProvider` applies no command-string scan to `bash_exec` (the shell server always runs in the jail; `_jail_supersedes_command_check` deleted); `execute_use_env` loses `shell_jailed` (a pipeline environment is always the shell's to take); `_route_environment` no longer refuses a pipeline environment for a jail-off run; `_in_host_tmp` always applies (the jail always gives the shell a private `/tmp`).
+- 2026-11-09 — W10 review fixes (D25): the lead's `execute_data_catalog` runs the committed `catalog_utils.lib.catalog_read.data_catalog` as a one-shot call in the analysis jail (`_jailed_catalog_read` → `runner.run_in_environment`, the toolkit's default environment, `python -P`, bytecode in the jail's private `/tmp`), its answer read after a marker; its manifest entry and `data_catalog_tool_def` are read as data (`_catalog_spec` → `registry.manifest_literal`). No toolkit code is imported in the orchestrator (`_import_from_toolkit` and the in-process memo are gone). `roles._ChainDriver._build_session` passes `worktree_base` as given (the toolkit-root fallback is gone; the run path passes `run_dir/authoring`).
+- 2026-11-09 — W10 sweep: `_jailed_catalog_read` goes through `runner.call_in_jail` (the marker and script moved there).
+- 2026-11-09 — Phase 3 step 0a W6: the `read_file`/`list_dir` allow-list refusals name the reach generically (your folder, the toolkit, the observation data, the analysis software) instead of the toolkit's name and its software; `web_search_tool_def` names official analysis guides and calibration notes (no mission wording); `ledger_grep`'s description says "identifiers" for ObsIDs.
+- 2026-11-09 — W10 sweep re-review: the lead's `data_catalog` runs the manifest entry's `module`/`fn` (`_jailed_catalog_read(spec, ...)`) within its `tool_config.yaml` timeout (`ToolkitRegistry.call_timeout_ceiling`), in the default environment whose fingerprint (`_environment_stamp`) its receipt carries (`ToolOutcome.call_context["env"]` → `_receipted(env=)`); a toolkit whose HEAD or cleanliness changed during the read is an error.
+- 2026-11-09 — W6 follow-up (main's rulings): the toolkit root from the bound contract is stated where a role's reach is described (`_toolkit_root_text`: the worker's `read_file` description; `ReadOnlyToolProvider._roots_text` labels the toolkit root), with its `README.md` files as the domain briefing. Model-facing gate wording is the CI pipeline: `submit_tool_def` (its jobs; "approval rests with the pipeline and the co-lead"), the submit/respond outcomes (`CI PIPELINE FAILED` / `CI PIPELINE PASSED`), brief and wait notes; `roles` lead loop text (a co-lead from a vendor apart from the coder's, no model family), the dispatch summary, and the co-lead payload ("its committed tests"). `report_edit.TOOLSPEC_BLOCKS` `target_domain`: "the toolkit package the tool goes in".
+- 2026-11-09 — W6 review: the lead's authoring instruction (`_cycle_instruction`, authoring on) appends `gate.ci_test_rules()`: every test of a change runs and passes, a skip or xfail fails it, `live` tests listed for the co-lead, data tests read `TOOLKIT_DATA_<NAME>`, and the data sets the pipeline provides.
+- 2026-11-10 — Phase 3 step 0a W9f: the reviewer's live dispatch cell (`tests/test_live_reviewer_paths.py::test_adequate_literature_dispatches_the_analysts`) runs a real `LibrarianIOAgent` pass first, on the same request, receipt store, knowledge base and channel, and reviews its filed report; `assign_to == "analysts"` is asserted only when that report is `succeeded` with no gaps, else recorded. No code change here.
+- 2026-11-10 — Phase 3 step 0a W9e: the worker's live cell (`tests/test_live_ref_chain.py`) runs on today's `xspec_utils` tools: `load_data` → `fit_tbfeo_hss` → `run_fit` → `plot_fit` (B1), worker 1 reproducing worker 0's fit and drawing it with `plot_fit`, then `plot_iqu` from a brief naming worker 0's fit (B2/B3), `fit_tbfeo_hss` given a shell result, a peer's load and a missing key (R1), and a peer's claim that NuSTAR 80902318002 should leave the joint fit with IXPE 02008401 (D1). Data: Cyg X-1 IXPE 02008201 (high/soft state), read from the toolkit's data set `cygx1_ixpe` (`toolkit_contract.test_data`); a folder outside the workers' reach (`agent_fs_allow`) fails the cell before any model call. The chain is checked on the steps whose `indices` is kind `data`; `run_fit` takes no data argument, so its receipt has no parent and is recorded, not checked. Producers come from the toolkit contract (`toolkit().name`, `is_toolkit_producer`). No code change here.
+- 2026-11-10 — Phase 3 step 0a W9e review fixes (worker live cell `tests/test_live_ref_chain.py`): each cell runs against its own configuration directory (`AUTO_RESEARCH_CONFIG_DIR`): the configuration in force copied unchanged, plus the toolkit's two Cyg X-1 data folders (`test_data` `cygx1_ixpe`, `cygx1_nustar`) appended to `agent_fs_allow` and `agent_fs_readonly`, so the jail mounts them read-only for that cell only (human ruling; the repository's `orchestration.yaml` is unchanged). Before any model call the cell checks the allow-list is active, admits each observation, and `jail.policy_from_config()` mounts each folder read-only. The briefs leave out `run_fit` (no data argument, so no ancestry; pending a ruling); every handle B1's findings cite must reach the load. B2 requires worker 1's own `fit_tbfeo_hss` and a `plot_fit` in its plot turn; the brief names worker 0's `load_data` handle; the reviewer's citations may reach either worker's load. R1 names worker 0's actual load handle. Each cell writes its record before asserting and when it raises. Rebuilt calls' references resolve under the owner rule (the caller's own receipts). No code change here.
+- 2026-11-10 — Phase 3 step 0a W9f review (human ruling: drive the real graph, record the route): the dispatch cell of the W9f entry above is replaced by `tests/test_live_reviewer_paths.py::test_a_real_librarian_report_reaches_the_reviewer`, which drives `run_research` (the reviewer scopes, a real `LibrarianIOAgent` pass with the reviewer's `follow_up`, the reviewer's next turn; the cell stops the run at that verdict) and asserts the harness side only; the routes are recorded, never asserted. `_assert_filed_and_valid` loses its vacuous `admitted` assert. No code change here.
+- 2026-11-10 — (main) `test_a_real_librarian_report_reaches_the_reviewer` review fixes: inconclusive skips for a non-librarian scoping route, a contained librarian failure (`librarian.failed`) and a report citing nothing; the stop must be the cell's own; the re-check uses the seat's own `_viewable_by_message`; the hand-rolled route rule is gone; the analysis stub's wait is bounded; the record also holds what the literature node handed on.

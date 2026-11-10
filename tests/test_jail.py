@@ -1,7 +1,7 @@
 """The OS-level filesystem jail: what it builds, and the rules it learned the hard way.
 
-Deterministic. No jailed process is launched here beyond ``bwrap``'s own availability probe, which
-is skipped when the host has no ``bwrap``. What is asserted is the argv the builder produces, since
+Deterministic. The jailed processes launched here (``bwrap``'s own availability probe and the
+launch probe of a fixture toolkit's default environment) are skipped when the host has no ``bwrap``. What is asserted is the argv the builder produces, since
 that argv *is* the policy: a bind in the wrong order or a symlink in the wrong place does not fail
 loudly, it silently hands the process a filesystem nobody intended.
 """
@@ -33,21 +33,22 @@ def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
     return found
 
 
-def test_wrap_is_a_no_op_when_the_jail_is_off(monkeypatch):
-    """The default is off, and off must mean *byte-identical* to the command we would have run."""
-    monkeypatch.setattr(jail, "jail_enabled", lambda: False)
+def test_wrap_always_prefixes_the_jail(bwrap):
+    """The jail is unconditional (D25): the command runs after bwrap's own argv and ``--``."""
     argv = ["/bin/python", "-c", "print(1)"]
-    assert jail.wrap(argv, JailPolicy()) == argv
+    wrapped = jail.wrap(argv, JailPolicy())
+    assert wrapped[0] == "/usr/bin/bwrap" and wrapped[-4:] == ["--", *argv]
 
 
-def test_wrap_is_a_no_op_when_bwrap_is_absent(monkeypatch):
-    """A host without bwrap runs exactly as it did before the jail existed. The launch check is
-    what tells the operator the stronger enforcement is not in effect; refusing to run would turn a
-    missing optional dependency into an unrunnable pipeline."""
-    monkeypatch.setattr(jail, "jail_enabled", lambda: True)
+def test_nothing_runs_unjailed_when_bwrap_is_absent(monkeypatch, tmp_path):
+    """A host without bwrap gets no unjailed fallback: wrapping a command and writing a harness
+    launcher both raise, naming bwrap."""
     monkeypatch.setattr(jail, "bwrap_path", lambda: None)
-    argv = ["/bin/python", "-c", "print(1)"]
-    assert jail.wrap(argv, JailPolicy()) == argv
+    with pytest.raises(RuntimeError, match="bwrap"):
+        jail.wrap(["/bin/python", "-c", "print(1)"], JailPolicy())
+    with pytest.raises(RuntimeError, match="bwrap"):
+        jail.write_launcher(tmp_path / "codex-jailed", "/opt/real/codex", JailPolicy())
+    assert not (tmp_path / "codex-jailed").exists()
 
 
 def test_network_is_denied_only_when_the_policy_says_so(bwrap):
@@ -254,63 +255,93 @@ def test_launcher_execs_the_real_binary_inside_the_jail(bwrap, tmp_path):
     assert os.access(script, os.X_OK)
 
 
-def test_launcher_without_bwrap_still_execs_the_binary(monkeypatch, tmp_path):
-    monkeypatch.setattr(jail, "bwrap_path", lambda: None)
-    script = jail.write_launcher(tmp_path / "codex-jailed", "/opt/real/codex", JailPolicy())
-    assert script.read_text().strip() == '#!/bin/sh\nexec /opt/real/codex "$@"'
+def test_a_host_that_cannot_run_the_jail_is_refused_at_launch(monkeypatch):
+    """Unjailed is not accepted (D25): the launch preflight fails, with the host's reason, when
+    bwrap cannot run here; it is a failure, never a warning."""
+    import asyncio
 
+    from auto_research.preflight import Preflight, PreflightError, build_default_preflight
 
-def test_availability_check_warns_rather_than_blocking(monkeypatch):
-    """Defence in depth: a host without the jail is the configuration every earlier run used, so
-    saying so on the record beats refusing to start."""
-    from auto_research.preflight import PreflightWarning
-
-    monkeypatch.setattr(jail, "jail_enabled", lambda: True)
     monkeypatch.setattr(jail, "jail_available", lambda: (False, "bwrap is not installed"))
-    with pytest.raises(PreflightWarning, match="bwrap is not installed"):
-        jail.check_os_jail_available()
+    # The launch checklist carries the check; run alone, it fails the launch.
+    check = dict(build_default_preflight()._checks)["os_jail_available"]
+    assert check is jail.check_os_jail_available
+    preflight = Preflight()
+    preflight.register("os_jail_available", check)
+    with pytest.raises(PreflightError, match=r"\[os_jail_available\] this host cannot run the OS jail "
+                                             r"\(bwrap is not installed\)"):
+        asyncio.run(preflight.run_checklist())
 
 
-def test_availability_check_is_silent_when_the_jail_is_off(monkeypatch):
-    monkeypatch.setattr(jail, "jail_enabled", lambda: False)
+@pytest.mark.skipif(not jail.jail_available()[0], reason="the OS jail is required and bwrap cannot run here")
+def test_a_host_that_runs_the_jail_passes_the_launch_check():
     jail.check_os_jail_available()
 
 
-def test_probe_failure_blocks_the_launch(monkeypatch, tmp_path):
-    """Unlike availability, a jail that breaks the science stack is fatal: every tool call and
-    every Layer-B test would fail, so refusing once beats failing forty times. This is the check
-    that would have caught PyXspec's files symlinking out of `$HEADAS` at launch instead of thirty
-    suites deep."""
-    interpreter = tmp_path / "env" / "bin" / "python"
-    interpreter.parent.mkdir(parents=True)
-    interpreter.write_text("")
-    interpreter.chmod(0o755)
-    monkeypatch.setattr(jail, "jail_enabled", lambda: True)
-    monkeypatch.setattr(jail, "jail_available", lambda: (True, "ok"))
-    monkeypatch.setattr(
-        jail,
-        "_config",
-        lambda: {
-            "analyze_probe": "import xspec",
-            "analyze_env": str(tmp_path / "env"),
-            "agent_fs_allow": [],
-        },
-    )
-    monkeypatch.setattr(jail, "jail_argv", lambda policy: [])
+@pytest.fixture
+def jailed_toolkit(tmp_path, tmp_path_factory, monkeypatch):
+    """``make(probe) -> orchestration.yaml``: the fixture toolkit with ``probe`` on its default
+    environment (derived from this interpreter), this process configured on it with the jail on."""
+    import sys
 
-    class _Failed:
-        returncode = 1
-        stdout = ""
-        stderr = "ImportError: cannot import name 'AllData' from 'xspec' (unknown location)"
+    from auto_research import toolkit_contract
+    from auto_research.config_paths import CONFIG_DIR_ENV
+    from tests.fixtures import toolkit as fixture
 
-    monkeypatch.setattr(jail.subprocess, "run", lambda *a, **k: _Failed())
-    with pytest.raises(ValueError, match="fails inside the OS jail"):
-        jail.check_os_jail_probe()
+    def make(probe: str) -> Path:
+        root = fixture.build_toolkit(tmp_path / "toolkit", env_base=Path(sys.prefix).name)
+        with (root / "envs" / fixture.ENV_ID / "env.yaml").open("a", encoding="utf-8") as handle:
+            handle.write(f"probe: {probe!r}\n")
+        config = fixture.write_config(tmp_path / "config", root, analysis_prefix=Path(sys.prefix),
+                                      allow=(tmp_path_factory.getbasetemp(),))
+        monkeypatch.setenv(CONFIG_DIR_ENV, str(config))
+        toolkit_contract.reset()
+        return config / "orchestration.yaml"
+
+    yield make
+    toolkit_contract.reset()
 
 
-def test_probe_is_silent_when_the_jail_is_off(monkeypatch):
-    monkeypatch.setattr(jail, "jail_enabled", lambda: False)
-    jail.check_os_jail_probe()
+@pytest.mark.skipif(not jail.bwrap_path(), reason="bwrap is not installed on this host")
+def test_the_probe_runs_the_default_environment_inside_the_jail(jailed_toolkit):
+    """With the jail on, the launch probe runs where a unit's REPL runs: inside it, so a stack whose
+    files symlink out of the allow-list (PyXspec out of `$HEADAS`, 2026-08-19) fails at launch
+    instead of thirty Layer-B suites deep. This repository is outside the allow-list: unseen there."""
+    from auto_research.sandbox.runner import check_analysis_probe
+
+    outside = Path(__file__).resolve()
+    jailed_toolkit(f"import os, demo_utils; assert not os.path.exists({str(outside)!r})")
+    check_analysis_probe()
+
+
+@pytest.mark.skipif(not jail.bwrap_path(), reason="bwrap is not installed on this host")
+def test_the_activation_read_back_from_the_jail_lands_on_the_consumers_jail_home(jailed_toolkit, tmp_path):
+    """The activation runs in the analysis jail, where HOME is that jail's own: what it derived from
+    that home comes back on the home of the jail the values are handed to (an author's), or as the
+    activation set it when no home is named."""
+    import yaml
+
+    from auto_research.sandbox.runner import analysis_activation_env
+    from tests.fixtures import toolkit as fixture
+
+    path = jailed_toolkit("import sys")
+    (tmp_path / "toolkit" / "envs" / fixture.ENV_ID / "activate.sh").write_text('export DEMO_PARAMS="$HOME/params;/opt/sys"\n')
+    activated = analysis_activation_env(yaml.safe_load(path.read_text(encoding="utf-8")), home="/host/home")
+    assert activated["DEMO_PARAMS"] == "/host/home/params;/opt/sys", activated["DEMO_PARAMS"]
+    assert jail.JAIL_HOME_AT not in "".join(activated.values())
+    as_set = analysis_activation_env(yaml.safe_load(path.read_text(encoding="utf-8")))
+    assert as_set["DEMO_PARAMS"] == f"{jail.JAIL_HOME_AT}/params;/opt/sys"
+
+
+@pytest.mark.skipif(not jail.bwrap_path(), reason="bwrap is not installed on this host")
+def test_a_probe_failing_in_the_jail_blocks_the_launch_and_names_the_allow_list(jailed_toolkit):
+    """A jail that breaks the stack is fatal: every tool call and every Layer-B test would fail, so
+    refusing once beats failing forty times; the refusal names the allow-list as the usual fix."""
+    from auto_research.sandbox.runner import check_analysis_probe
+
+    with pytest.raises(RuntimeError, match="agent_fs_allow"):
+        jailed_toolkit("import __no_such_module_xyz__")
+        check_analysis_probe()
 
 
 @pytest.mark.skipif(not jail.bwrap_path(), reason="bwrap is not installed on this host")
@@ -380,18 +411,17 @@ def test_every_harness_this_project_can_run_resolves_a_binary():
         assert harness_binary(harness) is not None, harness
 
 
-def test_binary_reachability_is_vacuously_true_with_the_jail_off(monkeypatch):
-    """The check must never block a host that does not run the jail at all."""
+def test_binary_reachability_fails_on_a_host_that_cannot_run_the_jail(monkeypatch):
+    """No host passes the check vacuously: one that cannot run the jail reports why."""
     from auto_research.sandbox import jail
 
-    monkeypatch.setattr(jail, "jail_enabled", lambda: False, raising=True)
-    assert jail.binary_reachable_in_jail("/definitely/not/here", label="t") == (True, "")
+    monkeypatch.setattr(jail, "jail_available", lambda: (False, "bwrap is not installed"), raising=True)
+    assert jail.binary_reachable_in_jail("/definitely/not/here", label="t") == (False, "bwrap is not installed")
 
 
 def test_a_missing_binary_is_reported_rather_than_probed(monkeypatch):
     from auto_research.sandbox import jail
 
-    monkeypatch.setattr(jail, "jail_enabled", lambda: True, raising=True)
     monkeypatch.setattr(jail, "jail_available", lambda: (True, ""), raising=True)
     ok, why = jail.binary_reachable_in_jail("/definitely/not/here", label="t")
     assert ok is False and "does not exist outside the jail" in why
@@ -512,7 +542,7 @@ def test_two_authors_on_identically_named_trees_get_different_homes(tmp_path):
         worktree = tmp_path / parent / "repo"
         worktree.mkdir(parents=True)
         labels.add(
-            CodexBackend(member=member, worktree=worktree, system_prompt="p", guard=None)
+            CodexBackend(member=member, worktree=worktree, system_prompt="p")
             ._jail_label()
         )
     assert len(labels) == 2, f"both authors got the same settings home: {labels}"
@@ -554,14 +584,12 @@ def test_both_harness_launchers_bind_their_worktree(tmp_path):
     codex_backend = CodexBackend(
         member=RoleModelConfig(name="m", provider="deepseek", harness="codex",
                                model="deepseek-v4-flash", base_url="https://api.deepseek.com/"),
-        worktree=worktree, system_prompt="p", guard=None,
+        worktree=worktree, system_prompt="p",
     )
-    codex = Path(codex_backend._jail_launcher(None) or "/dev/null")
-    codex_body = codex.read_text() if codex.exists() and codex.name != "null" else ""
+    codex_body = Path(codex_backend._jail_launcher(None)).read_text()
 
     assert f"--bind {worktree}" in claude
-    if codex_body:
-        assert f"--bind {worktree}" in codex_body
+    assert f"--bind {worktree}" in codex_body
 
 
 def test_the_codex_launcher_is_not_written_into_the_working_tree(tmp_path, monkeypatch):
@@ -588,8 +616,6 @@ def test_the_codex_launcher_is_not_written_into_the_working_tree(tmp_path, monke
 
     from auto_research.sandbox import jail
 
-    monkeypatch.setattr(jail, "jail_enabled", lambda: True)
-    monkeypatch.setattr(jail, "jail_available", lambda: (True, ""))
     written: dict[str, Path] = {}
 
     def _fake_write_launcher(path, target, policy):

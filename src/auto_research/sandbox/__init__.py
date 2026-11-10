@@ -10,7 +10,6 @@ from auto_research.sandbox.review import (
     make_review_hook,
     select_decorrelated_member,
 )
-from auto_research.sandbox.runner import run_tool
 from auto_research.sandbox.workspace import (
     create_run_workspace,
     run_dir,
@@ -27,6 +26,5 @@ __all__ = [
     "make_review_hook",
     "propose_and_pr",
     "run_dir",
-    "run_tool",
     "select_decorrelated_member",
 ]

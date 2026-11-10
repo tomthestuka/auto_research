@@ -26,9 +26,12 @@ to fuck up all they want; on their surface they're more likely to spot weakness 
   only a live model can show: that the refusal names the real problem and the model **recovers**
   in the same conversation.
 
-**Seats.** The attack cells run on a cheap-but-capable seat; the two cells where the lead's own
-judgment is the subject (rework-with-probe, the honest terminal) run the production seat. Override
-either with `--seats` / `AUTO_RESEARCH_SEATS`.
+**Seats.** The attack cells run on a cheaper seat, the configured worker tier
+(`tests.seats.configured_seat("analyst_worker")`), or `AUTO_RESEARCH_SHAPE_SEAT=provider:model`;
+`--seats analyst_lead=...` does not reach them, since their override replaces the lead seat. The
+shapes where the lead's own judgment is the subject (rework-with-probe, the honest terminal) run the
+configured lead seat, which `--seats` / `AUTO_RESEARCH_SEATS` overrides; `rework_with_probe` is the
+lead's canonical seat cell. Every other role follows the configuration in force, `--seats` included.
 """
 
 from __future__ import annotations
@@ -304,16 +307,20 @@ def _finding(shape: str, text: str) -> None:
     FINDINGS.append((shape, text))
 
 
-def _seat_for(shape: str) -> str | None:
-    """The production seat where the lead's own judgment is the subject; a cheap one to attack.
+def _seat_for(shape: str):
+    """The production seat where the lead's own judgment is the subject; a cheaper one to attack.
 
     Ruling 2026-09-11: the attack cells are probing OUR validator, not the model's science, so
-    they do not need the expensive seat — but the two shapes that turn on the lead's judgment
-    (does it recognise an unsettled analysis; does it stop honestly) do.
+    they do not need the expensive seat — but the shapes that turn on the lead's judgment (does it
+    recognise an unsettled analysis; does it stop honestly) do. The cheaper seat is the configured
+    worker tier (``tests.seats.configured_seat``), never a model named here;
+    ``AUTO_RESEARCH_SHAPE_SEAT=provider:model`` seats another member.
     """
+    from tests.seats import configured_seat, env_seat
+
     if SHAPES[shape]["judgment"]:
         return None  # whatever config names — the production seat
-    return os.getenv("AUTO_RESEARCH_SHAPE_SEAT", "anthropic:claude-sonnet-5")
+    return env_seat("AUTO_RESEARCH_SHAPE_SEAT") or configured_seat("analyst_worker")
 
 
 def _figure(path, caption="A plot the report cites"):
@@ -458,7 +465,7 @@ def _drive_shape(shape: str, tmp_path, *, rounds_left=2, seed_state=None, instru
     through the configuration pointer — never a hand-built handle (2026-08-06, 2026-09-08).
     """
     from auto_research.schemas import AnalysisTask
-    from tests.seats import seat as seat_override, seated
+    from tests.seats import seated
 
     refusals: list[str] = []
     seat = _seat_for(shape)
@@ -498,8 +505,7 @@ def _drive_shape(shape: str, tmp_path, *, rounds_left=2, seed_state=None, instru
         if seat is None:
             outcome, handle = _run()
         else:
-            provider, model = seat.split(":", 1)
-            with seated(analyst_lead=seat_override(provider, model)):
+            with seated(analyst_lead=seat):
                 outcome, handle = _run()
     finally:
         _note_run(shape, state)

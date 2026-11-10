@@ -103,7 +103,7 @@ LIBRARIAN_BLOCKS: tuple[Block, ...] = (
 TOOLSPEC_BLOCKS: tuple[Block, ...] = (
     Block("proposed_tool_name", "proposed_tool_name", "line", "the tool's name, one line"),
     Block("request_kind", "request_kind", "value", "new_capability or fix_existing"),
-    Block("target_domain", "target_domain", "line", "the <domain>_utils package the tool goes in"),
+    Block("target_domain", "target_domain", "line", "the toolkit package the tool goes in"),
     Block("disposition", "disposition", "value", "extend_existing or new_package"),
     Block("science_context", "science_context", "text", "what is measured and why the toolkit cannot do it yet"),
     Block("expected_behavior", "expected_behavior", "text",

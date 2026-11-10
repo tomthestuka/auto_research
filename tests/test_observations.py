@@ -24,6 +24,19 @@ from auto_research.observations import (
 TOOLKIT_ROOT = _toolkit_root()
 
 
+@pytest.fixture
+def jail_sees_tmp(tmp_path, monkeypatch):
+    """The catalog health check runs the toolkit's healthcheck in the jail (D25): the configured
+    allow-list plus this test's folder (its observation database). Skips where the jail cannot run."""
+    from auto_research.sandbox import jail
+
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
+    configured = jail._config()
+    allow = [*(configured.get("agent_fs_allow") or []), str(tmp_path)]
+    monkeypatch.setattr(jail, "_config", lambda: {**configured, "agent_fs_allow": allow})
+
+
 def _toolkit_pkg_available(pkg: str) -> bool:
     """Whether ``pkg`` is importable from ``toolkit_root`` (a provisioned machine).
 
@@ -105,13 +118,13 @@ def _health_config(tmp_path, mission="probe"):
 
 
 @_needs_obsdb
-def test_check_catalog_health_absent_catalog_passes(tmp_path):
+def test_check_catalog_health_absent_catalog_passes(tmp_path, jail_sees_tmp):
     cfg, _ = _health_config(tmp_path)
     check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)  # no raise
 
 
 @_needs_obsdb
-def test_check_catalog_health_good_catalog_passes(tmp_path):
+def test_check_catalog_health_good_catalog_passes(tmp_path, jail_sees_tmp):
     cfg, obs_db = _health_config(tmp_path)
     (obs_db / "01" / "evt").mkdir(parents=True)
     (obs_db / "01" / "evt" / "f.evt").write_text("x")
@@ -127,7 +140,7 @@ def test_check_catalog_health_good_catalog_passes(tmp_path):
 
 
 @_needs_obsdb
-def test_check_catalog_health_malformed_raises(tmp_path):
+def test_check_catalog_health_malformed_raises(tmp_path, jail_sees_tmp):
     cfg, obs_db = _health_config(tmp_path)
     (obs_db / "catalog.json").write_text("{ not valid json")
     with pytest.raises(RuntimeError, match="catalog drift"):
@@ -135,7 +148,7 @@ def test_check_catalog_health_malformed_raises(tmp_path):
 
 
 @_needs_obsdb
-def test_check_catalog_health_missing_product_raises(tmp_path):
+def test_check_catalog_health_missing_product_raises(tmp_path, jail_sees_tmp):
     cfg, obs_db = _health_config(tmp_path)
     (obs_db / "catalog.json").write_text(json.dumps({
         "entries": {
@@ -159,9 +172,10 @@ def test_check_catalog_health_missing_product_raises(tmp_path):
 
 
 def test_execute_data_catalog_delegates_to_catalog_utils(monkeypatch):
-    """The in-process executor passes obs_db_path to the catalog_utils read and wraps the text.
+    """The executor passes obs_db_path to the catalog_utils read and wraps the text.
 
-    Monkeypatches the memoized read fn so the wiring is tested without a provisioned toolkit.
+    The jailed read (a subprocess, ``_jailed_catalog_read``) and the manifest entry are stood in for,
+    so the wiring is tested without a provisioned toolkit; the jailed path runs for real below.
     """
     import asyncio
 
@@ -169,19 +183,37 @@ def test_execute_data_catalog_delegates_to_catalog_utils(monkeypatch):
 
     captured = {}
 
-    def _fake_read(obs_db_path, min_level=None):
+    def _fake_read(spec, obs_db_path, min_level, *, environment, timeout):
         captured["obs_db_path"] = obs_db_path
         captured["min_level"] = min_level
         return "Local ixpe data (1 ObsIDs):\n- 01002901: max_level=3, products=[level2_evt, pcube]"
 
     monkeypatch.setattr(react, "_toolkit_clean_head", lambda: "head1")
-    _spec = {"args_schema": {"properties": {"obs_db_path": {"kind": "path"}, "min_level": {"kind": "setting"}}}}
-    monkeypatch.setattr(react, "_catalog_read_fn", ("head1", _fake_read, _spec))
+    _spec = {"module": "catalog_utils.lib.catalog_read", "fn": "data_catalog",
+             "args_schema": {"properties": {"obs_db_path": {"kind": "path"}, "min_level": {"kind": "setting"}}}}
+    monkeypatch.setattr(react, "_catalog_spec", lambda: _spec)
+    monkeypatch.setattr(react, "_jailed_catalog_read", _fake_read)
 
     out = asyncio.run(react.execute_data_catalog({"obs_db_path": "/data/x/IXPE", "min_level": 2}))
     assert not out.is_error
     assert "01002901" in out.text and "pcube" in out.text
     assert captured == {"obs_db_path": "/data/x/IXPE", "min_level": 2}
+
+
+def test_a_toolkit_that_changes_during_the_catalog_read_is_refused(monkeypatch):
+    """The answer must come from one committed version: a HEAD that moved, or a tree made dirty,
+    while the jailed read ran is an honest error."""
+    import asyncio
+
+    from auto_research.agents import react
+
+    heads = iter(["head1", "head2"])
+    monkeypatch.setattr(react, "_toolkit_clean_head", lambda: next(heads))
+    monkeypatch.setattr(react, "_catalog_spec", lambda: {"module": "m", "fn": "f", "args_schema": {
+        "properties": {"obs_db_path": {"kind": "path"}}}})
+    monkeypatch.setattr(react, "_jailed_catalog_read", lambda *a, **k: "listing")
+    out = asyncio.run(react.execute_data_catalog({"obs_db_path": "/data/x/IXPE"}))
+    assert out.is_error and "changed while data_catalog read" in out.text
 
 
 def test_execute_data_catalog_requires_obs_db_path(monkeypatch, tmp_path):
@@ -220,20 +252,28 @@ def test_data_catalog_lead_sources_def_from_catalog_utils():
     assert "obs_db_path" in props and "mission" not in props
 
 
-def test_data_catalog_runs_committed_toolkit_code_only(tmp_path, monkeypatch, request):
-    """The lead's in-process read never runs an uncommitted edit, and a new commit is re-imported."""
+def test_data_catalog_runs_committed_toolkit_code_only_in_the_jail(tmp_path, monkeypatch):
+    """The lead's catalog read runs in the analysis jail (D25), never an uncommitted edit, a new
+    commit's code at once, never a planted bytecode file, and never in the orchestrator."""
     import asyncio
     import os
     import subprocess
+    import sys
 
     from auto_research import env as app_env
     from auto_research.agents import react
+    from auto_research.sandbox import jail
 
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
     root = tmp_path / "toolkit"
     lib = root / "catalog_utils" / "lib"
     lib.mkdir(parents=True)
-    (root / "catalog_utils" / "__init__.py").write_text(
-        "TOOL_MANIFEST = {'research_toolkit.catalog_utils.data_catalog': {'args_schema': {'properties': "
+    (root / "catalog_utils" / "skills").mkdir()
+    (root / "catalog_utils" / "__init__.py").write_text("from .skills import TOOL_MANIFEST\n")
+    (root / "catalog_utils" / "skills" / "__init__.py").write_text(
+        "TOOL_MANIFEST = {'research_toolkit.catalog_utils.data_catalog': {'module': 'catalog_utils.lib.catalog_read', "
+        "'fn': 'data_catalog', 'args_schema': {'properties': "
         "{'obs_db_path': {'kind': 'path'}, 'min_level': {'kind': 'setting'}}}}}\n")
     (lib / "__init__.py").write_text("")
     (lib / "catalog_read.py").write_text("def data_catalog(path, min_level=None):\n    return 'v1'\n")
@@ -242,15 +282,7 @@ def test_data_catalog_runs_committed_toolkit_code_only(tmp_path, monkeypatch, re
     git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
     git("add", "-A"); git("commit", "-qm", "v1")
     monkeypatch.setattr(app_env, "toolkit_root", lambda: root)
-    monkeypatch.setattr(react, "_catalog_read_fn", None)
-    import sys
-
-    def forget_scratch_modules():  # the scratch toolkit's catalog_utils must not outlive this test
-        for name in [m for m in sys.modules if m.split(".")[0] in ("catalog_utils", "obsdb_catalog")]:
-            del sys.modules[name]
-
-    forget_scratch_modules()
-    request.addfinalizer(forget_scratch_modules)
+    before = {m for m in sys.modules if m.split(".")[0] == "catalog_utils"}
     run = lambda: asyncio.run(react.execute_data_catalog({"obs_db_path": "/x"}))  # noqa: E731
     assert run().text == "v1"
     (lib / "catalog_read.py").write_text("def data_catalog(path, min_level=None):\n    return 'EDITED'\n")
@@ -271,6 +303,7 @@ def test_data_catalog_runs_committed_toolkit_code_only(tmp_path, monkeypatch, re
     os.utime(forged_src, ns=(st.st_atime_ns, st.st_mtime_ns))
     pyc = importlib.util.cache_from_source(str(source))
     py_compile.compile(str(forged_src), cfile=pyc)
-    git("commit", "-q", "--allow-empty", "-m", "v3")  # a new head: the next call re-imports
+    git("commit", "-q", "--allow-empty", "-m", "v3")
     assert run().text == "EDITED"
+    assert {m for m in sys.modules if m.split(".")[0] == "catalog_utils"} == before  # nothing imported here
 

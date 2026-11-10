@@ -371,20 +371,28 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
 
     monkeypatch.setattr("auto_research.graph.runtime.run_preflight", _noop_preflight)
 
-    # Hermetic orchestration config so the wiring runs on any machine (no real analyze_env /
-    # toolkit): analyze_env=None ⇒ the builtin MCP server uses sys.executable; an empty tmp
-    # toolkit and a no-op env script keep it independent of the live config + repo state.
-    _ini = tmp_path / "env.sh"
-    _ini.write_text("#!/bin/bash\n", encoding="utf-8")
+    # Hermetic orchestration config so the wiring runs on any machine (no real toolkit): an empty
+    # tmp toolkit whose default environment layers on this interpreter keeps it independent of the
+    # live config + repo state.
+    import sys
+
     _tk = tmp_path / "toolkit"
-    _tk.mkdir()
+    (_tk / "envs" / "analysis").mkdir(parents=True)
+    (_tk / "envs" / "analysis" / "env.yaml").write_text("purpose: tests\nbase: host\n", encoding="utf-8")
     _hermetic_orch = {
-        "toolkit_root": str(_tk), "analyze_env": None, "analyze_ini_sh": str(_ini),
-        "disabled_tools": [], "mcp_servers": [],
+        "toolkits": [{"name": "research_toolkit", "root": str(_tk), "template_package": "xspec_utils",
+                      "authoring_branch": "ai", "default_env": "analysis"}],
+        "human_envs": {"host": sys.prefix},
+        "disabled_tools": [],
     }
     monkeypatch.setattr(
         "auto_research.graph.runtime.load_orchestration_config", lambda *a, **k: _hermetic_orch
     )
+    from auto_research import toolkit_contract
+
+    toolkit_contract.bind(_hermetic_orch)  # unbound after the test (tests/conftest.py)
+    # The host's facts (`human_envs`) the environment readers take from the configuration file.
+    monkeypatch.setattr("auto_research.env._orch_config", lambda: _hermetic_orch)
     # The runtime's conda folders (bound into the shell, environment locks): a temp copy, never the
     # configured runtime dir.
     monkeypatch.setattr("auto_research.env.agent_conda_dir", lambda: tmp_path / "conda")
@@ -439,7 +447,8 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
     assert run.verdict.accepted is True
     assert run.monitor.jsonl_path == tmp_path / "monitor.jsonl"
     events = [event.event for event in run.monitor.events]
-    assert events[0] == "run.start"
+    # The launch's environment reconcile records before the run starts: here, deriving the default one.
+    assert events[:2] == ["env.build", "run.start"], events[:3]
     # Every receipt names its environment (env plan B1): in-process calls take the run's default.
     from auto_research.provenance import ReceiptStore
     from auto_research.sandbox.workspace import run_dir

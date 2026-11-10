@@ -4,13 +4,18 @@
 # ── Paths (outside both repos; not committed) ──
 runtime_dir: /data/fzhou/ar_runtime/test_runtime   # SQLite DB, figures, run logs, cost ledger, reports
 papers_dir: /data/fzhou/ar_runtime/papers          # downloaded paper PDFs (default: <runtime_dir>/papers)
-toolkit_root: /data/fzhou/research_toolkit          # research_toolkit checkout (the coder's worktree)
-analyze_env: /grad/fzhou/.conda/envs/astropy        # conda prefix with the analysis stack (XSPEC/HEASoft/ixpeobssim)
-analyze_ini_sh: /nfsdata1/fzhou/auto_research/src/auto_research/sandbox/analyst_env.sh  # headless env sourced per tool subprocess (HEADAS/CALDB, no interactive cruft)
-repl_init_py: /nfsdata1/fzhou/auto_research/src/auto_research/sandbox/repl_init.py       # python exec'd at REPL-subprocess boot (domain session setup); empty/absent ⇒ no-op
-analyze_probe: "import xspec, xspec_utils"  # one-line python smoke-test run under analyze_env (installer + preflight); empty ⇒ skip
+toolkits:                                          # the toolkit contract: a list of one toolkit (until Phase 3 step 2)
+  - name: research_toolkit                         # declared name: first segment of every manifest key and toolkit producer
+    root: /data/fzhou/research_toolkit             # toolkit checkout (the coder's worktree)
+    package_glob: "*_utils"                        # top-level folders that are tool packages
+    template_package: xspec_utils                  # the package the coder is shown as the layout to mirror
+    authoring_branch: ai-xspec                     # branch the runtime commits onto directly; never merged to master; preflight asserts it's checked out + clean
+    default_env: analysis                          # the environment (envs/<name>/) a unit's own REPL and shell run in, and where a package naming none runs
+    test_classes: {fast: "not slow and not live"}  # pytest -m expression for the fast tests the gate reruns
+human_envs:                                      # the human's conda environments a toolkit env definition may name as its base (name: prefix); used read-only
+  astropy: /grad/fzhou/.conda/envs/astropy
 env_externals:                                   # software outside conda the analysis env uses; stamped (hashed) on every receipt, not rebuilt
-  heasoft: {root: /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34, stamps: [BUILD_DIR/build.txt, BUILD_DIR/config.txt]}
+  heasoft: {root: /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34, stamps: [BUILD_DIR/build.txt, BUILD_DIR/config.txt], private: {PFILES: ";"}}
   caldb: {root: /man1/CALDB, stamps: [data/ixpe/gpd/caldb.indx, data/ixpe/xrt/caldb.indx]}
 
 # ── Feedback-loop caps (hard backstops against pathology, not workflow budgets) ──
@@ -60,10 +65,10 @@ gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run
 # (§2/§4 trust boundary). Edit this one list when moving machines; empty/unset ⇒ guard off.
 # Governance basenames (CLAUDE.md/DOCS.md/AGENTS.md) are denied even inside an allowed root.
 agent_fs_allow:
-  - /data/fzhou/research_toolkit          # toolkit_root (coder's worktree)
+  - /data/fzhou/research_toolkit          # the toolkit root (coder's worktree)
   - /xray02/fzhou_obsdb                  # obs_db_root (observations.yaml)
   - /data/fzhou/XSPEC/relxill             # relxill local models (envs/xspec/boot.py lmod)
-  - /grad/fzhou/.conda/envs/astropy       # analyze_env
+  - /grad/fzhou/.conda/envs/astropy       # human_envs.astropy (the analysis env's base)
   - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS
   - /opt/heasoft/heasoft-6.34                                # HEASoft release root: PyXspec's
                                                              # files symlink out of HEADAS into
@@ -74,21 +79,18 @@ agent_fs_allow:
                                               # ../ledgers/, deliberately out of reach
   - /tmp
 
-# ── OS-level filesystem jail (§12) ──
-agent_os_jail: true           # wrap runtime subprocesses in bwrap, confined to the lists below
+# ── OS-level filesystem jail (§12; always on) ──
 agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-only
-  - /grad/fzhou/.conda/envs/astropy                          # analyze_env
+  - /grad/fzhou/.conda/envs/astropy                          # human_envs.astropy (the analysis env's base)
   - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS
   - /opt/heasoft/heasoft-6.34                                # HEASoft release root
   - /man1/CALDB                                              # CALDB
   - /data/fzhou/XSPEC/relxill                                # relxill local models
-gate_readonly_roots:          # read-only to the gate's Layer-B test run only, never on the workers' allow-list
-  - /data/fzhou/XSPEC/Cyg_X-1/IXPE                           # the toolkit tests' real observation data
-  - /data/fzhou/XSPEC/Cyg_X-1/NuSTAR
-  - /data/fzhou/XSPEC/Cyg_X-1/NICER
+test_data:                    # data sets the toolkit's data("<name>") tests read; bound read-only into the gate's test run only
+  cygx1_ixpe: /data/fzhou/XSPEC/Cyg_X-1/IXPE
+  cygx1_nustar: /data/fzhou/XSPEC/Cyg_X-1/NuSTAR
 
 # ── Tool discovery ──
-mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)
 disabled_tools: []   # tool names to hide from the catalogue regardless of what the toolkit exposes
 
 # ── Report (rendered inside the reviewer's turn_end; compose_report publishes it) ──
@@ -100,7 +102,6 @@ tool_author_submit_cap: 5             # lead's submit_for_review calls (each = g
 tool_author_debate_cap: 5             # lead↔co-lead respond_to_review turns per tool
 tool_author_gate_rework_cap: 5        # legacy propose_and_pr auto-loop (unused on the lead-driven path)
 tool_author_review_rework_cap: 5      # legacy propose_and_pr auto-loop (unused on the lead-driven path)
-tool_author_branch: ai-xspec                # branch the runtime commits onto directly; never merged to master; preflight asserts it's checked out + clean
 tool_author_cap: 12                   # authoring attempts per analysis (bounds the acquire→reduce→analyse chain)
 
 # ── Raise-to-human channel (§9.8) ──

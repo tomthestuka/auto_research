@@ -363,6 +363,14 @@ class DebateToConverge:
                     + "; ".join(f"{pkg} ({why})" for pkg, why in sorted(broken.items())),
                     data={"import_errors": broken},
                 )
+            misnamed = list(getattr(self.registry, "key_errors", None) or [])
+            if misnamed:  # a key outside the toolkit contract is not served: say so loudly
+                await _record(
+                    self.monitor, "analyst.toolkit.load_error", level=2,
+                    summary="manifest keys outside the toolkit's naming, not served after the reload: "
+                    + "; ".join(misnamed),
+                    data={"key_errors": misnamed},
+                )
             unchecked = list(getattr(self.registry, "manifest_errors", None) or [])
             if unchecked:  # a tool whose arguments declare no kind refuses every call: say so
                 await _record(

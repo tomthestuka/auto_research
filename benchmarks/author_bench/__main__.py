@@ -20,6 +20,7 @@ from pathlib import Path
 
 import yaml
 
+from auto_research.toolkit_contract import toolkit
 from benchmarks.author_bench.brief import BASE_SHA, VALIDATION_OBSIDS, load_brief
 from benchmarks.author_bench.legs import Leg, resolve as resolve_legs
 from benchmarks.author_bench.score import build_report, load_records
@@ -52,7 +53,7 @@ def _orchestration() -> dict:
 
 
 def _toolkit_root() -> Path:
-    return Path(_orchestration()["toolkit_root"])
+    return toolkit(_orchestration()).root
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -225,9 +226,9 @@ def preflight(toolkit_root: Path, base_ref: str, legs: list[Leg]) -> list[str]:
     from auto_research.sandbox.jail import (
         binary_reachable_in_jail,
         check_os_jail_available,
-        check_os_jail_probe,
         harness_binary,
     )
+    from auto_research.sandbox.runner import check_analysis_probe
 
     from benchmarks.author_bench.brief import BRIEF_PATH
     from benchmarks.author_bench.trial import resolve_base_sha
@@ -244,10 +245,10 @@ def preflight(toolkit_root: Path, base_ref: str, legs: list[Leg]) -> list[str]:
         check_api_key_fallbacks()
     except Exception as exc:  # noqa: BLE001
         problems.append(f"api key fallbacks: {exc}")
-    # With the OS jail on, every author subprocess and every Layer-B pytest runs inside it. A jail
+    # Every author subprocess and every Layer-B pytest runs inside the OS jail. A jail
     # that cannot start, or that breaks the science stack, would otherwise fail identically in all
     # K trials — so it is decided once, here, before anything spends.
-    for check in (check_os_jail_available, check_os_jail_probe):
+    for check in (check_os_jail_available, check_analysis_probe):
         try:
             check()
         except Exception as exc:  # noqa: BLE001 — the check's own message names the fix

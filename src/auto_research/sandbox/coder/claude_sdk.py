@@ -8,12 +8,11 @@ Everything here is specific to that SDK. What the authoring flow needs from it i
 methods of :class:`~auto_research.sandbox.coder.backend.CoderBackend`; the flow itself is defined
 over the working tree, not over this process.
 
-Four wires are worth naming because they are the ones a second harness has to reproduce:
+Three wires are worth naming because they are the ones a second harness has to reproduce:
 
-* **Filesystem gate** — a ``PreToolUse`` hook, which runs first in the SDK's permission flow and
-  fires for every tool call, consulting the shared ``PathGuard`` allow-list in-process.
-* **Git ban** — a ``Bash`` deny-rule, best-effort by construction; the robust backstops are the
-  gate-entry auto-revert and the per-attempt base-ref reset (§9.9).
+* **Jail** — the SDK's CLI runs inside the OS jail (:func:`_jail_launcher`, ``jail.coder_policy``):
+  the allow-list is all it sees, its working tree and its own home all it writes, and ``.git`` is
+  read-only, so the git ban is the kernel's (§9.9).
 * **Escalation** — an in-process SDK MCP server, so the coder's ``message`` tool runs against
   the live lead object and the real HITL connector rather than a copy.
 * **Cost** — the SDK reports a session-cumulative dollar figure, so spend enters the run's meter
@@ -91,123 +90,30 @@ def _make_escalation_server(
     return create_sdk_mcp_server("escalation", tools=tools)
 
 
-def _make_path_confiner(worktree: Path):
-    """DEPRECATED — do not use for confinement (see CLAUDE.md "Loose ends").
+def jail_label(worktree_base: Path) -> str:
+    """The settings-home label of the Claude author whose artifacts dir is ``worktree_base``: its own,
+    since concurrent authors must not share a settings directory (the CLI writes session state into
+    it and the credential is carried in per home). Derived from the **full** path, because several
+    concurrent trials use the same directory *name* — a name-derived label collided across all of
+    them and they raced on one state database."""
+    import hashlib
 
-    A ``can_use_tool`` callback that denied file writes outside the worktree. The official
-    Claude Agent SDK permission flow runs ``can_use_tool`` **last** and **skips it** under
-    ``permission_mode="acceptEdits"`` / when an ``allowed_tools`` rule matches — so it never
-    fired here (it could not gate reads or Bash at all). Superseded by the ``PreToolUse`` hook
-    :func:`_make_fs_guard_hook` (runs first, fires for every tool call) enforcing the shared
-    :class:`~auto_research.sandbox.fs_guard.PathGuard` allow-list. Kept for reference; unwired.
-    """
-    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
-
-    write_tools = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
-    root = worktree.resolve()
-
-    async def can_use_tool(name: str, args: dict[str, Any], ctx: Any) -> Any:
-        if name in write_tools:
-            target = args.get("file_path") or args.get("path") or args.get("notebook_path")
-            if target is not None:
-                resolved = Path(str(target)).resolve()
-                if resolved != root and root not in resolved.parents:
-                    return PermissionResultDeny(message=f"path outside worktree: {target}")
-        return PermissionResultAllow()
-
-    return can_use_tool
+    return f"claude_sdk-{hashlib.sha1(str(Path(worktree_base).resolve()).encode()).hexdigest()[:10]}"
 
 
-_FILE_TOOLS = {"Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep"}
-
-
-def _make_fs_guard_hook(guard):
-    """A Claude Agent SDK ``PreToolUse`` hook enforcing the shared filesystem allow-list
-    (:class:`~auto_research.sandbox.fs_guard.PathGuard`) on the coder.
-
-    The correct gate: ``PreToolUse`` runs **first** in the permission flow and fires for **every**
-    tool call (unlike ``can_use_tool`` — see the deprecated :func:`_make_path_confiner`). File
-    tools are checked by their path argument (exact); ``Bash`` by the absolute paths *named* in its
-    command (best-effort — a subprocess's implicit reads are invisible to the hook; the complete
-    fix is the OS-level jail, §12 / Loose ends). The system's ``auto_research`` repo and governance
-    files are not on the allow-list, so they are denied (§2/§4). Fail-open on an unexpected internal
-    error so a guard bug never bricks authoring.
-    """
-
-    async def hook(input_data, tool_use_id, context):  # noqa: ANN001 — SDK callback signature
-        # One enforcement layer. With the kernel jail on, anything outside the allow-list is not in
-        # the mount namespace at all, so a read fails as *absent* — strictly stronger than this
-        # check. What the check still contributes there is false denials: its command extractor
-        # fails closed on path-ish tokens (§13 [F3]), and on 2026-08-21 it denied
-        # `/lib/red_ixpe.py`, `/pcube_timeseg_` and `/dev/null` to authors working on exactly those
-        # files, which then wrote nothing and were rejected by the gate for an absent manifest
-        # entry. The same ruling was already applied to the Codex harness's approval gate, for the
-        # same reason: turning off one layer must not leave a second one vetoing legitimate work.
-        from auto_research.sandbox.jail import jail_enabled
-
-        if jail_enabled():
-            return {}
-        try:
-            tool = input_data.get("tool_name", "")
-            ti = input_data.get("tool_input") or {}
-            denied: str | None = None
-            if tool in _FILE_TOOLS:
-                target = ti.get("file_path") or ti.get("path") or ti.get("notebook_path")
-                if target is not None and not guard.is_allowed(target):
-                    denied = str(target)
-            elif tool == "Bash":
-                denied = guard.forbidden_in_command(ti.get("command", ""))
-            if denied is not None:
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": input_data.get("hook_event_name", "PreToolUse"),
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": (
-                            f"{denied} is outside the coder's filesystem allow-list "
-                            f"(research_toolkit / obsdb / analyst-env / HEASoft); the auto_research "
-                            f"orchestration repo and governance files are off-limits (§2/§4)."
-                        ),
-                    }
-                }
-        except Exception:  # noqa: BLE001 — a guard bug must never brick authoring (fail-open)
-            return {}
-        return {}
-
-    return hook
-
-
-def _jail_launcher(
-    worktree_base: Path | None, worktree: Path | None = None, readonly: tuple[str, ...] = (),
-) -> str | None:
-    """A wrapper that runs the SDK's own CLI inside the OS jail, or ``None`` when the jail is off.
+def _jail_launcher(worktree_base: Path, worktree: Path | None = None, readonly: tuple[str, ...] = ()) -> str:
+    """A wrapper that runs the SDK's own CLI inside the OS jail.
 
     The SDK accepts a path to the binary (``cli_path``) and builds its own arguments after that, so
     wrapping the *binary* keeps us out of its command line: whatever it decides to pass next
     release still lands inside the jail. The real CLI is resolved by asking the SDK, since recent
     versions ship a bundled one that ``PATH`` cannot see.
     """
-    from auto_research.sandbox.jail import coder_policy, jail_available, jail_enabled, write_launcher
+    from auto_research.sandbox.jail import coder_policy, harness_binary, write_launcher
 
-    if not jail_enabled() or worktree_base is None:
-        return None
-    ok, _ = jail_available()
-    if not ok:
-        return None  # the launch check reports it; run as before rather than not at all
-    try:
-        from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
-
-        real = SubprocessCLITransport._find_cli(
-            SubprocessCLITransport.__new__(SubprocessCLITransport)
-        )
-    except Exception:  # noqa: BLE001 — no CLI to wrap; the SDK will report it as it always did
-        return None
-    # A label of this author's own: concurrent authors must not share a settings directory, since
-    # the CLI writes session state into it and the credential is carried in per home. Derived from
-    # the **full** path, because several concurrent trials use the same directory *name* — a
-    # name-derived label collided across all of them and they raced on one state database.
-    import hashlib
-
-    digest = hashlib.sha1(str(Path(worktree_base).resolve()).encode()).hexdigest()[:10]
+    real = harness_binary("claude_sdk")
+    if real is None:
+        raise RuntimeError("the Claude Agent SDK's CLI cannot be found, so its author cannot start in the jail")
     # BOTH the artifacts directory and the **working tree**. The worktree is where the author
     # reads and writes; binding only ``worktree_base`` left the author's own clone outside its
     # jail, so it silently read the *live* toolkit checkout instead and could write nowhere
@@ -219,35 +125,21 @@ def _jail_launcher(
     writable = [str(worktree_base)] + ([str(worktree)] if worktree is not None else [])
     # ``readonly``: the attempt's candidate environments — the coder runs them, the runtime alone
     # builds them.
-    policy = coder_policy(label=f"claude_sdk-{digest}", extra_rw=tuple(writable), readonly=readonly)
+    policy = coder_policy(label=jail_label(worktree_base), extra_rw=tuple(writable), readonly=readonly)
     launcher = Path(worktree_base)
     launcher.mkdir(parents=True, exist_ok=True)
     return str(write_launcher(launcher / "claude-jailed", str(real), policy))
 
 
-def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int, env: dict[str, str] | None = None, worktree_base: Path | None = None, jail_readonly: tuple[str, ...] = ()):
-    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
+def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int, worktree_base: Path, env: dict[str, str] | None = None, jail_readonly: tuple[str, ...] = ()):
+    from claude_agent_sdk import ClaudeAgentOptions
 
-    from auto_research.sandbox.fs_guard import PathGuard
-
-    # Filesystem jail: a PreToolUse hook (runs first, fires for every tool call) enforcing the
-    # shared config allow-list. Replaces the deprecated can_use_tool confiner, which the SDK
-    # skips under acceptEdits/allow-rules. Inactive when agent_fs_allow is unset (allow-all).
-    fs_guard_hook = _make_fs_guard_hook(PathGuard.from_config())
     kwargs: dict[str, Any] = dict(
         cwd=str(worktree),
         model=coder_model,
         system_prompt=system_prompt,
         setting_sources=[],  # SDK-only: ignore any filesystem .claude/settings
         permission_mode="acceptEdits",
-        hooks={
-            "PreToolUse": [
-                HookMatcher(
-                    matcher="Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep|Bash",
-                    hooks=[fs_guard_hook],
-                )
-            ]
-        },
         mcp_servers={"escalation": escalation_server},
         allowed_tools=[
             "Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep",
@@ -256,24 +148,16 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
             "mcp__escalation__env_solve", "mcp__escalation__env_pin_wheels",
             "mcp__escalation__cand_env_activate",
         ],
-        # The coder never issues git (§9.9): staging/commit is the runtime's job
-        # (``approve_edit`` only, after gate-pass ∧ review-pass). Deny-rules are evaluated
-        # first and apply under acceptEdits; prefix-matching is best-effort (pipes/subshells
-        # can slip), so the per-attempt base-ref reset (``_reset_direct_tree``) is the robust
-        # backstop that drops any commit a coder still lands. Scoped to the coder by being on
-        # the coder's own options, not global settings.
-        disallowed_tools=["Bash(git:*)", "Bash(git)"],
+        # The coder never commits (§9.9): staging/commit is the runtime's job (``approve_edit`` only,
+        # after gate-pass ∧ review-pass). The jail binds ``.git`` read-only (``jail.coder_policy``),
+        # so the kernel refuses every write spelling; reads (`git diff`, `git status`) keep working.
         max_turns=max_turns,
     )
     env = _with_live_anthropic_key(env)
     if env:  # full sourced env (analyst conda + HEASoft); omit when unset so the SDK inherits.
         kwargs["env"] = env
-    launcher = _jail_launcher(worktree_base, worktree, jail_readonly)
-    if launcher:
-        # The OS jail (§12): the guard hook above stays, since it is what tells the model *why* a
-        # path was refused, but the kernel is now what enforces it — including the reads a hook
-        # never sees.
-        kwargs["cli_path"] = launcher
+    # The OS jail (unconditional, D25): the kernel confines every read and write of the author.
+    kwargs["cli_path"] = _jail_launcher(worktree_base, worktree, jail_readonly)
     return ClaudeAgentOptions(**kwargs)
 
 

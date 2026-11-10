@@ -186,13 +186,10 @@ def papers_dir() -> Path:
 
 
 def toolkit_root() -> Path:
-    """Return the ``research_toolkit`` checkout from config/orchestration.yaml.
+    """Return the toolkit checkout: the toolkit contract's ``root`` (``toolkit_contract``)."""
+    from auto_research.toolkit_contract import toolkit
 
-    Key: ``toolkit_root``. Empty when absent (callers that need it to import a
-    toolkit read — e.g. the in-process ``catalog_utils`` data-catalog read — handle
-    an unreadable root gracefully).
-    """
-    return Path(_orch_config().get("toolkit_root", "")).expanduser()
+    return toolkit().root
 
 
 class ProviderRetryPolicy(NamedTuple):
@@ -512,29 +509,104 @@ def sandbox_call_timeout_default() -> int:
         return 300
 
 
-def analysis_environment(config: dict | None = None) -> "Environment | None":
-    """The configured analysis environment as one object (handoff [F18], env plan B1).
-
-    Today's human environment: ``analyze_env`` (the conda prefix), ``analyze_ini_sh`` (its
-    activation), ``repl_init_py`` (the REPL boot file) and ``env_externals`` (software outside conda
-    the activation points at, stamped by the files listed). ``None`` when no prefix is configured.
-    Every reader of those keys builds its process from this object.
-    """
+def human_environments(config: dict | None = None) -> "dict[str, Environment]":
+    """The human's own conda environments a toolkit definition may name as its ``base``
+    (``human_envs``: name → prefix), bare: no activation, no externals. The toolkit names its base
+    by name and this host supplies the prefix, as ``env_externals`` does for externals (A4). Units
+    reach one only through a derived definition layered on it, read-only. Refused (``ValueError``):
+    a name that is not an environment name (lowercase letters, digits, ``_``, ``-``) and a prefix
+    inside the runtime's own conda folder (``agent_conda_dir()``): that holds the pipeline's builds,
+    never a human's environment."""
+    from auto_research.sandbox.env_build import _NAME
     from auto_research.sandbox.envs import Environment
 
     config = config if config is not None else _orch_config()
-    prefix = config.get("analyze_env")
-    if not prefix:
-        return None
-    externals = tuple(declared_externals(config).values())
-    activate = config.get("analyze_ini_sh") or None
-    boot = config.get("repl_init_py") or None
-    return Environment(
-        name=Path(str(prefix)).name, prefix=Path(str(prefix)).expanduser(), owner="human",
-        activate=Path(str(activate)).expanduser() if activate else None,
-        boot=Path(str(boot)).expanduser() if boot else None,
-        externals=externals,
-    )
+    declared = config.get("human_envs") or {}
+    if not isinstance(declared, dict):
+        raise ValueError("write human_envs as {name: conda prefix}")
+    agent = agent_conda_dir().resolve()
+    found = {}
+    for name, prefix in declared.items():
+        if not isinstance(name, str) or not _NAME.fullmatch(name):
+            raise ValueError(f"human_envs: {name!r} is not an environment name; use lowercase letters, "
+                             "digits, '_' and '-' (the name a toolkit definition gives as its base)")
+        path = Path(str(prefix)).expanduser()
+        if path.resolve().is_relative_to(agent):
+            raise ValueError(f"human_envs.{name}: {path} lies in the runtime's conda folder {agent}, which "
+                             "holds the pipeline's builds; name a conda environment of your own")
+        found[name] = Environment(name=name, prefix=path, owner="human")
+    return found
+
+
+def default_definition() -> "EnvDefinition":
+    """The toolkit's default environment definition (``envs/<default_env>/`` of the process's bound
+    toolkit contract, the one every other reader uses)."""
+    from auto_research.sandbox.env_build import read_definition
+    from auto_research.toolkit_contract import toolkit
+
+    contract = toolkit()
+    folder = contract.root / "envs" / contract.default_env
+    try:
+        return read_definition(folder)
+    except ValueError as exc:
+        raise ValueError(f"toolkit {contract.name}: {folder / 'env.yaml'} cannot be read: "
+                         f"{_problems_text(exc)}") from None
+
+
+def analysis_environment(config: dict | None = None) -> "Environment":
+    """The toolkit's default environment as one object: what a unit's own REPL and shell run in, the
+    coder's shell starts in, and a package naming no environment runs and is tested in (toolkit
+    contract ``default_env``). Resolved through :func:`env_build.build`: a derived definition (a
+    human ``base``) builds nothing — its activation and boot file are copied into the runtime's own
+    folder and recorded; a built one reuses its verified prefix, or builds it as the launch
+    reconcile would. Raises when the definition is missing or invalid. Its activation is
+    pipeline-owned: sourced only by the process that runs in it (``envs.in_environment``).
+    ``config`` supplies the host's facts (``human_envs``, ``env_externals``); the definition comes
+    from the bound toolkit contract (:func:`default_definition`)."""
+    from auto_research.sandbox.env_build import build
+
+    config = config if config is not None else _orch_config()
+    definition = default_definition()
+    return build(definition, conda_dir=agent_conda_dir(),
+                 conda_exe="" if definition.base else conda_executable(),
+                 base_envs=human_environments(config), externals=declared_externals(config))
+
+
+def _problems_text(exc: ValueError) -> str:
+    """A definition reader's refusal as one sentence (it raises with a list of problems)."""
+    problems = exc.args[0] if exc.args else str(exc)
+    return "; ".join(map(str, problems)) if isinstance(problems, list) else str(problems)
+
+
+def check_human_envs() -> None:
+    """Preflight: each declared human environment (``human_envs``) has an environment name and is a
+    conda prefix with a Python outside the runtime's conda folder, every definition in the toolkit's
+    ``envs/`` reads (a refusal names its ``env.yaml``), and every derived one names a declared one as
+    its ``base``."""
+    from auto_research.sandbox.env_build import read_definition
+    from auto_research.toolkit_contract import toolkit
+
+    config = _orch_config()
+    try:
+        humans = human_environments(config)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from None
+    problems = [f"human_envs.{name}: {env.prefix} is not a conda environment (no bin/python)"
+                for name, env in humans.items() if not env.python.is_file()]
+    envs_dir = toolkit().root / "envs"
+    for folder in sorted(envs_dir.iterdir()) if envs_dir.is_dir() else ():
+        if not (folder / "env.yaml").is_file():
+            continue
+        try:
+            base = read_definition(folder).base
+        except ValueError as exc:
+            problems.append(f"{folder / 'env.yaml'}: {_problems_text(exc)}")
+            continue
+        if base and base not in humans:
+            problems.append(f"envs/{folder.name} layers on the human environment {base!r}, which human_envs "
+                            f"does not declare (declared: {sorted(humans)}); add {base}: <conda prefix>")
+    if problems:
+        raise RuntimeError("; ".join(problems))
 
 
 def declared_externals(config: dict | None = None) -> "dict[str, External]":
@@ -549,20 +621,59 @@ def declared_externals(config: dict | None = None) -> "dict[str, External]":
     }
 
 
-def env_catalogue(config: dict | None = None) -> "list[Environment]":
-    """Every environment a unit may list and use: the configured analysis environment (human) and
-    each environment the coding pipeline has built (``agent_conda_dir()``), externals resolved from
-    the human's ``env_externals``; a build of another definition than the toolkit's ``envs/`` holds
-    now is marked ``superseded`` (D3c)."""
-    from auto_research.sandbox.env_build import built_environments
+#: Names a private variable cannot take: the declaration's own carrier, the launcher's
+#: (``envs.in_environment`` passes ``AR_SHELL_<VAR>`` beside ``AR_SHELL_PWD``/``AR_SHELL_MARK``) and
+#: what every process start sets itself.
+_RESERVED_PRIVATE = frozenset({"AR_PRIVATE_FOLDERS", "PWD", "MARK", "HOME", "PATH", "TMPDIR"})
+
+
+def private_variables(config: dict | None = None) -> dict[str, str]:
+    """``{variable: separator}``: the variables the declared externals give every process and call
+    a folder of its own (``env_externals.<name>.private``, D19), applied by
+    ``runner.private_folders``. A value is ``<folder><separator><kept>``; the folder is replaced.
+    Refused: an entry that is not a variable name and a non-empty separator, a reserved name, and a
+    variable declared twice (also up to case: each gets the folder ``<variable lower-cased>``)."""
+    import re
 
     config = config if config is not None else _orch_config()
-    analysis = analysis_environment(config)
-    toolkit_root = config.get("toolkit_root")
-    built = built_environments(agent_conda_dir(), declared_externals(config),
-                               {analysis.name: analysis} if analysis else {},
-                               definitions=Path(str(toolkit_root)) / "envs" if toolkit_root else None)
-    return ([analysis] if analysis else []) + [env for env in built if not analysis or env.name != analysis.name]
+    externals = config.get("env_externals") or {}
+    shape = "write env_externals as {name: {root, stamps, private: {VARIABLE: separator}}}"
+    if not isinstance(externals, dict):
+        raise ValueError(shape)
+    found: dict[str, str] = {}
+    owners: dict[str, str] = {}
+    for name, spec in externals.items():
+        private = (spec or {}).get("private") if isinstance(spec or {}, dict) else spec
+        if not isinstance(private or {}, dict):
+            raise ValueError(f"env_externals.{name}: {shape}")
+        for var, sep in (private or {}).items():
+            var = str(var)
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", var) or not isinstance(sep, str) or not sep:
+                raise ValueError(f"env_externals.{name}.private: write each entry as VARIABLE: separator, "
+                                 f"e.g. {{VAR: ';'}}; got {var!r}: {sep!r}")
+            if var in _RESERVED_PRIVATE:
+                raise ValueError(f"env_externals.{name}.private: {var} is reserved for the launcher; "
+                                 f"name the variable the external's tools read")
+            if var.lower() in owners:
+                raise ValueError(f"env_externals.{name}.private: {var} is already declared on "
+                                 f"{owners[var.lower()]}; declare each variable once, on one external")
+            owners[var.lower()] = name
+            found[var] = sep
+    return found
+
+
+def env_catalogue(config: dict | None = None) -> "list[Environment]":
+    """Every environment a unit may list and use: each the coding pipeline has built or derived
+    (``agent_conda_dir()``; the default one among them once :func:`analysis_environment` resolved it),
+    externals resolved from the human's ``env_externals`` and bases from ``human_envs``; a build of
+    another definition than the toolkit's ``envs/`` holds now is marked ``superseded`` (D3c)."""
+    from auto_research.sandbox.env_build import built_environments
+    from auto_research.toolkit_contract import toolkit
+
+    config = config if config is not None else _orch_config()
+    # Definitions from the bound toolkit contract, as every other reader takes them.
+    return built_environments(agent_conda_dir(), declared_externals(config), human_environments(config),
+                              definitions=toolkit().root / "envs")
 
 
 def host_environment() -> "Environment":
@@ -599,8 +710,7 @@ def conda_executable() -> str:
 
 def replay_environment(fingerprint: str, *, runner: Any = None) -> dict:
     """Rebuild the environment state a receipt stamps (its ``env`` fingerprint) from the lock store,
-    into a prefix of its own under ``agent_conda_dir()/replay/`` (env plan B4), jailed when the jail
-    is on. The report (:func:`sandbox.env_build.replay`) adds each recorded external's state now
+    into a prefix of its own under ``agent_conda_dir()/replay/`` (env plan B4), jailed. The report (:func:`sandbox.env_build.replay`) adds each recorded external's state now
     (``same``, ``changed``, ``undeclared``: an external cannot be rebuilt) and writes the recorded
     activation and boot file beside the prefix (``<prefix>.activate.sh`` / ``.boot.py``); ``owner``
     says whose they are (a pipeline environment's are coder-written: source them in a jail). A lock
@@ -611,7 +721,6 @@ def replay_environment(fingerprint: str, *, runner: Any = None) -> dict:
 
     from auto_research.sandbox.env_build import replay
     from auto_research.sandbox.envs import _external_stamp
-    from auto_research.sandbox.jail import jail_enabled
 
     if not re.fullmatch(r"[0-9a-f]{64}", fingerprint or ""):
         raise ValueError("give the full 64-character fingerprint a receipt stamps")
@@ -626,7 +735,7 @@ def replay_environment(fingerprint: str, *, runner: Any = None) -> dict:
             or hashlib.sha256(json.dumps(components, sort_keys=True).encode("utf-8")).hexdigest() != fingerprint):
         raise ValueError(f"the lock filed under {fingerprint[:12]} does not hash to it; it is not that state")
     report = replay(lock, conda_dir=agent_conda_dir(), conda_exe=conda_executable(),
-                    jailed=jail_enabled(), runner=runner or subprocess.run)
+                    runner=runner or subprocess.run)
     current = declared_externals()
     report["externals"] = {
         name: ("undeclared" if name not in current else

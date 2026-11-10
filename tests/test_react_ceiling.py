@@ -645,20 +645,28 @@ def test_a_resumed_turn_that_exhausts_its_caps_fails_the_run(tmp_path):
 
 
 def _hermetic_run(tmp_path, monkeypatch):
-    """`run_research`'s own wiring on a temp config: no preflight, an empty toolkit, no env."""
+    """`run_research`'s own wiring on a temp config: no preflight, an empty toolkit whose default environment is this interpreter."""
 
     async def _noop_preflight(*, human_handler=None, monitor=None):
         return None
 
     monkeypatch.setattr("auto_research.graph.runtime.run_preflight", _noop_preflight)
-    ini = tmp_path / "env.sh"
-    ini.write_text("#!/bin/bash\n", encoding="utf-8")
+    import sys
+
     toolkit = tmp_path / "toolkit"
-    toolkit.mkdir()
-    orch = {"toolkit_root": str(toolkit), "analyze_env": None, "analyze_ini_sh": str(ini),
-            "disabled_tools": [], "mcp_servers": []}
+    (toolkit / "envs" / "analysis").mkdir(parents=True)
+    (toolkit / "envs" / "analysis" / "env.yaml").write_text("purpose: tests\nbase: host\n", encoding="utf-8")
+    orch = {"toolkits": [{"name": "research_toolkit", "root": str(toolkit), "template_package": "xspec_utils",
+                          "authoring_branch": "ai", "default_env": "analysis"}],
+            "human_envs": {"host": sys.prefix},
+            "disabled_tools": []}
     monkeypatch.setattr("auto_research.graph.runtime.load_orchestration_config",
                         lambda *a, **k: orch)
+    from auto_research import toolkit_contract
+
+    toolkit_contract.bind(orch)  # unbound after the test (tests/conftest.py)
+    # The host's facts (`human_envs`) the environment readers take from the configuration file.
+    monkeypatch.setattr("auto_research.env._orch_config", lambda: orch)
     monkeypatch.setattr("auto_research.env.agent_conda_dir", lambda: tmp_path / "conda")
     monkeypatch.setattr("auto_research.env.env_lock_dir", lambda: tmp_path / "conda" / "locks")
 

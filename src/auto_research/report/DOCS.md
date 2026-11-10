@@ -87,7 +87,8 @@ The graph's `compose_report` node calls `publish_report`; the `.tex`/PDF already
   args_json)` (a `$ref` argument is resolved in the code from the parent's stored bytes; the
   toolkit runs at the receipt's stamped commit — the checkout when its HEAD is that commit, else
   that commit extracted with `git archive` into a temp folder; an in-process call with no recorded
-  module imports through its package's `TOOL_MANIFEST`; every argument the runtime placed in the
+  module imports through its package's `TOOL_MANIFEST`, the package being the producer's second
+  segment, so the code works for any declared toolkit name; every argument the runtime placed in the
   call's own folder, an output or a figure path, points at a fresh `tempfile.mkdtemp` folder with
   its file name kept, so a rerun leaves the run's products as they are); `HTML_NAME` (`report.html`).
 - A value reference `{{h#/pointer}}` renders at `provenance.bindings.display_value` (`2.48e7` as
@@ -170,3 +171,4 @@ Compacted 2026-10-19 (every entry); detail in git history.
   `output_args`, `figure_args`) at a fresh folder (plan item B2).
 - 2026-11-04 — Review of B2: the reproduce code's warning names only the other output-like arguments.
 - 2026-11-04 — H2: an `obsdb` input reads `observation <mission> <obsid>` under either layout (`observations.obsid_mission`), so HEASARC's tree names the mission, not the prefix folder.
+- 2026-11-09 — Phase 3 step 0a W2: a toolkit result is told by `toolkit_contract.is_toolkit_producer` (the declared toolkit name), not a `research_toolkit.` prefix: `render.check_table`, the HTML tool name and environment label, and `reproduce_code`, whose package is the producer's second segment (B4).

@@ -57,7 +57,9 @@ class _RecordingProvider(ReadOnlyToolProvider):
 
 def test_live_lead_reads_whole_xspec_help():
     load_dotenv()
-    toolkit_root = Path(load_orchestration_config().get("toolkit_root", "")).expanduser()
+    from auto_research.toolkit_contract import toolkit as toolkit_contract_of
+
+    toolkit_root = toolkit_contract_of(load_orchestration_config()).root
     target = toolkit_root / "xspec_utils" / "lib" / "xspec_help.py"
     if not target.exists():
         pytest.skip(f"{target} not present on this host")

@@ -18,7 +18,7 @@ arrive on their own clock, and a real lead choosing what to do with the time.
 **Cells.** Every behaviour in the design, each asserted on our side of the boundary:
 
 * mechanism cells — a REAL `AuthoringSession` (configured coder member, real harness process,
-  throwaway toolkit clone) driven through the PRODUCTION executors (`execute_drive_coder`,
+  throwaway toolkit clone at `BASE_REF`, the `DU_COUNTS` brief) driven through the PRODUCTION executors (`execute_drive_coder`,
   `execute_wait_coder`, `execute_submit`) with the test standing in for the lead:
   turn end wakes the wait · a coder question wakes it and the answer goes mid-turn · a short
   timeout is raised to the floor and times out while the coder works · a plain message is queued
@@ -58,6 +58,29 @@ LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "coder-wait" / 
 CYCLE_TIMEOUT_S = float(os.getenv("AUTO_RESEARCH_CYCLE_TIMEOUT_S", "5400"))
 # A wake is "prompt" when the wait returns within this many seconds of the event that caused it.
 WAKE_SLACK_S = float(os.getenv("AUTO_RESEARCH_WAKE_SLACK_S", "5"))
+#: This test's own pinned toolkit base: toolkit `main` at f409d09 (2026-11-05), the pressure cells'
+#: base, after the argument-kind and output-kind migrations — the cells build an authoring session
+#: (the coder's structure context reads the toolkit), run the real gate on a submit, and run a real
+#: lead over the toolkit, so the base must carry today's manifests. Checked 2026-11-09 with
+#: `git grep` at f409d09: no per-DU event-count or live-time tool exists; the brief names only the
+#: obs-db's `event_l2/ixpe<obs>_det<n>_evt2_v<NN>[_rej].fits` layout (01002901 holds the plain v01
+#: files, each EVENTS header carrying LIVETIME).
+BASE_REF = "f409d09"
+
+#: The one capability both kinds of cell brief: absent at `BASE_REF`, built only on what exists there.
+DU_COUNTS = {
+    "science_context": (
+        "We need per-DU event counts for an IXPE observation to sanity-check exposure before any "
+        "polarization fit; the toolkit exposes no such summary."
+    ),
+    "expected_behavior": (
+        "ixpe_du_event_counts(ixpe_path, obsid) -> {'du1': int, 'du2': int, 'du3': int} plus each "
+        "DU's live time: find the observation's three Level-2 event files in its obs-db folder "
+        "(event_l2/ixpe<obsid>_det<n>_evt2_v<NN>.fits, the _rej variant where one exists), count the "
+        "rows of each file's EVENTS extension, and read its LIVETIME header keyword."
+    ),
+    "proposed_tool_name": "ixpe_du_event_counts",
+}
 # How long the lead must have been parked in wait_coder before the steer / stop is sent.
 PARKED_FOR_S = float(os.getenv("AUTO_RESEARCH_PARKED_FOR_S", "10"))
 
@@ -72,14 +95,13 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _clone() -> tuple[Path, str]:
-    """A throwaway clone at science_bench's pinned base, outside pytest's rotating basetemp.
+    """A throwaway clone at ``BASE_REF``, outside pytest's rotating basetemp.
 
-    The base is the commit before that question's tool chain existed, so a lead briefed with the
-    request below genuinely has something to author (the stop drill's measured lesson).
+    The base lacks the capability the lead cells' request asks for, so a lead briefed with it
+    genuinely has something to author (the stop drill's measured lesson).
     """
     from auto_research.env import toolkit_root as configured_toolkit_root
     from benchmarks.science_bench.environment import clone_toolkit
-    from benchmarks.science_bench.trial import BASE_REF
 
     clone = Path(tempfile.mkdtemp(prefix="ar_livewait_")) / "toolkit"
     base = clone_toolkit(clone, configured_toolkit_root(), BASE_REF, "ai")
@@ -181,13 +203,16 @@ async def execute_drive_coder(session, arguments):
 
 
 def _build_session(clone: Path, monitor):
-    """The production session builder, configured coder member, the frozen real brief."""
+    """The production session builder, configured coder member, the `DU_COUNTS` brief."""
     from auto_research.sandbox.merge_flow import build_authoring_session
-    from benchmarks.author_bench.brief import load_brief
+    from auto_research.schemas import ToolSpec
+    from auto_research.schemas.toolspec import ValidationDataset
 
     lead = _LeadInbox()
     session = build_authoring_session(
-        load_brief(),
+        ToolSpec(request_kind="new_capability", target_domain="xspec_utils",
+                 disposition="extend_existing",
+                 validation_data=[ValidationDataset(mission="IXPE", obsid="01002901")], **DU_COUNTS),
         lead=lead,
         toolkit_root=clone,
         worktree_base=clone.parent / "authoring",
@@ -546,18 +571,7 @@ def _lead_request_reports():
     """Two worker reports, one carrying a real `tool_request` — what opens the authoring branch."""
     from auto_research.schemas import AnalystReport, AnalystToolRequest
 
-    request = AnalystToolRequest(
-        science_context=(
-            "We need per-DU event counts for an IXPE observation to sanity-check exposure before "
-            "any polarization fit; the toolkit exposes no such summary."
-        ),
-        expected_behavior=(
-            "ixpe_du_event_counts(ixpe_path, obsid) -> {'du1': int, 'du2': int, 'du3': int} read "
-            "from the Level-2 event files, with the per-DU live time alongside."
-        ),
-        proposed_tool_name="ixpe_du_event_counts",
-        validation_data=[{"mission": "IXPE", "obsid": "01002901"}],
-    )
+    request = AnalystToolRequest(**DU_COUNTS, validation_data=[{"mission": "IXPE", "obsid": "01002901"}])
     return [
         AnalystReport(
             summary=(

@@ -1,13 +1,13 @@
 """Dry test of the analyst sandbox environment — run manually, not via pytest.
 
 Mimics what PersistentSandbox does for each tool call:
-  - interpreter: orchestration.yaml::analyze_env / bin / python
-  - env: source analyst_env.sh, then PYTHONPATH = toolkit_root : $PYTHONPATH
+  - interpreter: the toolkit environment's prefix / bin / python
+  - env: source its activate.sh, then PYTHONPATH = toolkit_root : $PYTHONPATH
 Then imports every TOOL_MANIFEST tool module + resolves its callable, and
 exercises the heavy ixpeobssim + PyXSPEC path via a real IXPE load.
 
 Usage (from repo root):
-    source src/auto_research/sandbox/analyst_env.sh
+    source /data/fzhou/research_toolkit/envs/xspec/activate.sh
     export PYTHONPATH=/data/fzhou/research_toolkit:$PYTHONPATH
     /grad/fzhou/.conda/envs/astropy/bin/python tests/dry_analyst_env.py
 """

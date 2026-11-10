@@ -29,7 +29,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from auto_research.config_paths import observations_yaml, orchestration_yaml
+from auto_research.config_paths import observations_yaml
 
 
 #: Kept as a name because callers pass it as a default argument; it resolves through
@@ -187,37 +187,10 @@ def load_observations_config(
 
 
 def _toolkit_root() -> Path:
-    """``toolkit_root`` from ``config/orchestration.yaml`` — the ``research_toolkit`` checkout."""
-    path = orchestration_yaml()
-    try:
-        with path.open("r", encoding="utf-8") as stream:
-            data = yaml.safe_load(stream) or {}
-    except OSError:
-        data = {}
-    return Path(data.get("toolkit_root", "")).expanduser()
+    """The toolkit checkout: the toolkit contract's ``root``."""
+    from auto_research.toolkit_contract import toolkit
 
-
-def _import_healthcheck(toolkit_root: Path):
-    """Import ``research_toolkit``'s detect-only ``healthcheck`` (pure stdlib, dependency-free).
-
-    ``obsdb_catalog`` ships with ``research_toolkit`` at ``toolkit_root`` and is *not*
-    ``*_utils``-named, so the tool registry ignores it — we import it directly, making
-    ``toolkit_root`` importable the same transient way ``ToolkitRegistry`` does (prepend to
-    ``sys.path`` for the import, then remove; the module stays cached in ``sys.modules``).
-    """
-    import importlib
-    import sys
-
-    root_str = str(toolkit_root)
-    inserted = root_str not in sys.path
-    if inserted:
-        sys.path.insert(0, root_str)
-    try:
-        module = importlib.import_module("obsdb_catalog.healthcheck")
-    finally:
-        if inserted:
-            sys.path.remove(root_str)
-    return module.healthcheck
+    return toolkit().root
 
 
 def check_catalog_health(
@@ -228,7 +201,8 @@ def check_catalog_health(
     """Launch-time preflight (no LLM): assert every mission's local data catalog is healthy.
 
     Delegates to ``research_toolkit``'s detect-only ``obsdb_catalog.healthcheck`` (pure
-    standard library, never writes) over each configured mission's ``obs_db_path``. It flags
+    standard library, never writes) over each configured mission's ``obs_db_path``, run inside the
+    analysis jail (``runner.call_in_jail``; the orchestrator imports no toolkit code, D25). It flags
     a malformed/unparseable ``catalog.json``, catalogued-but-missing files,
     ``levels_present``/``max_level`` inconsistency, a regressed ``max_level``, and
     on-disk-but-uncatalogued files (CLAUDE.md §9.5 catalog provenance). Every mission's drift
@@ -238,8 +212,9 @@ def check_catalog_health(
     ``True``), and so is a root with no mission yet, provided the root exists and is writable
     (H2). Registered in ``auto_research.preflight``.
     """
+    from auto_research.sandbox.runner import call_in_jail
+
     tk_root = Path(toolkit_root).expanduser() if toolkit_root is not None else _toolkit_root()
-    healthcheck = _import_healthcheck(tk_root)
     cfg_all = load_observations_config(config_path)
     # An empty root is a healthy one (H2): `acquire` creates each mission's folder and catalog on
     # its first observation, so the root itself must exist and take writes.
@@ -257,7 +232,9 @@ def check_catalog_health(
         )
     problems: dict[str, object] = {}
     for mission, cfg in cfg_all.missions.items():
-        result = healthcheck(str(cfg.obs_db_path))
+        # The toolkit's code runs only in the jail (D25): one jailed call per mission.
+        result = call_in_jail("obsdb_catalog.healthcheck", "healthcheck", [str(cfg.obs_db_path)],
+                              toolkit_root=tk_root, label="catalog-health")
         if result is not True:
             problems[mission] = result
     if problems:

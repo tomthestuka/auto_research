@@ -6,7 +6,23 @@ it verifies an authored tool against properties that must hold and returns a mac
 readable :class:`~auto_research.schemas.merge.GateReport` fed back to the author on
 rejection (L2).
 
-Two layers:
+It is the toolkit's CI pipeline (D18): named jobs (:data:`JOBS`), each ``pass | fail |
+skip(reason)`` on the report in order, every one required — the orchestration holds the list
+and each job's checks, and nothing a toolkit declares removes one. ``passed`` comes from the
+jobs alone (:func:`_passed`). The jobs, by the checks each runs:
+  change_scope    structural.changes_allowed, structural.tests_left_tree_unchanged
+  environments    structural.env_resolves, structural.env_definition.<name>, layer_b.env.<name>
+  no_fabrication  no_fabrication.*
+  structural      structural.test_present, .tool_manifest_entry, .manifest_keys, .manifest_literal
+  minting         structural.argument_kinds, provenance.figure_shape, layer_b.returns.* (G15)
+  tests           layer_b.pytest, determinism, layer_b.data, layer_b.export
+  regression      layer_b.regression
+The test jobs run the toolkit's test classes (the contract's ``test_classes``): a change's own
+tests of every class but ``live`` (no network here), twice; the earlier ``fast`` ones once; each
+``data("<name>")`` test on the data set config ``test_data`` names, bound read-only and named by
+``TOOLKIT_DATA_<NAME>`` — a data test skipped here fails the change.
+
+The checks keep their two historical layers on the report (``layer_a``/``layer_b``):
   Layer A (generic, domain-blind)  — the no-fabrication scan, structural checks,
                                      determinism (same per-test outcomes across two
                                      runs), provenance.
@@ -52,7 +68,10 @@ import yaml
 
 from auto_research.config_paths import code_gate_yaml, orchestration_yaml
 from auto_research.sandbox import returns
-from auto_research.schemas import CheckResult, GateReport, ToolSpec
+from auto_research.sandbox.registry import manifest_literal, manifest_rebinding
+from auto_research.schemas import GATE_JOBS, CheckResult, GateJob, GateReport, ToolSpec
+from auto_research.schemas.merge import jobs_pass
+from auto_research.toolkit_contract import toolkit
 
 
 # ----------------------------------------------------------------------------
@@ -79,8 +98,13 @@ def _code_gate_config() -> dict:
 # Target enumeration — which .py files (and which added lines) the scan covers
 # ----------------------------------------------------------------------------
 
-# A top-level package only: `obsdb_catalog/evil_utils/` is inside the protected catalog writer.
-_TOOLKIT_PKG_RE = re.compile(r"^[A-Za-z0-9_]+_utils(/|$)")
+def _in_package(rel: str) -> bool:
+    """Whether a toolkit-relative path is a top-level package (the toolkit contract's
+    ``package_glob``) or inside one. Top-level only: `obsdb_catalog/evil_utils/` is inside the
+    protected catalog writer."""
+    return toolkit().is_package(rel.split("/", 1)[0])
+
+
 #: A software-environment definition file (env plan B3c): ``envs/<name>/<one of its files>``.
 _ENV_DEF_RE = re.compile(
     r"^envs/([a-z0-9][a-z0-9_-]{0,47})/(?:env\.yaml|env\.lock|env\.pip|activate\.sh|boot\.py)$"
@@ -99,7 +123,7 @@ def _gated(rel: str) -> bool:
         rel.encode("utf-8")  # a name that is not UTF-8 (surrogate-escaped) is never a judged name
     except UnicodeEncodeError:
         return False
-    return bool((_TOOLKIT_PKG_RE.search(rel) or _ENV_DEF_RE.match(rel)) and not re.search(r"[*?\[\\]", rel)
+    return bool((_in_package(rel) or _ENV_DEF_RE.match(rel)) and not re.search(r"[*?\[\\]", rel)
                 and Path(rel).name not in (".gitattributes", ".gitmodules", ".gitignore"))
 
 
@@ -212,9 +236,6 @@ def collect_deleted(worktree: Path) -> list[str]:
                    and (not os.path.lexists(worktree / rel) or (worktree / rel).is_dir())})
 
 
-_PKG_SEGMENT_RE = re.compile(r"[A-Za-z0-9_]+_utils")
-
-
 def _touched_packages(worktree: Path, targets: dict[Path, set[int] | None]) -> dict[str, Path]:
     """Map each touched ``*_utils`` package name → its package root under the worktree.
 
@@ -228,7 +249,7 @@ def _touched_packages(worktree: Path, targets: dict[Path, set[int] | None]) -> d
     pkgs: dict[str, Path] = {}
     for path in targets:
         for part in path.relative_to(worktree).parts:
-            if _PKG_SEGMENT_RE.fullmatch(part):
+            if toolkit().is_package(part):
                 pkgs.setdefault(part, worktree / part)
                 break
     return pkgs
@@ -842,11 +863,11 @@ def check_structural(
     out.append(CheckResult(
         name="structural.changes_allowed", layer="A", passed=not stray,
         detail="" if not stray else (
-            f"changes outside a *_utils package or an environment definition: {stray}. Toolkit "
-            "code lives in <domain>_utils/{lib,skills,tests} (§9.2); an environment in "
+            f"changes outside a package ({toolkit().package_glob}) or an environment definition: "
+            f"{stray}. Toolkit code lives in <package>/{{lib,skills,tests}}; an environment in "
             "envs/<name>/{env.yaml,env.lock,env.pip,activate.sh,boot.py}. Anything else — the "
-            "catalog writer, repo-root files, scratch — is not the coder's to edit: message the "
-            "lead (message to='lead') instead."
+            "catalog writer, repo-root files, scratch — belongs to the lead: message the lead "
+            "(message to='lead') about it."
         ),
     ))
     out.extend(check_env_definitions(
@@ -879,10 +900,35 @@ def check_structural(
         key_report.append(f"{pkg_name}: {sorted(keys) if keys else 'no skills/__init__.py TOOL_MANIFEST'}")
     detail = "" if found else (
         f"no TOOL_MANIFEST entry for {name!r} in any touched package "
-        f"[{'; '.join(key_report) if key_report else 'no *_utils package touched'}]"
+        f"[{'; '.join(key_report) if key_report else 'no package touched'}]"
     )
     out.append(CheckResult(
         name="structural.tool_manifest_entry", layer="A", passed=found, detail=detail,
+    ))
+    # Every key of a touched package reads `<toolkit name>.<package>.<tool>` (the toolkit contract):
+    # the registry serves no other key, and the next launch refuses one.
+    wrong = [why for pkg_name, pkg_root in packages.items()
+             if (pkg_root / "skills" / "__init__.py").is_file()
+             for key in _manifest_keys((pkg_root / "skills" / "__init__.py").read_text(encoding="utf-8"))
+             if (why := toolkit().key_problem(key, pkg_name))]
+    out.append(CheckResult(
+        name="structural.manifest_keys", layer="A", passed=not wrong,
+        detail="" if not wrong else "manifest keys outside the toolkit's naming: " + "; ".join(wrong),
+    ))
+    # The gate and the registry read the manifest as one literal (``registry.manifest_literal``); the
+    # REPL imports the package: the two agree only when nothing else binds or changes it. A package's tests/ run in their own process
+    # and are exempt; every other source is the package's.
+    rebound = [why for path in targets
+               if str(path).endswith(".py") and Path(path.relative_to(worktree)).parts[1:2] != ("tests",)
+               for why in manifest_rebinding(str(path.relative_to(worktree)),
+                                              path.read_bytes().decode("utf-8", "replace"))]
+    out.append(CheckResult(
+        name="structural.manifest_literal", layer="A", passed=not rebound,
+        detail="" if not rebound else (
+            "; ".join(rebound) + ". The manifest is one dict literal, TOOL_MANIFEST = {...}, in "
+            "<package>/skills/__init__.py, which <package>/__init__.py re-exports with "
+            "`from .skills import TOOL_MANIFEST`; write every entry inside that literal."
+        ),
     ))
 
     # (d) every argument of every tool in a touched package declares its kind (and an optional
@@ -895,7 +941,7 @@ def check_structural(
         manifest = pkg_root / "skills" / "__init__.py"
         if not manifest.is_file():
             continue
-        entries = _manifest_literal(manifest.read_text(encoding="utf-8"))
+        entries = manifest_literal(manifest.read_text(encoding="utf-8"))
         if entries is None:
             unchecked.append(f"{pkg_name}: TOOL_MANIFEST is not a pure-data dict literal")
             continue
@@ -911,29 +957,6 @@ def check_structural(
         ),
     ))
     return out
-
-
-def _manifest_literal(source: str) -> dict | None:
-    """The ``TOOL_MANIFEST`` dict literal evaluated as data (no code runs), or ``None`` when the
-    source does not parse or the manifest is not a literal."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names = [node.target.id]
-        else:
-            continue
-        if "TOOL_MANIFEST" in names:
-            try:
-                value = ast.literal_eval(node.value)
-            except (ValueError, SyntaxError, TypeError):
-                return None
-            return value if isinstance(value, dict) else None
-    return None
 
 
 def untracked_ignore_files(worktree: Path) -> list[str]:
@@ -1065,14 +1088,14 @@ def check_env_definitions(
     externals only from the human's declared list) and must ship with a package that runs in it:
     a touched package whose ``tool_config.yaml`` names it (``env: <name>``). One result per
     definition; none when the changeset touches no definition."""
-    from auto_research.env import analysis_environment, declared_externals
+    from auto_research.env import declared_externals, human_environments
     from auto_research.sandbox.env_build import validate
 
     names = sorted({m.group(1) for r in changes if (m := re.match(r"^envs/([^/]+)/", r))})
     # Every package this session works on that names an environment must resolve to a
     # definition: the brief's target package, and every package the changeset touches.
     naming = dict(packages)
-    if target_domain and _PKG_SEGMENT_RE.fullmatch(target_domain) and (worktree / target_domain).is_dir():
+    if target_domain and toolkit().is_package(target_domain) and (worktree / target_domain).is_dir():
         naming.setdefault(target_domain, worktree / target_domain)
     from auto_research.sandbox.env_build import _NAME
 
@@ -1095,25 +1118,34 @@ def check_env_definitions(
         ))
     if not names:
         return out
-    human = analysis_environment()
-    bases = {human.name: human} if human is not None else {}
+    bases = human_environments()
     externals = declared_externals()
     for name in names:
         if not (worktree / "envs" / name).exists():
             # A deleted definition (B3c-4 drops its build from the catalogue at commit): fine
             # unless a package anywhere in the toolkit still runs in it.
-            still = sorted(p.name for p in worktree.glob("*_utils") if p.is_dir() and _package_env(p) == name)
+            # A package naming none runs in the toolkit's default environment, as a unit's REPL and
+            # shell do: that definition stays.
+            default = toolkit().default_env
+            still = [p for p in toolkit().packages(worktree) if (_package_env(worktree / p) or default) == name]
+            detail = "" if not still else (f"envs/{name} is deleted but {', '.join(still)} still name it "
+                                           "in tool_config.yaml: point them at another env, or keep it.")
+            if name == default:
+                detail = (f"envs/{name} is the toolkit's default environment: a unit's REPL and shell, and "
+                          "every package naming no environment, run in it. Keep it, and change it in place.")
             out.append(CheckResult(
-                name=f"structural.env_definition.{name}", layer="A", passed=not still,
-                detail="" if not still else (f"envs/{name} is deleted but {', '.join(still)} still name it "
-                                             "in tool_config.yaml: point them at another env, or keep it."),
+                name=f"structural.env_definition.{name}", layer="A", passed=not detail, detail=detail,
             ))
             continue
         problems = validate(worktree / "envs" / name, base_envs=bases, externals=externals)
-        if name not in users.values():
+        if name not in {env or toolkit().default_env for env in users.values()}:
             problems.append(
-                f"no touched package names envs/{name}: add `env: {name}` to the tool_config.yaml "
-                "of the package whose tools run in it, so its tests run there."
+                (f"envs/{name} is the toolkit's default environment, and no touched package runs in it: "
+                 "change it together with a package that runs in it (one whose tool_config.yaml names "
+                 "no env), so that package's tests run in the changed definition.")
+                if name == toolkit().default_env else
+                (f"no touched package names envs/{name}: add `env: {name}` to the tool_config.yaml "
+                 "of the package whose tools run in it, so its tests run there.")
             )
         out.append(CheckResult(
             name=f"structural.env_definition.{name}", layer="A", passed=not problems,
@@ -1222,6 +1254,118 @@ def _bounded_text(text: str, cap: int) -> str:
 _REGRESSION_SHOWN = 10
 
 
+def _gate_data() -> dict[str, Path]:
+    """The data sets the gate gives its test run: config ``test_data`` (``toolkit_contract.test_data``),
+    each whose folder exists, bound read-only and named to the tests by ``TOOLKIT_DATA_<NAME>``."""
+    from auto_research.toolkit_contract import test_data
+
+    return {name: folder for name, folder in test_data(_orchestration_config()).items() if folder.is_dir()}
+
+
+def ci_test_rules() -> str:
+    """The test-class rules the CI pipeline applies, and the data sets it provides (``_gate_data``),
+    as the lead reads them where it briefs a coding chain (W6): model-facing text, one paragraph."""
+    from auto_research.toolkit_contract import data_variable
+
+    try:
+        provided = sorted(_gate_data())
+    except Exception:  # noqa: BLE001 — a config gap names no data set; the rules still hold
+        provided = []
+    sets = (", ".join(f"{name} (read from {data_variable(name)})" for name in provided)
+            if provided else "none, so a tool's tests run on synthetic inputs under tmp_path")
+    return ("The CI pipeline runs every test of a change, and each one runs and passes: a skipped or "
+            "xfail test fails the change. A test marked live (it reaches the network) is listed for "
+            "the co-lead to judge, and the change also needs tests that run offline. Real data "
+            "reaches a test through a data set: a test marked data(\"<name>\") reads the set's folder "
+            f"from TOOLKIT_DATA_<NAME>. Data sets the CI pipeline provides: {sets}.")
+
+
+def _junit_classes(junit_path: Path) -> dict[str, tuple[list[str], str, bool]]:
+    """``{test_id: (data sets, skip reason, xfail)}`` for every test a ``--junitxml`` report holds, from
+    the labels ``ar_test_classes`` adds: one ``data`` property per data set a test names, and
+    ``xfail`` for a test marked so (an XPASS reads as a pass in JUnit). The reason is ``""`` unless
+    the test was skipped (an XFAIL is a skip there). Ids as in :func:`_parse_junit_outcomes`."""
+    try:
+        root = ET.parse(str(junit_path)).getroot()
+    except (OSError, ET.ParseError):
+        return {}
+    out: dict[str, tuple[list[str], str, bool]] = {}
+    for case in root.iter("testcase"):
+        props = [(p.get("name"), p.get("value", "")) for p in case.iter("property")]
+        skipped = next((c for c in case if c.tag == "skipped"), None)
+        reason = "" if skipped is None else (skipped.get("message") or (skipped.text or "").strip() or "skipped")
+        out[f"{case.get('classname', '')}::{case.get('name', '')}"] = (
+            sorted({v for n, v in props if n == _DATA_PROPERTY}), reason, any(n == _XFAIL_PROPERTY for n, _ in props))
+    return out
+
+
+def _junit_data_tests(junit_path: Path) -> dict[str, tuple[list[str], str]]:
+    """``{test_id: (data sets, skip reason)}`` for the tests of the ``data`` class (:func:`_junit_classes`)."""
+    return {t: (names, reason) for t, (names, reason, _x) in _junit_classes(junit_path).items() if names}
+
+
+def _collected(out: str) -> list[str]:
+    """The test ids a ``pytest -q --collect-only`` run printed (``<file>.py::<name>`` lines), once each."""
+    return list(dict.fromkeys(m.group(0) for line in out.splitlines()
+                              if (m := re.fullmatch(r"\S+\.py::\S.*", line.strip()))))
+
+
+def _unverified(junit_path: Path) -> list[str]:
+    """One line per test of the change that ran without being verified: skipped (a data test's skip is
+    :func:`_data_skips`'), or marked xfail, whatever its outcome."""
+    return [f"{t} was skipped: {reason}" if reason else f"{t} is marked xfail"
+            for t, (names, reason, xfail) in sorted(_junit_classes(junit_path).items())
+            if (reason and not names) or (xfail and not reason)]
+
+
+def _data_skips(tests: dict[str, tuple[list[str], str]]) -> list[str]:
+    """One line per skipped data test: its id, the data sets it needs and why it was skipped."""
+    return [f"{test_id} (data {', '.join(names)}) was skipped: {reason}"
+            for test_id, (names, reason) in sorted(tests.items()) if reason]
+
+
+def _data_skip_detail(lines: list[str]) -> str:
+    """What a coder reads when a data test was skipped in the gate."""
+    provided = ", ".join(sorted(_gate_data())) or "none"
+    return ("A data test runs in the CI pipeline on the data set it names, and the pipeline runs every one: "
+            + "; ".join(lines) + f". Data sets this pipeline provides: {provided}. Name one of them in "
+            "data(\"<name>\") and read its folder from TOOLKIT_DATA_<NAME>, or give the test a "
+            "synthetic input under tmp_path; when the change needs another data set, message the lead.")
+
+
+#: The pytest plugin the gate loads into every test run: it labels each test of the toolkit's ``data``
+#: class in the JUnit report with one ``data`` property per data set it names, so the gate counts
+#: those skipped from the report itself. Markers come from the contract (``test_classes.data``).
+_DATA_PROPERTY = "data"
+_XFAIL_PROPERTY = "xfail"
+_CLASSES_PLUGIN = "ar_test_classes"
+_CLASSES_SOURCE = '''\
+import os
+
+
+def pytest_collection_modifyitems(config, items):
+    marker = os.environ["AR_DATA_MARKER"]
+    for item in items:
+        for mark in item.iter_markers(marker):
+            item.user_properties.append((%r, str(mark.args[0]) if mark.args else ""))
+        if _expects_failure(item):
+            item.user_properties.append((%r, "1"))
+
+
+def _expects_failure(item):
+    """Whether an xfail mark applies to the test: pytest's own evaluation of its conditions (a
+    conditional ``xfail(False, ...)`` does not)."""
+    if item.get_closest_marker("xfail") is None:
+        return False
+    try:
+        from _pytest.skipping import evaluate_xfail_marks
+    except ImportError:  # an older pytest: a mark whose literal condition is False does not apply
+        return any(not (mark.args and mark.args[0] is False) and mark.kwargs.get("condition", True) is not False
+                   for mark in item.iter_markers("xfail"))
+    return evaluate_xfail_marks(item) is not None
+''' % (_DATA_PROPERTY, _XFAIL_PROPERTY)
+
+
 def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[bool, str]:
     """Decide Layer B pass/fail from the first run's exit code + per-test outcome map.
 
@@ -1236,31 +1380,26 @@ def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[boo
         return False, _bounded_pytest_output(out1)
     if not any(outcome == "PASSED" for outcome in outcomes.values()):
         return False, (
-            f"Layer-B suite exited 0 but no test PASSED "
+            f"The change's test suite exited 0 but no test PASSED "
             f"({len(outcomes)} collected, all skipped/none executed) — the tool was not "
-            f"verified (§9.4). Point the tests at the ToolSpec validation ObsID via "
-            f"config/obs_db_path so they actually run, not a hardcoded or off-host path.\n"
+            f"verified. Give the tool a test that runs here: on a synthetic input under "
+            f"tmp_path, or, for real data, a test of the data class (data(\"<name>\"), its folder "
+            f"read from TOOLKIT_DATA_<NAME>), which runs on a data set the CI pipeline provides.\n"
             + out1[-1500:]
         )
     return True, ""
 
 
-#: The toolkit's fast tests (its root ``conftest.py``: unmarked; ``slow`` and ``live`` are marked),
-#: as a pytest ``-m`` expression. The marker names are a toolkit-contract item; this is their one
-#: place on our side.
-FAST_TESTS = "not slow and not live"
-
-
 async def _default_test_runner(
     worktree: Path, test_paths: list[str], *, timeout_s: int = 900,
     returns_tools: dict[str, tuple[str, str]] | None = None, masked: Path | None = None,
-    environment: Any | None = None, regression: list[str] | tuple[str, ...] = (),
+    environment: Any, regression: list[str] | tuple[str, ...] = (),
 ) -> dict:
     """Run the worktree's tests twice and compare **per-test outcomes** for determinism.
 
-    Reuses the ``analyze_env`` / ``analyze_ini_sh`` env-source pattern from
-    ``sandbox/runner.py`` so HEASoft/XSPEC are available; PYTHONPATH points at the
-    worktree so the freshly-authored package imports.
+    Runs in an environment of the toolkit, started by the shared launcher as the REPL is, so the
+    package's stack and externals are there; PYTHONPATH points at the worktree so the
+    freshly-authored package imports.
 
     Each run writes a JUnit XML report (``--junitxml``) parsed into a ``{test_id: outcome}``
     map; the run is deterministic ⇔ the two maps are identical. This ignores log/timing/
@@ -1273,77 +1412,64 @@ async def _default_test_runner(
     (validation data absent / hardcoded / off-host) also exits 0, and merging it would land a
     tool that never ran (§9.4). Nothing verified ⇒ fail, not silent pass.
 
-    ``environment`` (B3c-2): a pipeline environment the tested package names, built from the judged
-    definition. Its Python runs the tests, its activation sourced inside the jail
+    ``environment`` (B3c-2): the environment the tested package names (the toolkit's
+    ``default_env`` for a package naming none), built from the judged definition by
+    :func:`_gate_environment`. Its Python runs the tests, its activation sourced inside the jail
     (:func:`envs.in_environment`, never in this process: it is coder-written and not yet reviewed),
-    its prefix and activation copy bound read-only. ``None``: the analysis environment, as before.
+    its prefix and activation copy bound read-only.
     """
     import os
 
-    from auto_research.sandbox.runner import with_private_param_dir
+    from auto_research.sandbox.runner import private_folders
 
     cfg = _orchestration_config()
-    from auto_research.env import analysis_environment
+    from auto_research.env import private_variables
 
-    analysis = analysis_environment(cfg)
-    python_exec = str(analysis.python) if analysis is not None else "python"
+    python_exec = str(environment.python)
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
+    extra_ro = tuple(str(p) for p in (environment.prefix,
+                                      *((environment.activate.parent,) if environment.activate else ())))
 
-    if analysis is not None:
-        base_env = analysis.activation_env()
-    elif cfg.get("analyze_ini_sh"):  # an init script with no prefix: sourced clean, as before
-        from auto_research.sandbox.runner import _source_ini_env
+    from auto_research.toolkit_contract import data_variable
 
-        base_env = dict(_source_ini_env(cfg["analyze_ini_sh"]))
-    else:
-        base_env = dict(os.environ)
-    existing = base_env.get("PYTHONPATH", "")
-    env = {**base_env, "PYTHONPATH": str(worktree) + (":" + existing if existing else "")}
-    extra_ro: tuple[str, ...] = ()
-    if environment is not None:
-        python_exec = str(environment.python)
-        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
-        extra_ro = tuple(str(p) for p in (environment.prefix,
-                                          *((environment.activate.parent,) if environment.activate else ())))
+    classes = toolkit().test_classes
+    # Each data set the host provides, named to the tests (the toolkit's root conftest reads it).
+    data_env = {data_variable(name): str(folder) for name, folder in _gate_data().items()}
 
     def _run(junit_path: str, paths: list[str] | None = None) -> tuple[int, str, dict[str, str]]:
         # The return check's recorder (G15) loads in both runs, so the two argvs stay identical for
         # the determinism compare; each run records into its own directory beside its JUnit file.
-        plugin_args, run_env = returns.install(
-            Path(junit_path).with_suffix(".returns"), returns_tools or {}, env,
-        )
-        argv = [python_exec, "-m", "pytest", "-p", "no:cacheprovider", *plugin_args, "-q",
-                f"--junitxml={junit_path}", *(test_paths if paths is None else paths)]
-        if environment is not None:
-            # A clean start in the environment, inside the jail below (the shared launcher).
-            import shlex
+        plugin_dir = Path(junit_path).with_suffix(".returns")
+        plugin_args, run_env = returns.install(plugin_dir, returns_tools or {}, {**env, **data_env})
+        # The test-class labels (`data` tests in the JUnit report), from the same folder.
+        (plugin_dir / f"{_CLASSES_PLUGIN}.py").write_text(_CLASSES_SOURCE, encoding="utf-8")
+        run_env["AR_DATA_MARKER"] = classes.data
+        # The change's own tests: every class but live (no network here); `paths` brings its own selection.
+        argv = [python_exec, "-m", "pytest", "-p", "no:cacheprovider", *plugin_args, "-p", _CLASSES_PLUGIN, "-q",
+                f"--junitxml={junit_path}",
+                *(["-m", f"not ({classes.live})", *test_paths] if paths is None else paths)]
+        # A clean start in the environment, inside the jail below (the shared launcher).
+        import shlex
 
-            from auto_research.sandbox.envs import in_environment
+        from auto_research.sandbox.envs import in_environment
 
-            script = in_environment(environment, f'{shlex.quote(python_exec)} "$@"', worktree, pass_args=True,
-                                    keep=("AR_RETURNS_OUT", "AR_RETURNS_TOOLS", "AR_RETURNS_COPY_CAP", "PYTHONPATH"))
-            argv = ["/bin/bash", "--noprofile", "--norc", "-c", script, "_", *argv[1:]]
+        script = in_environment(environment, f'{shlex.quote(python_exec)} "$@"', worktree, pass_args=True,
+                                keep=("AR_RETURNS_OUT", "AR_RETURNS_TOOLS", "AR_RETURNS_COPY_CAP", "PYTHONPATH",
+                                      "AR_DATA_MARKER", *data_env))
+        argv = ["/bin/bash", "--noprofile", "--norc", "-c", script, "_", *argv[1:]]
         # The OS jail, with **no network** (§12): a mergeability verdict that can reach the network
         # is a verdict that depends on something other than the data on disk, and §9.4's premise is
         # real local input. Verified against all 30 existing Layer-B suites before being turned on.
         run_env = {**run_env, "PYTHONNOUSERSITE": "1"}
-        unjailed = list(argv)
         argv = _jailed_pytest(argv, junit_path=junit_path, worktree=worktree, masked=masked, extra_ro=extra_ro)
-        # Its own HEASoft parameter folder (F23), shared by both runs like the private /tmp.
+        # Its own folder for each declared private variable (F23), shared by both runs like the
+        # private /tmp. In an environment, the launcher puts the kept part back after the activation
+        # (an activation may point the variable at the real home's folder, F23).
         private = _gate_private_tmp(junit_path)
-        jailed = argv != unjailed
-        run_env = with_private_param_dir(
-            run_env, "/tmp/pfiles" if jailed else private / "pfiles",
-            create=private / "pfiles",
-        )
-        if environment is not None:
-            # The launcher puts this writable half back after the activation (HEASoft's init points
-            # PFILES at the real home's folder, F23).
-            (private / "pfiles").mkdir(parents=True, exist_ok=True)
-            run_env["PFILES"] = "/tmp/pfiles" if jailed else str(private / "pfiles")
+        run_env, _ = private_folders(run_env, private_variables(cfg), at="/tmp", create=private, alone=True)
         # One pytest scratch folder for both runs, which pytest wipes when each run starts: run 1's
-        # scratch is gone before run 2 with the jail on or off, whatever TMPDIR says.
-        basetemp = "/tmp/pytest-gate" if jailed else str(private / "pytest-gate")
-        argv = [*argv, f"--basetemp={basetemp}"]
+        # scratch is gone before run 2, whatever TMPDIR says.
+        argv = [*argv, "--basetemp=/tmp/pytest-gate"]
         try:
             proc = subprocess.run(
                 argv,
@@ -1364,6 +1490,11 @@ async def _default_test_runner(
     # changeset (collect_targets) or survive a later git clean.
     with tempfile.TemporaryDirectory() as td:
         rc1, out1, map1 = _run(str(Path(td) / "junit1.xml")) if test_paths else (0, "", {})
+        data1 = _junit_data_tests(Path(td) / "junit1.xml") if test_paths else {}
+        unverified1 = _unverified(Path(td) / "junit1.xml") if test_paths else []
+        # The change's live tests, collected only (nothing runs): the co-lead reviews each.
+        live1 = _collected(_run(str(Path(td) / "junit_live.xml"),
+                                ["--collect-only", "-m", classes.live, *test_paths])[1]) if test_paths else []
         # Run 1's pytest scratch goes before run 2 (human ruling 2026-10-06): a toolkit suite can
         # leave tens of GB there (measured: 65 GB in 10 min), and two runs' worth filled the disk.
         for scratch in _gate_private_tmp(str(Path(td) / "junit1.xml")).glob("pytest-of-*"):
@@ -1380,14 +1511,16 @@ async def _default_test_runner(
             ignored = [f"--ignore={path}" for path in test_paths]
             failing: dict[str, str] = {}  # test id -> what it returned
             unfinished: list[tuple[str, str]] = []  # (what happened, pytest output)
+            data_skipped: list[str] = []  # an earlier data test the gate skipped fails the change too
             seen = {(c.name, c.detail) for c in return_checks}
             for index, folder in enumerate(regression):
                 junit3 = Path(td) / f"junit_regression{index}.xml"
                 # junit_logging=all: each failure's captured output travels with it in the report.
-                rc3, out3, map3 = _run(str(junit3), ["-m", FAST_TESTS, "-o", "junit_logging=all", *ignored, folder])
+                rc3, out3, map3 = _run(str(junit3), ["-m", classes.fast, "-o", "junit_logging=all", *ignored, folder])
                 texts = _junit_failures(junit3)
                 broken = [t for t, outcome in map3.items() if outcome not in ("PASSED", "SKIPPED")]
                 failing.update({t: texts.get(t, "") for t in broken})
+                data_skipped += _data_skips(_junit_data_tests(junit3))
                 if rc3 == 2 and broken:
                     unfinished.append((f"pytest stopped at a collection error in {folder}, so its other tests "
                                        "ran no further", ""))
@@ -1412,7 +1545,9 @@ async def _default_test_runner(
                 parts.append(f"and {len(rest)} more earlier tests that fail with this change: "
                              + ", ".join(rest[:20]) + (f" and {len(rest) - 20} more" if len(rest) > 20 else ""))
             parts += [what + (":\n" + _bounded_text(out, share) if out else ".") for what, out in unfinished]
-            ok = not (failing or unfinished)
+            if data_skipped:
+                parts.append(_data_skip_detail(data_skipped))
+            ok = not (failing or unfinished or data_skipped)
             regression_checks.insert(0, CheckResult(
                 name="layer_b.regression", layer="B", passed=ok,
                 detail="" if ok else "\n\n".join(
@@ -1423,6 +1558,27 @@ async def _default_test_runner(
     if test_paths:
         passed, detail = _layer_b_verdict(rc1, map1, out1)
         results.append(CheckResult(name="layer_b.pytest", layer="B", passed=passed, detail=detail))
+        if data1:
+            # A data test the gate skipped fails the change (counted from run 1's JUnit report).
+            skipped = _data_skips(data1)
+            results.append(CheckResult(
+                name="layer_b.data", layer="B", passed=not skipped,
+                detail=_data_skip_detail(skipped) if skipped else f"{len(data1)} data tests ran"))
+        # Every other test of the change runs and passes here: a skip or an xfail verifies nothing.
+        results.append(CheckResult(
+            name="layer_b.skipped", layer="B", passed=not unverified1,
+            detail="" if not unverified1 else (
+                "Every test of the change runs and passes in the CI pipeline: " + "; ".join(unverified1)
+                + ". Make each one run here, on a synthetic input under tmp_path or as a data(\"<name>\") "
+                "test on a data set the pipeline provides, and assert what it checks without xfail. A live "
+                "test is one that reaches the network: the pipeline lists it for review and runs it only "
+                "where there is network.")))
+        if live1:
+            # The change's own live tests are deselected here (no network): listed for the co-lead.
+            results.append(CheckResult(
+                name="layer_b.live", layer="B", passed=True,
+                detail=f"{len(live1)} tests of the change are marked live (they reach the network) and "
+                       "did not run here; the co-lead reviews each: " + ", ".join(live1)))
     results.extend(return_checks)
     results.extend(regression_checks)
     deterministic, detail = _outcomes_determinism(map1, map2)
@@ -1476,10 +1632,9 @@ def _jailed_pytest(
         e for e in (*base.ro, *base.rw)
         if Path(e).resolve() != host_tmp and (tree is None or Path(e).resolve() != tree)
     )
-    # Real observation data the toolkit's own tests read, for this run only (never the workers'
-    # allow-list): `gate_readonly_roots`, each that exists.
-    gate_ro = tuple(str(r) for r in (_orchestration_config().get("gate_readonly_roots") or ())
-                    if Path(str(r)).is_dir())
+    # The data sets the toolkit's `data` tests read, for this run only (never the workers' allow-list):
+    # config `test_data`, each folder that exists.
+    gate_ro = tuple(str(folder) for folder in _gate_data().values())
     policy = JailPolicy(
         ro=(*others, *extra_ro, *gate_ro),
         rw=(str(Path(junit_path).parent), *((str(worktree),) if worktree else ()), str(home)),
@@ -1610,6 +1765,75 @@ def _orchestration_config() -> dict:
 # ----------------------------------------------------------------------------
 
 
+#: The pipeline's jobs, in the order the report lists them (``schemas.merge.GATE_JOBS``): every one
+#: required; this module holds the checks of each (``_job_of``).
+JOBS = GATE_JOBS
+
+#: The checks whose name alone does not say their job (the rest go by prefix, ``_job_of``).
+_JOB_OF_CHECK = {
+    "structural.changes_allowed": "change_scope",
+    "structural.tests_left_tree_unchanged": "change_scope",
+    "structural.env_resolves": "environments",
+    "structural.argument_kinds": "minting",
+    "layer_b.regression": "regression",
+}
+
+
+def _job_of(name: str) -> str:
+    """The job a check belongs to. A check of the test run no rule names is the tests job's."""
+    if name in _JOB_OF_CHECK:
+        return _JOB_OF_CHECK[name]
+    for prefix, job in (("structural.env_definition.", "environments"), ("layer_b.env.", "environments"),
+                        ("no_fabrication.", "no_fabrication"), ("provenance.", "minting"),
+                        ("layer_b.returns", "minting"), ("structural.", "structural")):
+        if name.startswith(prefix):
+            return job
+    return "tests"
+
+
+def _pipeline(layer_a: list[CheckResult], layer_b: list[CheckResult], skipped: dict[str, str]) -> list[GateJob]:
+    """Every job of :data:`JOBS` with its status. A failed check fails its job, whatever else holds;
+    otherwise a job the gate did not run is ``skip`` with the reason in ``skipped``; the tests job
+    fails when no test of the change ran (an untested tool is not mergeable, §9.4); a job with no
+    check fails, except ``environments`` and ``regression``, which may have nothing to run and skip
+    saying so; else ``pass``."""
+    checks: dict[str, list[CheckResult]] = {job: [] for job in JOBS}
+    for check in (*layer_a, *layer_b):
+        checks[_job_of(check.name)].append(check)
+    jobs = []
+    for job in JOBS:
+        mine = checks[job]
+        names = [c.name for c in mine]
+        failed = [c.name for c in mine if not c.passed]
+        if failed:
+            jobs.append(GateJob(name=job, status="fail", reason="failed: " + ", ".join(failed), checks=names))
+        elif job in skipped:
+            jobs.append(GateJob(name=job, status="skip", reason=skipped[job], checks=names))
+        elif job == "tests" and not any(c.layer == "B" for c in mine):
+            jobs.append(GateJob(name=job, status="fail", checks=names,
+                                reason="no test of the change ran (an untested tool is not mergeable)"))
+        elif not mine and job in _NOTHING_TO_CHECK:
+            jobs.append(GateJob(name=job, status="skip", reason=_NOTHING_TO_CHECK[job]))
+        elif not mine:
+            jobs.append(GateJob(name=job, status="fail", reason="it ran no check"))
+        else:
+            jobs.append(GateJob(name=job, status="pass", checks=names))
+    return jobs
+
+
+#: The jobs that may have nothing to run, and the reason each then gives.
+_NOTHING_TO_CHECK = {
+    "environments": "the change touches no environment definition and its packages name none",
+    "regression": "the toolkit holds no earlier tests",
+}
+
+
+def _passed(jobs: list[GateJob]) -> bool:
+    """The verdict, from the required jobs only (``schemas.merge.jobs_pass``): every job listed, none
+    failed, and the change's own tests passed."""
+    return jobs_pass(jobs)
+
+
 def _report_hash(layer_a: list[CheckResult], layer_b: list[CheckResult]) -> str:
     payload = json.dumps(
         [[c.name, c.passed, c.detail] for c in (*layer_a, *layer_b)], sort_keys=True
@@ -1624,10 +1848,11 @@ async def run_gate(
     test_runner: TestRunner | None = None,
     config: dict | None = None,
 ) -> GateReport:
-    """Run the deterministic gate over an authored tool in ``worktree`` (§9.4).
+    """Run the deterministic gate — the toolkit's CI pipeline — over an authored tool in
+    ``worktree`` (§9.4): the one entry point for every job of :data:`JOBS`.
 
-    ``GateReport.passed`` ⇔ every Layer-A hard check passes ∧ Layer-B tests pass ∧ the
-    run is deterministic. Determinism here means **the two runs yield the same per-test
+    ``GateReport.passed`` ⇔ no required job fails ∧ the tests job passed (every check passes,
+    the change's own tests ran, passed and gave the same outcomes twice). Determinism here means **the two runs yield the same per-test
     outcomes** (a junit ``{test_id: outcome}`` map compare), not byte-identical output.
     Tier-3 ``findings`` are recorded but never flip ``passed``. ``test_runner`` is injectable
     so the loop/structure is exercised without a live science stack; the default runs pytest
@@ -1667,7 +1892,7 @@ async def run_gate(
         if b"\x00" in raw_bytes:
             layer_a.append(CheckResult(
                 name="no_fabrication.binary", layer="A", passed=False,
-                detail=f"{rel} — binary file in toolkit diff; data must not live in the toolkit (§9.5)",
+                detail=f"{rel} — binary file in toolkit diff; data lives outside the toolkit (a data set, or a fixture the test builds under tmp_path)",
             ))
             continue
         try:
@@ -1675,7 +1900,7 @@ async def run_gate(
         except UnicodeDecodeError:
             layer_a.append(CheckResult(
                 name="no_fabrication.binary", layer="A", passed=False,
-                detail=f"{rel} — undecodable (non-UTF-8) file in toolkit diff; data must not live in the toolkit (§9.5)",
+                detail=f"{rel} — undecodable (non-UTF-8) file in toolkit diff; data lives outside the toolkit (a data set, or a fixture the test builds under tmp_path)",
             ))
             continue
         if rel.endswith(".py") and re.search(r"^[ \t\f]*#.*?coding[:=][ \t]*(?!utf-?8\b)[-\w.]+", "\n".join(source.split("\n")[:2]), re.I | re.M):
@@ -1727,6 +1952,7 @@ async def run_gate(
 
     # Layer B + determinism — only when structure is sound (else the run is moot).
     layer_b: list[CheckResult] = []
+    skipped: dict[str, str] = {}  # job -> why it did not run
     structural_ok = all(c.passed for c in structural)
     if structural_ok:
         test_paths = sorted(str(p.relative_to(worktree)) for p in targets if _TEST_RE.search(str(p)))
@@ -1755,8 +1981,8 @@ async def run_gate(
         layer_a.append(CheckResult(
             name="structural.tests_left_tree_unchanged", layer="A", passed=not moved,
             detail="" if not moved else (
-                f"the changeset changed while the gate ran: {moved[:10]}. The gate judges the files "
-                "as submitted; leave them untouched until it reports, and write test output under "
+                f"the changeset changed while the CI pipeline ran: {moved[:10]}. The pipeline judges the "
+                "files as submitted; leave them untouched until it reports, and write test output under "
                 "pytest's tmp_path."
             ),
         ))
@@ -1766,19 +1992,23 @@ async def run_gate(
             name="determinism", layer="A", passed=bool(outcome.get("deterministic", True)),
             detail=outcome.get("determinism_detail", ""),
         ))
+        if watched is None:
+            skipped["regression"] = "the test runner given to the CI pipeline runs the change's own tests only"
     else:
-        layer_a.append(CheckResult(
-            name="determinism", layer="A", passed=False,
-            detail="skipped — structural checks failed; fix structure before tests run",
-        ))
+        # The tests did not run: their jobs skip with the reason, and the failed structure fails the gate.
+        before = [job for job in JOBS if any(_job_of(c.name) == job and not c.passed for c in structural)]
+        skipped["tests"] = skipped["regression"] = (
+            f"the {' and '.join(before)} job{'s' if len(before) > 1 else ''} failed; the tests run once "
+            f"{'they pass' if len(before) > 1 else 'it passes'}")
 
-    # passed ⇔ all Layer-A hard checks pass ∧ at least one Layer-B test ran ∧ all pass.
-    # (An untested run must never pass, §9.4; findings never enter this.)
-    passed = all(c.passed for c in layer_a) and bool(layer_b) and all(c.passed for c in layer_b)
+    # passed ⇔ no required job failed ∧ the change's own tests ran and passed (an untested run never
+    # passes, §9.4; findings never enter this).
+    jobs = _pipeline(layer_a, layer_b, skipped)
+    passed = _passed(jobs)
 
-    reason = "gate passed" if passed else _failure_reason(layer_a, layer_b)
+    reason = "gate passed" if passed else _failure_reason(layer_a, layer_b, jobs)
     return GateReport(
-        passed=passed, layer_a=layer_a, layer_b=layer_b, findings=findings,
+        passed=passed, jobs=jobs, layer_a=layer_a, layer_b=layer_b, findings=findings,
         reason=reason, report_hash=_report_hash(layer_a, layer_b), manifest=manifest, base=base,
     )
 
@@ -1789,31 +2019,38 @@ async def _run_layer_b(
     """Layer B per environment (B3c-2): each package's tests run in the environment its
     ``tool_config.yaml`` names, built from the judged definition in ``export`` into the gate's own
     conda dir (``agent_conda_dir()/gate``: never listed, reused while the definition is unchanged);
-    tests of a package naming none run as before. The groups' outcomes are merged into one. With
-    ``watched`` (the default runner's return recorder), each group watches only its own
+    tests of a package naming none run in the toolkit's default environment (contract
+    ``default_env``), built the same way from the judged definition, so the live build and its record
+    are never touched by unreviewed files. An injected runner gets no environment for a package
+    naming none. The groups' outcomes are merged into one. With ``watched`` (the default runner's return recorder), each group watches only its own
     environment's tools: another environment's may not even import there.
 
     With the default runner (``watched`` given), each group also runs, once, the toolkit's earlier
-    fast tests (:data:`FAST_TESTS`) of every package naming that environment, for regression (user
+    fast tests (the toolkit contract's ``test_classes.fast``) of every package naming that environment, for regression (user
     rule 2026-11-04): :func:`_earlier_tests`. An injected runner keeps its ``(worktree,
     test_paths)`` call."""
+    # The default runner tests a package naming no environment in the default one, judged like any
+    # other; an injected runner keeps `None` for it.
+    default = toolkit().default_env if watched is not None else None
+
+    def runs_in(package: str) -> str | None:
+        return _package_env(export / package) or default
+
     groups: dict[str | None, list[str]] = {}
     for path in test_paths:
-        env = _package_env(export / path.split("/", 1)[0])
-        groups.setdefault(env, []).append(path)
+        groups.setdefault(runs_in(path.split("/", 1)[0]), []).append(path)
     earlier: dict[str | None, list[str]] = {}
     if watched is not None:
         for path in _earlier_tests(export):
-            earlier.setdefault(_package_env(export / path.split("/", 1)[0]), []).append(path)
-            groups.setdefault(_package_env(export / path.split("/", 1)[0]), [])
+            earlier.setdefault(runs_in(path.split("/", 1)[0]), []).append(path)
+            groups.setdefault(runs_in(path.split("/", 1)[0]), [])
     if list(groups) == [None] and not earlier:
         return await test_runner(export, test_paths)
 
     def own(env_id):
         if watched is None:
             return {}
-        return {"returns_tools": {k: v for k, v in watched.items()
-                                  if _package_env(export / v[0].split(".", 1)[0]) == env_id},
+        return {"returns_tools": {k: v for k, v in watched.items() if runs_in(v[0].split(".", 1)[0]) == env_id},
                 "regression": earlier.get(env_id, [])}
     merged: dict = {"results": [], "findings": [], "deterministic": True, "determinism_detail": ""}
     for env_id, paths in groups.items():
@@ -1834,29 +2071,28 @@ async def _run_layer_b(
         merged["findings"] += outcome.get("findings", [])
         if not outcome.get("deterministic", True):
             merged["deterministic"] = False
-            detail = f"[{f'env {env_id}' if env_id else 'analysis env'}] {outcome.get('determinism_detail', '')}"
+            detail = f"[{f'env {env_id}' if env_id else 'default env'}] {outcome.get('determinism_detail', '')}"
             merged["determinism_detail"] = "; ".join(filter(None, (merged["determinism_detail"], detail)))
     return merged
 
 
 def _earlier_tests(export: Path) -> list[str]:
-    """The toolkit's test folders, relative to ``export``: every ``*_utils`` package's ``tests/``
-    (the toolkit's layout). The runner selects their fast tests (:data:`FAST_TESTS`) and leaves out
-    the change's own test files, which ran already."""
-    return sorted(f"{p.parent.name}/tests" for p in export.glob("*_utils/tests") if p.is_dir())
+    """The toolkit's test folders, relative to ``export``: every package's ``tests/`` (the toolkit's
+    layout). The runner selects their fast tests (the toolkit contract's ``test_classes.fast``) and
+    leaves out the change's own test files, which ran already."""
+    return sorted(f"{p}/tests" for p in toolkit().packages(export) if (export / p / "tests").is_dir())
 
 
 async def _gate_environment(export: Path, env_id: str) -> tuple[Any | None, str]:
     """The environment ``envs/<env_id>`` of the judged files, built for the gate; or why not."""
-    from auto_research.env import agent_conda_dir, analysis_environment, conda_executable, declared_externals
+    from auto_research.env import agent_conda_dir, conda_executable, declared_externals, human_environments
     from auto_research.sandbox.env_build import PACKAGE_ARCHIVE, StoppableRunner, build, read_definition
-    from auto_research.sandbox.jail import jail_enabled
 
     import time
 
     from auto_research.sandbox.env_build import _remove_tree
 
-    human = analysis_environment()
+    bases = human_environments()
     runner = StoppableRunner()
     gate_root = agent_conda_dir() / "gate"
 
@@ -1882,8 +2118,8 @@ async def _gate_environment(export: Path, env_id: str) -> tuple[Any | None, str]
         # The gate still builds the judged definition itself; the shared archive only spares the
         # downloads, each archived file checked by conda against the judged lock (D3b, [F30]).
         return build(definition, conda_dir=conda_dir,
-                     conda_exe=conda_executable(), base_envs={human.name: human} if human else {},
-                     externals=declared_externals(), jailed=jail_enabled(), runner=runner,
+                     conda_exe=conda_executable(), base_envs=bases,
+                     externals=declared_externals(), runner=runner,
                      package_archive=agent_conda_dir() / PACKAGE_ARCHIVE), conda_dir
     def _reachable(built):
         # A derived environment with no activation of its own sources its base's, the human's init
@@ -1912,8 +2148,8 @@ async def _gate_environment(export: Path, env_id: str) -> tuple[Any | None, str]
         return None, f"{type(exc).__name__}: {str(exc)[-800:]}"
 
 
-def _failure_reason(layer_a: list[CheckResult], layer_b: list[CheckResult]) -> str:
+def _failure_reason(layer_a: list[CheckResult], layer_b: list[CheckResult], jobs: list[GateJob]) -> str:
     failed = [c for c in (*layer_a, *layer_b) if not c.passed]
     if not failed:
-        return "no Layer-B tests ran (untested tool is not mergeable)"
+        return "; ".join(f"{j.name}: {j.reason}" for j in jobs if j.status == "fail" or j.name == "tests")
     return "; ".join(f"{c.name}: {c.detail}" for c in failed[:6])

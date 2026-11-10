@@ -56,7 +56,8 @@ Runtime prompt files:
   tool-driven/inspection-only analysis policy, **tool-request triage** (new-capability
   disposition + `fix_existing` wrongly-called vs buggy), **general-capability brief framing**
   (write `expected_behavior` as a parameterized capability serving the class of question — the
-  run's concrete values become argument defaults — not this run's instance),
+  run's concrete values become argument defaults — not this run's instance), the toolkit's
+  `README.md` files as the domain briefing,
   authoritative-doc consultation (`web_search`), the team channel (`message` / `wait_for_reply`),
   **briefs as reports** (each `author_chain` link is a brief `specN`, revised with
   `edit_report`/`write_report` and `report=specN`; revisions reach the running coder as a diff and
@@ -65,7 +66,9 @@ Runtime prompt files:
   report `status`) on an honest failure or authoring exhaustion.
 - `analyst_colead.md` — the Phase-2 provider-decorrelated **co-lead code reviewer** (loaded
   by the `review` hook for the structured `ToolReviewVerdict`): code-review-only scope (never
-  the science finding, never a merge), brief-match + Layer-B check-adequacy judgment, the
+  the science finding, never a merge), what the CI pipeline ran (its jobs by name; the change's
+  `live` tests it lists under `live_tests_not_run`, judged by the co-lead), brief-match +
+  check-adequacy judgment, the
   independent no-fabrication second pass, subtle-bug hunting, and read-only worktree/web
   investigation, and the three output classes (a science artifact written into the obs-db or
   recorded in its catalog is a reject). On approval it also drafts `commit_summary` — the one-line commit subject
@@ -76,7 +79,9 @@ Runtime prompt files:
   it describes what the ledger shows, grounds every number in an event it read, and says when the
   log is silent rather than guessing.
 - `coder.md` — the Phase-2 tool author's system prompt (loaded by `merge_flow` and passed
-  to the Claude Agent SDK): the three output classes and how the gate checks each (an artifact
+  to the Claude Agent SDK; the toolkit's checkout and its template package are named in the
+  seeded context, `merge_flow._build_structure_context`, so the prompt names neither): the three
+  output classes and how the `minting` job checks each (an artifact
   under an `output` argument with its `shape`, returned under `products`/`figures`; an obs-db item
   recorded through `obsdb_catalog`, tested on a fixture obs-db under `tmp_path/<MISSION>/`; scratch),
   the real package layout (`lib/` + `skills/` + wrapped-asset subdirs
@@ -87,8 +92,10 @@ Runtime prompt files:
   `call_timeout_s` in the package `tool_config.yaml` so the sandbox doesn't SIGTERM a legitimately
   long tool at ~300s), the
   README↔`TOOL_MANIFEST` audience split, `obsdb_catalog` as the sole catalog writer,
-  no-fabrication rules, the web → `message` to `lead` → `message` to `human` escalation ladder, and the committed-tests
-  requirement. The role name `coder` mirrors `config/models.yaml`.
+  no-fabrication rules, the web → `message` to `lead` → `message` to `human` escalation ladder, the
+  committed-tests requirement, the test classes (fast, `slow`, `data("<name>")` on a data set the
+  pipeline binds, `live` listed for the co-lead; every test of the change runs and passes), and the
+  CI pipeline's jobs (`sandbox.gate.JOBS`). The role name `coder` mirrors `config/models.yaml`.
 
 Each file is the complete system prompt for that role: identity, responsibilities,
 output expectations, and scope/escalation rules. **Prompts do not enumerate tools
@@ -208,3 +215,16 @@ Compacted 2026-09-01, again 2026-09-24, 2026-10-07 and 2026-10-19 (every entry);
 - 2026-11-04 — H2: `coder.md` names the `obs_db_root` argument (filled with the obs-db root, where an acquiring tool creates a mission's folder).
 - 2026-11-04 — H1: `coder.md`'s fixture obs-db: a catalog seeded through `neutral` makes the folder an obs-db; a mission name `obsdb_catalog` knows adds the uncatalogued scan.
 - 2026-11-04 — Item 2: `coder.md` says the gate runs the toolkit's earlier fast tests too (`layer_b.regression`), suggests the package's fast tests when shared `lib/` code changes, and that unmarked tests run at every later gate.
+- 2026-11-09 — Phase 3 step 0a, W6 (decisions D2/D10/D11/D12/D18/D26): the prompts name no toolkit,
+  package or data source. Role prompts (`reviewer.md`, `analyst_worker.md`, `analyst_lead.md`,
+  `librarian_io.md`, `status_monitor.md`) lose the archive and mission enumerations and the example
+  tool names, and point to the toolkit's `README.md` files (root and package) for the domain.
+  `coder.md` is the authoring guide in general terms: the toolkit and the template package are the
+  ones the seeded context names; the gate is the CI pipeline with its named jobs; the test classes
+  (fast, `slow`, `data("<name>")` read from `TOOLKIT_DATA_<NAME>`, `live` listed for the co-lead);
+  every test of the change runs. `analyst_colead.md` reads the jobs and judges the listed live tests.
+  Domain examples are neutral (no polarization, FITS or mission names); remaining prohibitions are
+  positive actions except the no-fabrication ban. The obs-db passages stay for step 0b. Tests:
+  `test_prompts.py` guards no package or data-source name, the README pointer, positive wording, the
+  CI jobs and test classes (coder), and the jobs and live-test key (co-lead, through `review_tool`).
+- 2026-11-09 — W6 review: `coder.md` describes `regression` as the earlier fast-class tests (data tests included; a skipped earlier data test fails) and restores "small, already-local" data; `analyst_colead.md` keeps the debate to the blockers already raised and concedes the rest; `analyst_lead.md` requests and authors each capability once per pass; `compactor.md` and `status_monitor.md` name the CI pipeline (the monitor's events stay `gate.*`). Guards in `test_prompts.py`: `model_text_problems` (a prohibition outside the listed no-fabrication ban lines, incl. "must not"; the retired gate names; `§`) over every prompt and over the tool definitions and lead instruction built through the module API; package names from the fixture toolkit when the configured root is absent. `test_toolkit_contract` applies it to the CI pipeline's messages for two failing fixture changes.

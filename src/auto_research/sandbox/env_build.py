@@ -3,7 +3,7 @@
 A definition is a folder the coding pipeline commits (``<toolkit>/envs/<name>/``):
 
 ```
-env.yaml      purpose, base (a human environment it layers on, or none), externals it uses
+env.yaml      purpose, base (a human environment it layers on, or none), externals it uses, probe
 env.lock      conda explicit list: @EXPLICIT, then url#md5 (or #sha256:…) per package, conda-forge only
 env.pip       pip wheels conda-forge lacks: name==version --hash=sha256:… per line — optional
 activate.sh   the activation (variables, sourcing a declared external's init) — optional
@@ -44,10 +44,10 @@ _CONDA_LINE = re.compile(
 _PIP_LINE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9_.!+-]+(?: --hash=sha256:[0-9a-f]{64})+$"
 )
-_YAML_KEYS = {"purpose", "base", "externals"}
+_YAML_KEYS = {"purpose", "base", "externals", "probe"}
 #: Largest definition file read (bytes); a lock of thousands of packages is well under it.
 _MAX_FILE = 4 * 1024 * 1024
-#: ``env.yaml`` holds three short keys; PyYAML's scanner is superlinear on nested brackets (40k
+#: ``env.yaml`` holds four short keys; PyYAML's scanner is superlinear on nested brackets (40k
 #: openers took over a minute), so it is capped hard and its nesting counted before any parse.
 _MAX_YAML = 16 * 1024
 _MAX_YAML_BRACKETS = 64
@@ -66,6 +66,9 @@ class EnvDefinition:
     purpose: str
     base: str | None
     externals: tuple[str, ...]
+    probe: str = ""
+    """One line of Python that runs in the environment when it is ready (the launch preflight
+    runs the toolkit's default environment's, ``runner.check_analysis_probe``); empty: none."""
 
     @property
     def lock_path(self) -> Path:
@@ -114,6 +117,7 @@ def read_definition(folder: Path) -> EnvDefinition:
         base=data["base"] if isinstance(data.get("base"), str) and data["base"] else None,
         externals=(tuple(x if isinstance(x, str) else "<not a name>" for x in externals)
                    if isinstance(externals, list) else () if externals is None else ("<not a list>",)),
+        probe=data["probe"].strip() if isinstance(data.get("probe"), str) else "",
     )
 
 
@@ -126,7 +130,7 @@ def _load_yaml(path, *, dir_fd: int | None = None) -> dict:
     try:
         text = _read_plain(path, single_link=True, limit=_MAX_YAML, dir_fd=dir_fd).decode("utf-8")
     except FileNotFoundError:
-        raise ValueError(["env.yaml is missing: add it (purpose, base or none, externals)."]) from None
+        raise ValueError(["env.yaml is missing: add it (purpose, base or none, externals, probe or none)."]) from None
     except (OSError, ValueError, UnicodeDecodeError) as exc:
         raise ValueError([f"env.yaml: make it a plain UTF-8 file under {_MAX_YAML} bytes ({type(exc).__name__})."]) from None
     if text.count("[") + text.count("{") > _MAX_YAML_BRACKETS:
@@ -178,8 +182,8 @@ def _validate(
     """Every reason the definition in ``folder`` cannot be built, or an empty list.
 
     What the gate checks before any build, each a sentence naming the file and the fix: a name of
-    lowercase letters, digits, ``_`` and ``-``; an ``env.yaml`` with only the known keys and a
-    purpose; exactly one of a ``base`` (a human environment that exists) and an ``env.lock``; a lock
+    lowercase letters, digits, ``_`` and ``-``; an ``env.yaml`` with only the known keys, a
+    purpose and, when given, a one-line ``probe``; exactly one of a ``base`` (a human environment that exists) and an ``env.lock``; a lock
     of conda-forge URLs each with its md5 or sha256 (explicit format, no solver), this machine's
     platform or noarch, one line per package; pip lines each an exact version with a sha256;
     externals only from the human's declared list.
@@ -205,6 +209,8 @@ def _validate(
         problems.append("env.yaml: give `externals` as a list of declared names.")
     elif any(not isinstance(x, str) for x in raw.get("externals") or []):
         problems.append("env.yaml: give each external as a declared name (text).")
+    if "probe" in raw and (not isinstance(raw["probe"], str) or "\n" in raw["probe"].strip()):
+        problems.append("env.yaml: give `probe` as one line of Python, e.g. `import <module>`.")
     definition = read_definition(folder)
     if not definition.purpose.strip():
         problems.append("env.yaml: state the environment's purpose in one line.")
@@ -388,7 +394,6 @@ def build(
     conda_exe: str,
     base_envs: Mapping[str, Environment],
     externals: Mapping[str, External],
-    jailed: bool,
     runner: Runner = subprocess.run,
     timeout_s: int = 3600,
     on_build: Callable[[str], None] | None = None,
@@ -408,9 +413,8 @@ def build(
     are flagged untested env.
 
     ``on_build(reason)``, when given, is called once a fresh build begins (not for a reused
-    prefix): ``missing`` (no record), ``stale`` (another definition), ``unjailed`` (a jailed caller,
-    a record built unjailed), ``tainted`` (an unjailed build ran in this conda dir) or
-    ``interrupted`` (a record without its prefix) — D1b.
+    prefix): ``missing`` (no record), ``stale`` (another definition) or ``interrupted`` (a record
+    without its prefix) — D1b.
 
     Derived: the base's prefix with this definition's activation and boot file (falling back to the
     base's). Built: ``conda create --file env.lock`` into ``<conda_dir>/envs/ar-<name>``
@@ -427,9 +431,8 @@ def build(
     4. create, pip, :func:`verify`, then the record.
 
     Each build has its own package cache, home and ``/tmp``, deleted afterwards; only the target
-    prefix and those are writable to it. With ``jailed`` the commands run under :func:`build_policy`
-    (refused when the jail cannot run); ``jailed=False`` is the caller's explicit choice and is
-    written into the record (:func:`build_record`). The environment is only :data:`_BUILD_PASS`
+    prefix and those are writable to it. The commands run in the jail of :func:`build_policy`
+    (refused when the jail cannot run). The environment is only :data:`_BUILD_PASS`
     plus the build's own settings — no secret, nothing of the user's conda or pip configuration,
     nothing registered in the user's ``~/.conda``; safety checks are pinned on.
     """
@@ -465,12 +468,9 @@ def build(
                 boot=_activation(conda_dir, staged, "boot.py"),
                 externals=tuple(externals[name] for name in staged.externals),
             )
+            _refuse_tainted(conda_dir)
             record = build_record(conda_dir, target)
-            # Reused only as strong as asked: a jailed caller never gets a prefix built unjailed, nor
-            # one from a conda_dir an unjailed build has run in (its scripts could rewrite records).
-            tainted = os.path.lexists(conda_dir / "built" / f"{_UNJAILED}.json")
-            if (record and record.get("definition_sha256") == digest
-                    and (not jailed or (record.get("jailed") is True and not tainted))
+            if (record and record.get("definition_sha256") == digest and record.get("jailed") is True
                     and target.is_dir() and not target.is_symlink()):
                 _verify(staged, target)
                 if recorded_dists(conda_dir, target) is None:  # a build from before the baseline
@@ -483,8 +483,7 @@ def build(
                 return environment
             # A build of this very lock kept aside by an earlier rebuild (a branch switched back,
             # D3b): verified and put back, instead of building it again.
-            swapped = _swap_back(conda_dir, target, record, staged, digest, environment,
-                                 jailed=jailed, tainted=tainted)
+            swapped = _swap_back(conda_dir, target, record, staged, digest, environment)
             if swapped:
                 if on_restore is not None:
                     on_restore(swapped)
@@ -492,10 +491,7 @@ def build(
             if on_build is not None:
                 on_build("missing" if not record else
                          "stale" if record.get("definition_sha256") != digest else
-                         "unjailed" if jailed and record.get("jailed") is not True else
-                         "tainted" if jailed and tainted else "interrupted")
-            if not jailed:  # sticky: written before anything unjailed runs
-                _write_record(conda_dir, Path(_UNJAILED), {"unjailed_build": staged.name})
+                         "unjailed" if record.get("jailed") is not True else "interrupted")
             record_path = conda_dir / "built" / f"{target.name}.json"
             kept = None
             if target.is_symlink():
@@ -521,12 +517,11 @@ def build(
                 home, pkgs = work / "home", work / "pkgs"
                 home.mkdir()
                 pkgs.mkdir()
-                # conda's second, read-only cache ([F30], D3b): for a jailed build only (unjailed,
-                # conda would find it writable and extract into it), and never an archive holding a
-                # folder (an extracted package nothing re-checks: something other than this code
-                # wrote there).
-                if package_archive is not None and (not jailed or (package_archive.is_dir() and any(
-                        entry.is_dir() for entry in package_archive.iterdir()))):
+                # conda's second, read-only cache ([F30], D3b), bound read-only in the jail; never an
+                # archive holding a folder (an extracted package nothing re-checks: something other
+                # than this code wrote there).
+                if package_archive is not None and package_archive.is_dir() and any(
+                        entry.is_dir() for entry in package_archive.iterdir()):
                     package_archive = None
                 if package_archive is not None:
                     package_archive.mkdir(parents=True, exist_ok=True)
@@ -540,8 +535,7 @@ def build(
                     "CONDA_SAFETY_CHECKS": "enabled", "CONDA_EXTRA_SAFETY_CHECKS": "true",
                     "CONDA_SSL_VERIFY": "true", "PYTHONNOUSERSITE": "1",
                 })
-                wrap = (_jail(conda_exe, staged, target, work, package_archive) if jailed
-                        else (lambda argv: list(argv)))
+                wrap = _jail(conda_exe, staged, target, work, package_archive)
                 log = work / "output.log"  # in work, which no build binds
                 _check_pkgs_dirs(runner, wrap, conda_exe, env, pkgs, timeout_s, log, package_archive)
                 _run(runner, wrap([conda_exe, "create", "--yes", "--quiet", "--prefix", str(target),
@@ -570,15 +564,26 @@ def build(
                 _archive_packages(staged.lock_path, pkgs, package_archive)
             _write_dists(conda_dir, target, installed_dists(target))
             _write_record(conda_dir, target, {
-                "definition_sha256": digest, "jailed": jailed, **_record_fields(environment),
+                "definition_sha256": digest, "jailed": True, **_record_fields(environment),
             })
             return environment
         finally:
             _remove_tree(work, missing_ok=True)
 
 
-#: Written into ``<conda_dir>/built/`` once an unjailed build has run there; no jailed reuse after.
-_UNJAILED = "unjailed"
+#: What a build that ran outside the jail left in ``<conda_dir>/built/`` (before D25): its package
+#: scripts could have rewritten any record there, so nothing in that folder is trusted.
+_UNJAILED_MARKER = "unjailed.json"
+
+
+def _refuse_tainted(conda_dir: Path) -> None:
+    """Raise when an unjailed build once ran in ``conda_dir`` (its marker, written before D25)."""
+    marker = Path(conda_dir) / "built" / _UNJAILED_MARKER
+    if os.path.lexists(marker):
+        raise RuntimeError(
+            f"an unjailed build ran in {conda_dir} ({marker}), so its build records cannot be trusted: "
+            f"move {conda_dir} aside and rebuild every environment, or remove the marker once you "
+            "have checked the folder.")
 
 
 def _kept_record_path(conda_dir: Path, kept: Path) -> Path:
@@ -618,9 +623,9 @@ def _drop_kept_records(conda_dir: Path, kept: Path) -> None:
 
 
 def _swap_back(conda_dir: Path, target: Path, record: dict | None, staged: EnvDefinition,
-               digest: str, environment: Environment, *, jailed: bool, tainted: bool) -> str | None:
+               digest: str, environment: Environment) -> str | None:
     """Put back a kept-aside build of this very lock (``<target>.prev-<digest8>-*`` whose kept
-    record names ``digest`` and is as strong as asked) once it verifies and still holds exactly the
+    record names ``digest``) once it verifies and still holds exactly the
     distributions recorded at its build (a hand change is drift, never a new baseline); the current
     build, if any, is kept aside in its place. The kept prefix's name when one was put back (D3b)."""
     for candidate in sorted(target.parent.glob(f"{target.name}.prev-{digest[:8]}-*")):
@@ -631,8 +636,7 @@ def _swap_back(conda_dir: Path, target: Path, record: dict | None, staged: EnvDe
         except (OSError, ValueError):
             continue
         if (not isinstance(kept_record, dict) or kept_record.get("definition_sha256") != digest
-                or (jailed and (kept_record.get("jailed") is not True or tainted))
-                or not candidate.is_dir() or candidate.is_symlink()):
+                or kept_record.get("jailed") is not True or not candidate.is_dir() or candidate.is_symlink()):
             continue
         try:
             _verify(staged, candidate)
@@ -803,7 +807,7 @@ _PIN_REQUEST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9_.!+-]+$")
 
 
 def solve(
-    specs: list[str], *, conda_exe: str, work: Path, jailed: bool,
+    specs: list[str], *, conda_exe: str, work: Path,
     runner: Runner = subprocess.run, timeout_s: int = 1800,
 ) -> str:
     """An explicit lock (``env.lock`` text) for ``specs``, solved against conda-forge only.
@@ -811,7 +815,7 @@ def solve(
     A dry run into a throwaway prefix with an empty package cache, so every package appears in the
     solver's download list with its URL and md5; the lock lists them in the solver's link order.
     Nothing is installed. Runs with the build's environment (only :data:`_BUILD_PASS`, a private
-    home), jailed when ``jailed`` (network on, only ``work`` writable). Raises ``ValueError`` for a
+    home), jailed (network on, only ``work`` writable). Raises ``ValueError`` for a
     spec that is not a plain package constraint, ``RuntimeError`` when conda cannot solve.
     """
     bad = [s for s in specs if not isinstance(s, str) or not _SPEC.match(s)]
@@ -826,14 +830,10 @@ def solve(
                 "CONDA_SSL_VERIFY": "true", "PYTHONNOUSERSITE": "1"})
     argv = [conda_exe, "create", "--dry-run", "--json", "--override-channels", "-c", "conda-forge",
             "--prefix", str(work / "target"), *specs]
-    if jailed:
-        from auto_research.sandbox.jail import JAIL_HOME_AT, JailPolicy, jail_argv
+    from auto_research.sandbox.jail import JAIL_HOME_AT, JailPolicy, wrap
 
-        prefix = jail_argv(JailPolicy(ro=(str(conda_root(conda_exe)),), rw=(str(work),), network=True,
-                                      home=str(home), home_at=JAIL_HOME_AT, tmp=str(tmp), label="env-solve"))
-        if not prefix:
-            raise RuntimeError("a jailed solve needs bwrap, which is not available here")
-        argv = [*prefix, "--", *argv]
+    argv = wrap(argv, JailPolicy(ro=(str(conda_root(conda_exe)),), rw=(str(work),), network=True,
+                                 home=str(home), home_at=JAIL_HOME_AT, tmp=str(tmp), label="env-solve"))
     result = runner(argv, env=env, capture_output=True, text=True, timeout=timeout_s)
     try:
         plan = json.loads(result.stdout or "{}")
@@ -855,14 +855,14 @@ def solve(
 
 
 def pin_wheels(
-    python: Path, requirements: list[str], *, work: Path, jailed: bool,
+    python: Path, requirements: list[str], *, work: Path,
     runner: Runner = subprocess.run, timeout_s: int = 900,
 ) -> list[str]:
     """``env.pip`` lines for exact requirements: each binary wheel downloaded with the environment's
     own ``python`` (so the wheel matches its interpreter and platform), then hashed here.
 
     Only ``name==version`` is accepted; ``--only-binary=:all: --no-deps --isolated``, with the
-    build's environment and, when ``jailed``, only ``work`` writable. Returns
+    build's environment, jailed with only ``work`` writable. Returns
     ``name==version --hash=sha256:<hex>`` per requirement, in order."""
     bad = [r for r in requirements if not isinstance(r, str) or not _PIN_REQUEST.match(r)]
     if not requirements or bad:
@@ -879,16 +879,12 @@ def pin_wheels(
         target.mkdir(exist_ok=True)
         argv = [str(python), "-m", "pip", "download", "--isolated", "--no-deps", "--no-input",
                 "--no-cache-dir", "--only-binary=:all:", "-d", str(target), requirement]
-        if jailed:
-            from auto_research.sandbox.jail import JAIL_HOME_AT, JailPolicy, jail_argv
+        from auto_research.sandbox.jail import JAIL_HOME_AT, JailPolicy, wrap
 
-            # The prefix as spelled (the argv names `python` that way; see build_policy).
-            prefix = jail_argv(JailPolicy(ro=(str(Path(python).parent.parent),), rw=(str(work),),
-                                          network=True, home=str(home), home_at=JAIL_HOME_AT, tmp=str(tmp),
-                                          label="env-pin"))
-            if not prefix:
-                raise RuntimeError("a jailed download needs bwrap, which is not available here")
-            argv = [*prefix, "--", *argv]
+        # The prefix as spelled (the argv names `python` that way; see build_policy).
+        argv = wrap(argv, JailPolicy(ro=(str(Path(python).parent.parent),), rw=(str(work),),
+                                     network=True, home=str(home), home_at=JAIL_HOME_AT, tmp=str(tmp),
+                                     label="env-pin"))
         result = runner(argv, env=env, capture_output=True, text=True, timeout=timeout_s)
         wheels = sorted(target.glob("*.whl"))
         if result.returncode != 0 or len(wheels) != 1:
@@ -900,7 +896,7 @@ def pin_wheels(
 
 
 def build_record(conda_dir: Path, prefix: Path) -> dict | None:
-    """What :func:`build` recorded for ``prefix`` (``definition_sha256``, ``jailed``), or ``None``."""
+    """What :func:`build` recorded for ``prefix`` (``definition_sha256``, …), or ``None``."""
     path = Path(conda_dir) / "built" / f"{Path(prefix).name}.json"
     try:
         data = json.loads(_read_plain(path, limit=64 * 1024))
@@ -948,10 +944,12 @@ def built_environments(
         for count, entry in enumerate(listing):
             if count >= _MAX_ENTRIES:
                 break
-            if not entry.name.endswith(".json") or entry.name == f"{_UNJAILED}.json":
+            if not entry.name.endswith(".json") or entry.name == _UNJAILED_MARKER:
                 continue
             prefix = conda_dir / "envs" / entry.name.removesuffix(".json")
             record = build_record(conda_dir, prefix)
+            if record and not record.get("base") and record.get("jailed") is not True:
+                continue  # a built prefix whose record does not say it was built in the jail: never used
             name = (record or {}).get("name")
             if not isinstance(name, str) or not _NAME.fullmatch(name.removeprefix("ar-")):
                 continue
@@ -1000,15 +998,14 @@ _REPLAY_LINE = re.compile(
 
 
 def replay(
-    lock: dict, *, conda_dir: Path, conda_exe: str, jailed: bool,
+    lock: dict, *, conda_dir: Path, conda_exe: str,
     runner: Runner = subprocess.run, timeout_s: int = 3600,
 ) -> dict:
     """Rebuild the conda part of a recorded state (an :func:`envs.lock`) into its own prefix,
     ``<conda_dir>/replay/<fingerprint[:16]>``, and compare it with the record (env plan B4).
 
-    The lock's explicit list is installed as it is (no solver), jailed when ``jailed`` exactly as a
-    build is, from a private package cache; a prefix already holding the recorded packages is
-    reused. Returns ``fingerprint``, ``prefix``, ``conda_match`` and the ``missing``/``extra``
+    The lock's explicit list is installed as it is (no solver), jailed exactly as a build is, from a
+    private package cache; a prefix already holding the recorded packages is reused. Returns ``fingerprint``, ``prefix``, ``conda_match`` and the ``missing``/``extra``
     package lines; pip packages are listed as ``pip_not_replayed`` (the lock names their versions,
     not their files). Raises ``ValueError`` for a lock that names a foreign platform, an unknown
     host or a package without its checksum, ``RuntimeError`` when conda fails."""
@@ -1041,6 +1038,7 @@ def replay(
     for name in ("replay", "staging", "built"):
         _own_dir(conda_dir / name)
     target = conda_dir / "replay" / fp[:16]
+    _refuse_tainted(conda_dir)
     fd = os.open(conda_dir / ".install.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "r+") as lock_handle:
         fcntl.flock(lock_handle, fcntl.LOCK_EX)
@@ -1057,8 +1055,6 @@ def replay(
                 root.mkdir(parents=True)
                 (root / "env.lock").write_text(text, encoding="utf-8")
                 staged = EnvDefinition(name=root.name, root=root, purpose="replay", base=None, externals=())
-                if not jailed:  # as a build: an unjailed run's scripts could rewrite records here
-                    _write_record(conda_dir, Path(_UNJAILED), {"unjailed_build": root.name})
                 target.mkdir()
                 for folder in ("home", "pkgs"):
                     (work / folder).mkdir()
@@ -1069,7 +1065,7 @@ def replay(
                     "CONDA_SAFETY_CHECKS": "enabled", "CONDA_EXTRA_SAFETY_CHECKS": "true",
                     "CONDA_SSL_VERIFY": "true", "PYTHONNOUSERSITE": "1",
                 })
-                wrap = _jail(conda_exe, staged, target, work) if jailed else (lambda argv: list(argv))
+                wrap = _jail(conda_exe, staged, target, work)
                 log = work / "output.log"
                 _check_pkgs_dirs(runner, wrap, conda_exe, env, work / "pkgs", timeout_s, log)
                 _run(runner, wrap([conda_exe, "create", "--yes", "--quiet", "--prefix", str(target),
@@ -1249,8 +1245,6 @@ def _jail(conda_exe: str, staged: EnvDefinition, target: Path, work: Path,
 
     argv = jail_argv(build_policy(conda_exe=conda_exe, staged=staged, target=target, work=work,
                                   archive=archive))
-    if not argv:
-        raise RuntimeError("a jailed build needs bwrap, which is not available here")
     return lambda command: [*argv, "--", *command]
 
 

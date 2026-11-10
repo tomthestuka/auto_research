@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import textwrap
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -143,15 +143,16 @@ def test_a_worker_passes_data_by_reference_and_types_a_parameter_with_its_reason
     from auto_research.sandbox.workspace import create_run_workspace
     from auto_research.schemas import AnalysisTask
     from tests.dev_logs import dev_log_path
-    from tests.seats import seat as seat_override, seated
+    from tests.seats import env_seat, seated
 
     root = _toolkit(tmp_path / "toolkit")
     check_toolkit_manifests(root)  # the launch check the run path runs
-    provider, model = os.getenv("AUTO_RESEARCH_SHAPE_SEAT", "anthropic:claude-sonnet-5").split(":", 1)
+    # The configured worker seat; `AUTO_RESEARCH_VALIDATOR_WORKER_SEAT=provider:model` seats another member.
+    override = env_seat("AUTO_RESEARCH_VALIDATOR_WORKER_SEAT")
     # The ledger lives under logs/dev, not tmp_path: pytest prunes its numbered tmpdirs.
     monitor = RunMonitor(chatter=3, jsonl_path=dev_log_path("input-validator", "worker_monitor", ".jsonl"))
     ledger = monitor.jsonl_path
-    with seated(analyst_worker=seat_override(provider, model)):
+    with (seated(analyst_worker=override) if override else nullcontext()):
         worker = AnalystWorkerAgent(monitor=monitor)  # its model resolves through the seat
         create_run_workspace(monitor.run_id, ["analyst_worker_0"])
         control = RunControl()
@@ -177,7 +178,8 @@ def test_a_worker_passes_data_by_reference_and_types_a_parameter_with_its_reason
     refusals = [json.loads(line)["data"].get("text", "")[:300] for line in ledger.read_text().splitlines()
                 if '"tool_result"' in line and "This call was not run" in line]
     record = {
-        "seat": f"{provider}:{model}", "status": getattr(report, "status", None),
+        "seat": f"{worker.model.config.provider}:{worker.model.config.model}",
+        "status": getattr(report, "status", None),
         "findings": getattr(report, "findings", None), "refusals": refusals,
         "limit_calls": [{"handle": r.handle, "parents": r.parents, "args": call_arguments(store, r.handle)}
                         for r in limits],

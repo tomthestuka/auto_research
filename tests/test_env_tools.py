@@ -13,8 +13,36 @@ import types
 import pytest
 
 from auto_research.sandbox import env_build as B
+from auto_research.sandbox import jail
 from auto_research.sandbox.coder.env_tools import CandidateEnvs
 from auto_research.sandbox.envs import Environment
+from tests.test_env_build import _conda
+
+
+def _jailed_builds_at(tmp_path, monkeypatch) -> str:
+    """Every build and solve runs in the jail (D25): its argv on any host, this host's bwrap when it
+    has one; a conda installation under the test's folder for the jail to bind. Returns its conda."""
+    import shutil
+
+    found = shutil.which("bwrap") or "/usr/bin/bwrap"
+    monkeypatch.setattr(jail, "bwrap_path", lambda: found)
+    conda = _conda(tmp_path)
+    monkeypatch.setattr("auto_research.env.conda_executable", lambda: conda)
+    return conda
+
+
+@pytest.fixture(autouse=True)
+def _jailed_builds(tmp_path, monkeypatch):
+    return _jailed_builds_at(tmp_path, monkeypatch)
+
+
+def _allow_prefixes(monkeypatch, *prefixes) -> None:
+    """A REPL started in a stand-in human environment (this interpreter, a test's prefix): the jail's
+    allow-list names it read-only, as a configured one names its prefix. Skips where the jail cannot run."""
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
+    roots = [str(p) for p in prefixes]
+    monkeypatch.setattr(jail, "_config", lambda: {"agent_fs_allow": roots, "agent_fs_readonly": roots})
 
 
 def _fake_base(tmp_path: pathlib.Path) -> Environment:
@@ -36,9 +64,8 @@ def _derived_definition(worktree: pathlib.Path, name: str = "stack") -> pathlib.
 
 
 def _patch_config(monkeypatch, base: Environment | None) -> None:
-    monkeypatch.setattr("auto_research.env.analysis_environment", lambda config=None: base)
+    monkeypatch.setattr("auto_research.env.human_environments", lambda config=None: {base.name: base} if base else {})
     monkeypatch.setattr("auto_research.env.declared_externals", lambda config=None: {})
-    monkeypatch.setattr("auto_research.env.conda_executable", lambda: "conda")
 
 
 def test_activate_points_plain_commands_at_the_candidate_and_back(tmp_path, monkeypatch):
@@ -103,7 +130,7 @@ def test_solve_writes_an_explicit_lock_the_build_accepts(tmp_path):
     fetch = [{"fn": "tzdata-2025a-h0.conda", "url": url + "tzdata-2025a-h0.conda", "md5": "a" * 32},
              {"fn": "pip-25.0-pyh0.conda", "url": url + "pip-25.0-pyh0.conda", "md5": "b" * 32}]
     link = [{"dist_name": "pip-25.0-pyh0"}, {"dist_name": "tzdata-2025a-h0"}]
-    lock = B.solve(["pip", "tzdata"], conda_exe="conda", work=tmp_path / "w", jailed=False,
+    lock = B.solve(["pip", "tzdata"], conda_exe=_conda(tmp_path), work=tmp_path / "w",
                    runner=_solver(fetch, link))
     lines = lock.splitlines()
     assert lines[1] == "@EXPLICIT" and lines[2:] == [url + "pip-25.0-pyh0.conda#" + "b" * 32,
@@ -117,11 +144,11 @@ def test_solve_writes_an_explicit_lock_the_build_accepts(tmp_path):
 
 def test_solve_refuses_option_shaped_specs_and_reports_a_failed_solve(tmp_path):
     with pytest.raises(ValueError, match="refused"):
-        B.solve(["--channel=evil"], conda_exe="conda", work=tmp_path, jailed=False, runner=_solver([], []))
+        B.solve(["--channel=evil"], conda_exe=_conda(tmp_path), work=tmp_path, runner=_solver([], []))
     with pytest.raises(ValueError):
-        B.solve([], conda_exe="conda", work=tmp_path, jailed=False, runner=_solver([], []))
+        B.solve([], conda_exe=_conda(tmp_path), work=tmp_path, runner=_solver([], []))
     with pytest.raises(RuntimeError, match="named"):
-        B.solve(["pip"], conda_exe="conda", work=tmp_path, jailed=False,
+        B.solve(["pip"], conda_exe=_conda(tmp_path), work=tmp_path,
                 runner=_solver([], [{"dist_name": "pip-25.0-pyh0"}]))
 
 
@@ -133,10 +160,10 @@ def test_pin_wheels_hashes_the_downloaded_wheel(tmp_path):
 
     import hashlib
 
-    lines = B.pin_wheels(tmp_path / "py", ["pkg==1.0"], work=tmp_path / "w", jailed=False, runner=run)
+    lines = B.pin_wheels(tmp_path / "py", ["pkg==1.0"], work=tmp_path / "w", runner=run)
     assert lines == [f"pkg==1.0 --hash=sha256:{hashlib.sha256(b'wheel').hexdigest()}"]
     with pytest.raises(ValueError):
-        B.pin_wheels(tmp_path / "py", ["pkg>=1"], work=tmp_path / "w", jailed=False, runner=run)
+        B.pin_wheels(tmp_path / "py", ["pkg>=1"], work=tmp_path / "w", runner=run)
 
 
 def test_the_claude_escalation_server_declares_the_env_tools_only_when_given(tmp_path):
@@ -289,7 +316,6 @@ def test_a_failed_rebuild_returns_the_shell_to_the_analysis_environment(tmp_path
 
 def test_after_close_a_running_tool_writes_nothing_into_the_tree(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "solve", lambda specs, **_k: "@EXPLICIT\n")
-    monkeypatch.setattr("auto_research.env.conda_executable", lambda: "conda")
     cand = CandidateEnvs(tmp_path / "tk", tmp_path / "cand")
     assert "Wrote envs/stack/env.lock" in asyncio.run(cand.solve("stack", ["python"]))
     (tmp_path / "tk" / "envs" / "stack" / "env.lock").unlink()
@@ -300,7 +326,6 @@ def test_after_close_a_running_tool_writes_nothing_into_the_tree(tmp_path, monke
 
 def test_the_runtime_writes_only_into_a_plain_folder_of_the_worktree(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "solve", lambda specs, **_k: "@EXPLICIT\n")
-    monkeypatch.setattr("auto_research.env.conda_executable", lambda: "conda")
     outside = tmp_path / "outside"
     outside.mkdir()
     worktree = tmp_path / "tk"
@@ -348,13 +373,10 @@ def test_the_claude_jail_launcher_binds_the_candidates_read_only(tmp_path, monke
     from auto_research.sandbox.coder.claude_sdk import _jail_launcher
 
     if not jail.jail_available()[0]:
-        pytest.skip("bwrap not available")
-    monkeypatch.setattr(jail, "jail_enabled", lambda: True)
+        pytest.skip("the OS jail is required and bwrap cannot run here")
     base, tree = tmp_path / "wt", tmp_path / "wt" / "tree"
     tree.mkdir(parents=True)
     launcher = _jail_launcher(base, tree, (str(base / "envs_cand"),))
-    if launcher is None:
-        pytest.skip("no Claude CLI to wrap")
     text = pathlib.Path(launcher).read_text()
     assert f"--ro-bind {base / 'envs_cand'} {base / 'envs_cand'}" in text
 
@@ -469,12 +491,13 @@ def test_pin_needs_a_candidate_built_from_the_current_lock(tmp_path, monkeypatch
 def _manifest_gate():
     """A passing gate that records what the real one does: the changeset manifest and its base."""
     from auto_research.sandbox.gate import changeset_manifest
-    from auto_research.schemas.merge import GateReport
+    from auto_research.schemas.merge import GATE_JOBS, GateJob, GateReport
 
     async def gate(worktree, spec):
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True,
                               text=True, check=True).stdout.strip()
-        return GateReport(passed=True, manifest=changeset_manifest(worktree), base=head)
+        return GateReport(passed=True, jobs=[GateJob(name=job, status="pass") for job in GATE_JOBS],
+                          manifest=changeset_manifest(worktree), base=head)
     return gate
 
 
@@ -557,7 +580,7 @@ def test_a_commit_deleting_a_definition_drops_it_from_the_catalogue(tmp_path, mo
     _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "env")
     _git(repo, "checkout", "-q", "-b", "ai")
     B.build(B.read_definition(repo / "envs" / "stack"), conda_dir=tmp_path / "agent-conda", conda_exe="conda",
-            base_envs={"astropy": base}, externals={}, jailed=True)
+            base_envs={"astropy": base}, externals={})
     assert "ar-stack" in [e.name for e in env_catalogue({})]
     mon = _RecordingMonitor()
     session = build_authoring_session(
@@ -579,7 +602,6 @@ def test_closing_the_tools_kills_a_running_solve(tmp_path, monkeypatch):
     import time
 
     monkeypatch.setattr("auto_research.env.conda_executable", lambda: "/bin/sleep")
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: False)
     monkeypatch.setattr(B, "solve", lambda specs, *, runner, **_k: runner(["/bin/sleep", "30"]) and "")
     cand = CandidateEnvs(tmp_path / "tk", tmp_path / "cand")
     answers = []
@@ -661,10 +683,10 @@ def _reconcile_setup(tmp_path, monkeypatch, externals=None):
     from auto_research.sandbox.envs import External
 
     _patch_config(monkeypatch, _fake_base(tmp_path))
+    _jailed_builds_at(tmp_path, monkeypatch)
     monkeypatch.setattr("auto_research.env.agent_conda_dir", lambda: tmp_path / "agent-conda")
     monkeypatch.setattr("auto_research.env.env_lock_dir", lambda: tmp_path / "locks")
     monkeypatch.setattr("auto_research.env.declared_externals", lambda config=None: externals or {})
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: False)
     toolkit = tmp_path / "tk"
     from tests.test_env_build import _PKG, _PKG2, _definition
 
@@ -812,19 +834,6 @@ def test_launch_refreshes_a_record_whose_activation_changed_after_a_stopped_buil
     assert listed.activate is not None and listed.activate.read_text() == "export A=1\n"
 
 
-def test_launch_says_when_an_unjailed_build_taints_reuse(tmp_path, monkeypatch):
-    from tests.test_env_build import _fake_conda
-
-    from auto_research.sandbox.merge_flow import reconcile_environments
-
-    toolkit, _folder, _ = _reconcile_setup(tmp_path, monkeypatch)
-    reconcile_environments(toolkit, runner=_fake_conda([]))  # jail off: an unjailed build
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: True)
-    monkeypatch.setattr("auto_research.sandbox.env_build.build", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no bwrap here")))
-    results = reconcile_environments(toolkit, runner=_fake_conda([]))
-    assert results[0]["status"] == "tainted" and results[0]["marker"].endswith("unjailed.json")
-
-
 def test_launch_rebuilds_a_deleted_prefix_and_says_why(tmp_path, monkeypatch):
     import shutil as _shutil
 
@@ -890,9 +899,7 @@ def test_replay_environment_reads_the_lock_store_and_reports_externals(tmp_path,
     recorded = E.Environment(name="astropy", prefix=prefix, owner="human", activate=init, externals=(heasoft,))
     monkeypatch.setattr("auto_research.env.env_lock_dir", lambda: tmp_path / "locks")
     monkeypatch.setattr("auto_research.env.agent_conda_dir", lambda: tmp_path / "agent-conda")
-    monkeypatch.setattr("auto_research.env.conda_executable", lambda: "conda")
     monkeypatch.setattr("auto_research.env.declared_externals", lambda config=None: {"heasoft": heasoft})
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: False)
     fp = E.fingerprint_and_lock(recorded, tmp_path / "locks")
     (root / "BUILD").write_text("6.35\n")
     report = replay_environment(fp, runner=_fake_conda([]))
@@ -928,7 +935,7 @@ def test_live_a_recorded_state_replays_and_matches_its_conda_part(tmp_path, monk
     assert report["conda_match"], (report["missing"], report["extra"])
 
 
-def _routing_provider(tmp_path, monkeypatch, *, tool_env="stack", built=True, jail=True):
+def _routing_provider(tmp_path, monkeypatch, *, tool_env="stack", built=True):
     """A worker's provider over a sandbox stand-in that records where each call was sent (the REPL
     pool itself is driven for real in the next test)."""
     from auto_research import env as app_env
@@ -938,7 +945,6 @@ def _routing_provider(tmp_path, monkeypatch, *, tool_env="stack", built=True, ja
     from auto_research.sandbox.registry import ToolkitRegistry
 
     monkeypatch.setattr(app_env, "env_lock_dir", lambda: tmp_path / "locks")
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: jail)
     (tmp_path / "own" / "conda-meta").mkdir(parents=True)
     (tmp_path / "stack" / "conda-meta").mkdir(parents=True)
     (tmp_path / "stack" / "conda-meta" / "x.json").write_text(json.dumps({"url": "https://x/sherpa.conda", "md5": "e" * 32}))
@@ -1000,9 +1006,6 @@ def test_a_tool_whose_environment_is_not_built_says_so(tmp_path, monkeypatch):
     provider, sandbox, _ = _routing_provider(tmp_path, monkeypatch, built=False)
     outcome = asyncio.run(provider.execute("t", {}))
     assert outcome.is_error and "ar-stack is not available" in outcome.text and not sandbox.sent
-    provider, sandbox, _ = _routing_provider(tmp_path / "b", monkeypatch, jail=False)
-    outcome = asyncio.run(provider.execute("t", {}))
-    assert outcome.is_error and "only in the jail" in outcome.text and not sandbox.sent
 
 
 def test_the_repl_pool_runs_a_call_in_another_environment_and_keeps_its_own(tmp_path, monkeypatch):
@@ -1014,7 +1017,7 @@ def test_the_repl_pool_runs_a_call_in_another_environment_and_keeps_its_own(tmp_
     from auto_research.sandbox.envs import Environment
     from auto_research.sandbox.persistent import PersistentSandbox
 
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: False)
+    _allow_prefixes(monkeypatch, sys.prefix)
     init = tmp_path / "own-init.sh"
     init.write_text("export OWN_READY=1\n")
     base = Environment(name="testbase", prefix=pathlib.Path(sys.prefix), owner="human", activate=init)
@@ -1023,7 +1026,7 @@ def test_the_repl_pool_runs_a_call_in_another_environment_and_keeps_its_own(tmp_
     (folder / "env.yaml").write_text("purpose: x\nbase: testbase\n")
     (folder / "activate.sh").write_text("export STACK_READY=1\n")
     stack = B.build(B.read_definition(folder), conda_dir=agent_conda_dir(), conda_exe="conda",
-                    base_envs={"testbase": base}, externals={}, jailed=True)
+                    base_envs={"testbase": base}, externals={})
     (tmp_path / "toolkit").mkdir()
     sandbox = PersistentSandbox(tmp_path / "toolkit", tmp_path / "work", environment=base)
 
@@ -1053,7 +1056,7 @@ def test_a_routed_call_is_stamped_with_its_environment_from_the_first_call(tmp_p
     from auto_research.sandbox.envs import Environment, fingerprint
     from auto_research.sandbox.persistent import PersistentSandbox
 
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: False)
+    _allow_prefixes(monkeypatch, sys.prefix)
     init = tmp_path / "own-init.sh"
     init.write_text("export OWN_READY=1\n")
     base = Environment(name="testbase", prefix=pathlib.Path(sys.prefix), owner="human", activate=init)
@@ -1062,7 +1065,7 @@ def test_a_routed_call_is_stamped_with_its_environment_from_the_first_call(tmp_p
     (folder / "env.yaml").write_text("purpose: x\nbase: testbase\n")
     (folder / "activate.sh").write_text("export STACK_READY=1\n")
     stack = B.build(B.read_definition(folder), conda_dir=agent_conda_dir(), conda_exe="conda",
-                    base_envs={"testbase": base}, externals={}, jailed=True)
+                    base_envs={"testbase": base}, externals={})
     (tmp_path / "toolkit").mkdir()
     sandbox = PersistentSandbox(tmp_path / "toolkit", tmp_path / "work", environment=base)
 
@@ -1093,15 +1096,15 @@ def test_a_pool_repl_sources_its_activation_inside_the_jail(tmp_path, monkeypatc
     from auto_research.sandbox.envs import Environment
     from auto_research.sandbox.persistent import PersistentSandbox
 
-    if not jail.jail_enabled() or not jail.jail_available()[0]:
-        pytest.skip("the jail is off or bwrap is unavailable")
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
     base = Environment(name="testbase", prefix=pathlib.Path(sys.prefix), owner="human")
     folder = tmp_path / "defs" / "stack"
     folder.mkdir(parents=True)
     (folder / "env.yaml").write_text("purpose: x\nbase: testbase\n")
     (folder / "activate.sh").write_text('export STACK_READY=1\nexport SEEN_HOME="$HOME"\n')
     stack = B.build(B.read_definition(folder), conda_dir=agent_conda_dir(), conda_exe="conda",
-                    base_envs={"testbase": base}, externals={}, jailed=True)
+                    base_envs={"testbase": base}, externals={})
     (tmp_path / "toolkit").mkdir()
     sandbox = PersistentSandbox(tmp_path / "toolkit", tmp_path / "work", environment=base)
 
@@ -1125,8 +1128,8 @@ def _jailed_stack(tmp_path, *, activate=None, boot=None):
     from auto_research.sandbox import jail
     from auto_research.sandbox.envs import Environment
 
-    if not jail.jail_enabled() or not jail.jail_available()[0]:
-        pytest.skip("the jail is off or bwrap is unavailable")
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
     base_init = tmp_path / "base-init.sh"
     base_init.write_text("export BASE_READY=1\n")
     base = Environment(name="testbase", prefix=pathlib.Path(sys.prefix), owner="human", activate=base_init)
@@ -1138,7 +1141,7 @@ def _jailed_stack(tmp_path, *, activate=None, boot=None):
     if boot is not None:
         (folder / "boot.py").write_text(boot)
     stack = B.build(B.read_definition(folder), conda_dir=agent_conda_dir(), conda_exe="conda",
-                    base_envs={"testbase": base}, externals={}, jailed=True)
+                    base_envs={"testbase": base}, externals={})
     return base, stack
 
 
@@ -1211,7 +1214,7 @@ def _pool_call(tmp_path, monkeypatch, activate, key="STACK_READY", calls=2):
     from auto_research.sandbox.envs import Environment
     from auto_research.sandbox.persistent import PersistentSandbox
 
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: False)
+    _allow_prefixes(monkeypatch, sys.prefix)
     init = tmp_path / "own-init.sh"
     init.write_text("export OWN_READY=1\n")
     base = Environment(name="testbase", prefix=pathlib.Path(sys.prefix), owner="human", activate=init)
@@ -1220,7 +1223,7 @@ def _pool_call(tmp_path, monkeypatch, activate, key="STACK_READY", calls=2):
     (folder / "env.yaml").write_text("purpose: x\nbase: testbase\n")
     (folder / "activate.sh").write_text(activate)
     stack = B.build(B.read_definition(folder), conda_dir=agent_conda_dir(), conda_exe="conda",
-                    base_envs={"testbase": base}, externals={}, jailed=True)
+                    base_envs={"testbase": base}, externals={})
     (tmp_path / "toolkit").mkdir()
     sandbox = PersistentSandbox(tmp_path / "toolkit", tmp_path / "work", environment=base)
 
@@ -1269,7 +1272,7 @@ def test_a_repl_runs_in_a_python_older_than_3_11(tmp_path, monkeypatch):
     from auto_research.sandbox.envs import Environment
     from auto_research.sandbox.persistent import PersistentSandbox
 
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: False)  # the stand-in prefix is not allow-listed
+    _allow_prefixes(monkeypatch, tmp_path / "py39")  # the stand-in prefix
     old = shutil.which("python3.9")
     if old is None:
         pytest.skip("no Python 3.9 on this host")
@@ -1304,7 +1307,7 @@ def test_a_tool_return_larger_than_64_kb_comes_back_whole(tmp_path, monkeypatch)
     from auto_research.sandbox.envs import Environment
     from auto_research.sandbox.persistent import PersistentSandbox
 
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: False)  # this interpreter is not allow-listed
+    _allow_prefixes(monkeypatch, sys.prefix)  # this interpreter
     toolkit = tmp_path / "toolkit"
     (toolkit / "big_probe_utils").mkdir(parents=True)
     (toolkit / "big_probe_utils" / "__init__.py").write_text("")

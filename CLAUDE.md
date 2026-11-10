@@ -281,7 +281,9 @@ and config — never from a `DOCS.md`.**
 **Phase 3:** the text every unit needs — how `turn_end`, receipts, citation syntax and the channel
 work, and how to write prose (the manuscript register; no terms coined during the run) — lives in `prompts/conventions.md`, loaded before each unit role's own prompt (2026-10-27,
 `agents.prompts.UNIT_ROLES`); the role file holds its job and the scope it owns. It is a runtime
-prompt, so this rule binds it: no `DOCS.md`, no `CLAUDE.md`.
+prompt, so this rule binds it: no `DOCS.md`, no `CLAUDE.md`. **The domain is the toolkit's**
+(ruling 2026-11-09): prompts carry no archive, mission or package names; they point to the toolkit's
+root and package `README.md`s, which a role reads like any file (a recorded read, never evidence).
 
 
 ---
@@ -549,18 +551,22 @@ grounding at every unit's `turn_end`; evidence is what the analysis produced (§
 lead judges convergence, hard cap 3 rounds.
 
 **Coding pipeline.** `ToolSpec` brief → an author harness (`claude_sdk` or `codex`, named on the
-`coder` role) in an isolated worktree, beside the lead on the channel → the deterministic gate
-(Layer A: per-test determinism maps, the no-fabrication scan, structural, provenance incl. the
-static figure-shape check; the dynamic return check G15; Layer B: the tool's own tests, then the toolkit's earlier fast tests,
-`layer_b.regression`) → the
-provider-decorrelated co-lead review → `approve_edit`, one commit per tool on the branch.
-**Commit ⇔ gate ∧ review.** Per-attempt base refs, gate-entry reset of a coder's own commit,
+`coder` role) in an isolated worktree, beside the lead on the channel → the **CI pipeline** (the
+former deterministic gate, 2026-11-09): required jobs held by the orchestration — change scope,
+environments, no-fabrication, structural (incl. manifest keys and the one-literal manifest), minting
+(argument kinds, placed products and figures, figure shape, the dynamic return check G15), the
+change's own tests twice (determinism; every test must run — a skip or xfail fails; `live` tests are
+listed for the co-lead; a `data("<name>")` test skipped in CI fails) and earlier fast tests
+(regression) → the provider-decorrelated co-lead review → `approve_edit`, one commit per tool on
+the branch. **Commit ⇔ gate ∧ review** ("gate" = the CI pipeline). Per-attempt base refs, gate-entry reset of a coder's own commit,
 failure reset with a saved patch, submission snapshots for resume. A committed tool reloads the
 registry and reruns the workers.
 
-**Sandbox and reach.** One allow-list (`agent_fs_allow`, `agent_fs_readonly`) enforced by a path
-guard and, with `agent_os_jail: true` (on), a `bwrap` jail for the analyst REPL, both author
-harnesses and the gate's network-denied Layer-B run; `.git` bound read-only for the coder.
+**Sandbox and reach.** One allow-list (`agent_fs_allow`, `agent_fs_readonly`) and a `bwrap` jail
+that is **on unconditionally** (ruling 2026-11-09: a launch without a working jail is refused): the
+analyst REPL, the shell, both author harnesses, environment builds, the CI pipeline's network-denied
+test run and every jailed one-shot toolkit call (`runner.call_in_jail`); `.git` bound read-only for
+the coder. The orchestrator process runs no toolkit code: manifests are read as data.
 The worker REPL and the builtin shell server run under one analysis jail policy (`jail.analysis_policy`;
 F20 closed 2026-10-06): toolkit read-only, a private `/tmp`, the init script sourced in a clean
 environment without credentials.
@@ -691,10 +697,10 @@ refusal and never remove a built-in one.
 | model | registry role | unchanged |
 | prompt | `prompts/<role>.md` | unchanged (+ an optional shared protocol file, §4) |
 | report type + validator | per-role class, `*_turn_problems` functions | a report type and a list of validator functions |
-| toolkits | one global `toolkit_root` | zero or more per unit (§9.5) |
+| toolkits | one toolkit through the contract seam (`toolkits:` list of one, step 0a) | zero or more per unit (§9.5) |
 | harness tools | fixed per provider class | chosen per unit |
 | execution | analyst workers only | none, or a REPL + shell in an environment (§9.6) |
-| sandbox | global `agent_os_jail` + allow-list | per unit (§9.6) |
+| sandbox | jail always on (2026-11-09) + one global allow-list | reach per unit (§9.6) |
 | subagents | lead → coder only; graph routing elsewhere | none, units, and/or the coding pipeline (§9.7) |
 | caps | per-role config keys | per unit |
 | input validator | `SandboxToolProvider` (tool inputs) and the provider media guard (model inputs) | one component of every unit, its rules per unit where two roles need different ones |
@@ -714,12 +720,31 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
   and named per package in its `tool_config.yaml` (§9.6).
 - A toolkit is writable only through a coding pipeline granted to a unit that declares it, one
   pipeline per toolkit at a time.
+- **The toolkit contract (step 0a, 2026-11-09)** — what the orchestration reads from any toolkit,
+  through one seam (`auto_research.toolkit_contract`, bound once per run; source: the `toolkits:`
+  block in `orchestration.yaml` until the contract's home is ruled):
+  - identity: `name` (a plain identifier; the producer prefix of its receipts, refused when it
+    collides with a harness producer), `root`, `package_glob`, `template_package` (the coder's
+    template), `authoring_branch`, `default_env` (the environment for a unit's own REPL and shell
+    and for packages naming none);
+  - packages: `<package>/skills/__init__.py` holds one `TOOL_MANIFEST` dict literal, read as data;
+    keys `<name>.<package>.<tool>`; each argument declares its kind; `tool_config.yaml` names the
+    package's environment and call timeouts;
+  - environments: `envs/<id>/{env.yaml, env.lock, env.pip, activate.sh, boot.py}`, built or derived
+    (a derived one layers on a human environment named by `base:`, supplied by config
+    `human_envs`); externals by name, supplied by config `env_externals`;
+  - tests: `<package>/tests/`, classes fast / `slow` / `live` / `data("<name>")` (config
+    `test_data` maps a name to a folder, read through `TOOLKIT_DATA_<NAME>`);
+  - briefing: the toolkit's root and package `README.md`s, read by roles like any file;
+  - returns: `products` / `figures` under the call's `output` argument;
+  - the toolkit never imports `auto_research`.
+  The observation store (obs-db) is not yet in the contract: step 0b.
 
 ### 9.6 Execution, sandbox and environments per unit
 
-- **Sandbox per unit.** bwrap on or off, with that unit's reach (read-only, writable, network),
-  replacing the global `agent_os_jail` / `agent_fs_allow` / `agent_fs_readonly`. Off is explicit
-  and stamped on the unit's receipts.
+- **Sandbox per unit.** Always bwrap (ruling 2026-11-09: jailing is unconditional; the
+  `agent_os_jail` switch is retired), with that unit's reach (read-only, writable, network),
+  replacing the global `agent_fs_allow` / `agent_fs_readonly`.
 - **Execution per unit.** Today's `PersistentSandbox` (a warm REPL, boot script, probe, per-call
   timeout, plus the shell) is available to any unit. A unit that declares a toolkit needs one.
 - **One launcher.** Every process started for a unit — the REPL, the builtin server carrying the
@@ -778,8 +803,10 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
     for the XSPEC session and relxill, and a lock ABI-matched to HEASoft's PyXspec (built against
     `/opt/anaconda/anaconda3/envs/astropy`, Python 3.13). Its tests give the same results there as in
     the human environment. The config-defined analysis environment (`analyze_env`,
-    `analyze_ini_sh`, `repl_init_py`) stays for a unit's own REPL and shell and for packages naming
-    no environment (`heasarc_utils`, `catalog_utils`); its keys retire when nothing needs it.
+    `analyze_ini_sh`, `repl_init_py`, `analyze_probe`) retired 2026-11-09 (step 0a): it is the
+    toolkit's derived definition `envs/analysis/` (base `astropy` via config `human_envs`, a `probe`,
+    no boot file), named by the contract's `default_env`, serving a unit's own REPL and shell and the
+    packages naming no environment.
   - **Accepted residual risks:**
     - an upstream package removed;
     - in-place edits that escape the fingerprint, including a file a build's own package script
@@ -792,10 +819,9 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
       produces are bounded by structure (jailed coder, read-only `.git`, the decorrelated co-lead,
       the human's merge); the threat model is an honest coder under pressure, so further findings
       of this class are justified as residuals, not patched.
-  - **Open:** F21, narrowed by T1 — a toolkit call routed to `ar-xspec` runs the toolkit's boot
-    file in the jail (relxillCp loads, probed 2026-10-07), but `repl_init_py` lives in this
-    repository, which the jail does not mount, so a unit's default REPL starts without it. Also open: a notice when a human environment changes between a
-    unit's calls or runs.
+  - **Open:** a notice when a human environment changes between a unit's calls or runs. (F21 closed
+    2026-11-09: the default REPL and the shell start from the toolkit's `envs/analysis/`, which the
+    jail mounts; `repl_init.py` retired.)
 
 ### 9.7 Subagents per unit — on/off, two kinds
 
@@ -847,8 +873,8 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
 |---|---|
 | four role classes + `attach_{reviewer,lead,worker}_runtime` | one unit + four definitions |
 | `SandboxToolProvider` / `ReadOnlyToolProvider` / `LibrarianToolProvider` | tool sets composed per definition: toolkit, harness, sources, report, channel, spawn |
-| global `toolkit_root`, `*_utils` glob, `research_toolkit.` producer prefix | toolkits per unit; producer = toolkit + commit |
-| global `agent_os_jail`, `agent_fs_allow`, `agent_fs_readonly` | sandbox per unit |
+| one toolkit contract (name, package glob, producer prefix `<name>.`; step 0a) | toolkits per unit; producer = toolkit + commit |
+| global `agent_fs_allow`, `agent_fs_readonly` (jail always on) | reach per unit |
 | `PersistentSandbox` for workers only (REPL and shell jailed by one policy since F20) | execution for any unit, through one launcher |
 | one human analysis environment, human-configured only (F18) | environments defined in the toolkit, built only by the pipeline, chosen per toolkit call, fingerprinted on every receipt |
 | `merge_flow` reading toolkit root, branch and caps from config for the lead | the coding pipeline granted per unit, targeting that unit's toolkit |
@@ -858,16 +884,17 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
 
 ### 9.10 Build order (Phase 3)
 
-Step 0a comes first. Each step leaves a **working, documented increment** — update the relevant `DOCS.md` and README
+Steps 0a and 0b come first, in that order. Each step leaves a **working, documented increment** — update the relevant `DOCS.md` and README
 before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Done**.
 
 | # | Status | What is being built | Checkpoint (what works after) |
 |---|---|---|---|
-| 0a | Todo | **Toolkit decoupling — first** (user ruling 2026-11-04). Find every coupling between `auto_research` and `research_toolkit` (paths, package and tool names, the `research_toolkit.` producer prefix, toolkit modules the gate or runtime imports or reads, mirrored tables such as the obs-db tree, the manifest and `tool_config.yaml` shapes, the `envs/` layout, toolkit names in prompts, tests and benchmarks), then remove each or formalize it as one documented toolkit contract the orchestration reads. No new coupling lands meanwhile. | An inventory of every coupling, each removed or in the contract; the orchestration pairs with any toolkit that meets the contract, shown by a minimal fixture toolkit that loads, gates and runs. |
+| 0a | Done (2026-11-10) | **Toolkit decoupling — first** (user ruling 2026-11-04; plan rulings 2026-11-09). Every coupling between `auto_research` and `research_toolkit` is removed or read through **one toolkit contract** (name, packages, template package, test classes, authoring branch). The gate becomes the **CI pipeline**: named jobs, required ones held by the orchestration (minting checks included, so every handle resolves), test classes declared by the toolkit (fast, `slow`, `live`, `data("<name>")`, a data test skipped in CI fails the commit). The analysis environment moves into the toolkit as a derived `envs/` definition; `PFILES` is declared on its external. No new coupling lands meanwhile. | A minimal fixture toolkit loads, passes the CI pipeline and runs a tool whose result is minted as evidence; every seat's existing live test passes on the default config, built from module entry points; toolkit package names in `src/` only in the store code 0b replaces and the lead's catalog read (step 3). |
+| 0b | Todo | **The data store** (ruling 2026-11-09). Formalize the orchestration ↔ store connection and the store itself: roles the store defines and enforces (obs-db: `reader`, `recorder`, the recorder a separate writer process), held by a unit for the run; per-record fingerprint, health check, disposable copy for the CI pipeline, a synthetic namespace, the store's briefing; argument kinds `store` (location, runtime-filled) and `record` (a reference, runtime-fingerprinted); the brief's validation dataset generalised. | The obs-db is reached only through its store seam; a seat without the recorder role cannot write it; the fixture toolkit's store passes the same checks; no obs-db layout or ObsID rule left in `src/`. |
 | 0 | Todo | **Invariant freeze** — §9.3 collected as one deterministic test module over today's code, from the existing per-role tests. | Green on the current tree; it is the parity oracle for every later step. |
 | 1 | Todo | **One unit** — `_react` + channel + report tools + `turn_end` + the input validator (§9.3.9) as one unit; the four roles become definitions with validators; exceptions contained at the unit boundary (§9.3.8). | Each role's tests pass through the unit; one live cell per role; every unit's tool and model inputs pass the one input validator. |
 | 2 | Todo | **Toolkits per unit** + the generalised evidence predicate. | Two units with different toolkits in one run; a tool of an unregistered toolkit grounds nothing. |
-| 3 | Todo | **Sandbox + execution per unit; one launcher** (absorbs `jail.analysis_policy`, landed with F20). | Jail on/off per unit; every process a unit starts goes through the launcher; a unit with no backend has no shell. |
+| 3 | Todo | **Role formalization — access per unit** (ruling 2026-11-09: its own step). Each unit's definition declares its reach — filesystem, network, environments, store roles (0b) — enforced by the jail or the store; sandbox and execution per unit; one launcher (absorbs `jail.analysis_policy`, landed with F20). Closes the residues of unrigorous access control: [F21] [F33] [H13] [I26] [I6 E4] (handoff). | Every seat's reach is declared in its definition and enforced outside the model; jail on/off per unit; every process a unit starts goes through the launcher; a unit with no backend has no shell; the coder runs the CI pipeline's own command in the package's environment. |
 | 4 | Done (2026-10-07, on today's backend, ahead of 1–3) | **Environments** — the F18 work stream's build list, plugged into the execution backend and the coding pipeline. | Receipts carry environment fingerprints; a toolkit call runs in its package's tested environment; human environments untouched. |
 | 5 | Todo | **Subagents, kind A** — grants, monotone reach, depth and count caps. | A parent spawns a child and cites its receipts; a child asking for more reach is refused. |
 | 6 | Todo | **Coding pipeline as kind B** — `author_chain` → a grant any unit may hold. | A non-lead unit authors a tool into its toolkit's branch; a `commit` receipt; registry reload. |
@@ -879,12 +906,12 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
    `orchestration.yaml`, or a per-unit YAML block.
 2. **Routing:** keep the LangGraph graph and `DebateToConverge`, or express routing and debate as
    kind-A spawns.
-3. **Jail default when `bwrap` is missing:** fail the launch, or warn and run (today: warn).
+3. ~~**Jail default when `bwrap` is missing**~~ — ruled 2026-11-09: jailing is on unconditionally; unjailed
+   is not accepted, so a launch without a working jail is refused (built in step 0a, item W10).
 4. **The librarian's toolkit:** relocate literature search into a toolkit package now (P2 §9.2
    `lib_utils`), or keep `auto_research/sources` and give the librarian no toolkit.
-5. **F21 (narrowed by T1):** whether a unit's default REPL needs a boot file at all now that
-   `xspec_utils` calls run in `ar-xspec` with the toolkit's; if so, how `repl_init_py` reaches the
-   jail.
+5. ~~**F21**~~ — closed 2026-11-09 (step 0a): the default REPL needs no boot file; it starts in the
+   toolkit's `envs/analysis/`, and `xspec_utils` calls keep `ar-xspec`'s boot file.
 
 
 ---
@@ -956,9 +983,9 @@ One line each; the open-work queue lives in the gitignored handoff, not here.
 - **Durable HITL suspend at `interrupt()`** — resume re-runs the node, infeasible mid-`_react`; the
   blocking handler ships instead. (Checkpointer resume and `/stop` are built.)
 - **Run-wide redirect steer** — `/steer <id>` reaches one role; nothing binds every role at once.
-- **OS jail by default** — `bwrap` jail built 2026-08-20 (`sandbox/jail.py`), off in the shipped
-  `.example`; remaining: egress control for the non-gate processes, then default-on. (Phase 3
-  makes the jail a per-unit option; its default is §9.11 question 3.)
+- **Egress control** — the jail is on unconditionally (2026-11-09); its network is still open for
+  the non-CI processes, which inherit the runtime's environment (API keys included). Remaining:
+  egress control and per-seat credentials (role formalization, §9.10 step 3).
 - **Files API for media** — deferred; a referenced-PDF 413 at ~6.3 MB (anthropic-sdk-python#1098)
   suggests a tighter ceiling than the documented 128 MB first-party request limit.
 - **`bash_exec` figure capture** — diff the scratch cwd for new images, synthesize `FigureRef`s.
@@ -1003,6 +1030,13 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   (years, Figure/Table numbers) are unchecked; (e) a toolkit tool writing model-chosen content could
   launder it; (f) `FigureRef`'s declared fields remain the multimodal carrier, the receipt is
   authoritative. The flagged-quote shape is pinned deterministically only.
+- **XSPEC session tools carry no ancestry** (found live 2026-11-10, worker cell B1): `run_fit`,
+  `xspec_status`, and the fit a `plot_fit`/`plot_iqu` figure shows act on XSPEC's in-memory session, not on
+  a result passed by `$ref`, so a `run_fit` number has no parent receipt and a fit can act on whatever was
+  loaded last. The runtime records this truthfully (no parent). Accepted: the human plans to retire XSPEC /
+  rewrite its tools on the kernel (ruling 2026-11-10); the session-guard plan is parked
+  (`tmp_phase3/0a/work/runfit_plan/PLAN.md`). `tests/test_live_ref_chain.py` B1 fails when a seat cites a
+  `run_fit` result.
 - **Paper values are attributed, not verified** (ruling 2026-09-24) — a model can still attribute a
   wrong number; the `paper_attributions` list makes it cheap to check.
 - **Value references (2026-10-27):** a toolkit result printed only as text (33 of 407 in run
@@ -1049,8 +1083,9 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   reversed them). Every summariser we run reads a placeholder where the human spoke (C4b); on a
   provider that compacts on its side (Anthropic, OpenAI) that summariser reads the human's texts as
   the conversation holds them, and code restates them word for word after its summary.
-- **Reviewer live-tested on the contrast seat only** (`qwen3.8-max`; configured seat ruled
-  unnecessary). Residuals: a non-glyph compile failure leaves `.tex` and no PDF
+- **Reviewer live cells:** the canonical cell runs the configured seat (ruling D14, 2026-11-09);
+  the hostile attack/escape matrices keep the contrast seat (`qwen3.8-max`) through `tests/seats.py`.
+  Residuals: a non-glyph compile failure leaves `.tex` and no PDF
   (`renderer_error`, L1); tables typeset to 60 rows.
 - **Paused-turn continuation guard has never run** (0 `paused` in 184 silent turns) — kept for the
   day a hosted vendor tool is declared.
@@ -1086,8 +1121,7 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   - the mirror to Telegram is a no-op until `TelegramHandler.notify` lands;
   - every role may be handed a figure or a PDF over `view_receipt` (ruling 2026-11-04); a member
     whose adapter lacks the medium receives the sanitiser's parse or note (A2);
-  - a human reply after the graph node ended resumes a reply-only turn that nobody downstream reads;
-  - `tests/test_live_no_hitl.py` still probes the retired `ask_human` provider surface.
+  - a human reply after the graph node ended resumes a reply-only turn that nobody downstream reads.
 
 **Coder and sandbox**
 - **Codex coder blind spots** (on hold): a killed turn books $0; MCP startup status is not
@@ -1095,14 +1129,14 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **Qwen coder pairing** (`dashscope`+`codex`) unprobed since account activation, flagged in
   `UNVERIFIED_PAIRINGS`. Only a pay-as-you-go `sk-ws-` key on `dashscope-intl` serves; Coding Plan
   keys speak Chat Completions only. Re-check: `tmp_scripts/check_qwen_entitlement.py`.
-- **Shell commands are best-effort confined with `agent_os_jail` off** — `PathGuard` sees only paths
-  named in a command, and its token extractor false-denies (`1/2`, URLs) [F3]; there is no kernel
-  layer. With the jail on, the guard stands down only for a server whose launch recorded `jailed`
-  (`ToolkitRegistry.mcp_jailed`); a configured `mcp_servers` entry keeps the scan. Toolkit-tool
-  path arguments are not allow-listed.
-- **Coder git ban** is kernel-enforced when jailed (`.git` read-only); otherwise the Claude
-  deny-rule is prefix-matched. Backstops either way: gate-entry `reset --mixed`, failure reset to
-  the base ref.
+- **Shell commands are confined by the jail** (always on since 2026-11-09; the command-string scan
+  and [F3] retired with it). `PathGuard` keeps guarding the runtime process's own reads
+  (`read_file`, `list_dir`, receipting) and the governance-basename denial. Toolkit-tool path
+  arguments are not allow-listed.
+- **Coder git ban** is kernel-enforced (`.git` read-only in the jail; the Claude deny-rule and the
+  `PreToolUse` hook retired). Backstops: gate-entry `reset --mixed`, failure reset to the base ref.
+  Residual: when the runtime commits (`approve_edit`), hooks in the toolkit's `.git` run on the
+  host — a coder cannot plant one, a human's would run.
 - **Claude SDK built-ins** (`ToolSearch`, `ScheduleWakeup`, `TaskOutput`) are not gated by
   `--allowedTools` [F12].
 - **`_reset_direct_tree` is best-effort** — a git failure is recorded (`coder.tree_reset.error`,
@@ -1126,18 +1160,20 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   det1). The recorder imports `obsdb_catalog` from the branch, which `structural.changes_allowed`
   keeps untouched. A catalog left `regressed` passes (a re-acquire); every other unhealthy state
   fails. A folder is an obs-db when it holds a `catalog.json` or bears a mission name the toolkit
-  knows. `gate_readonly_roots` binds real data read-only into Layer B only, so the toolkit's
-  real-data tests run there and fail in the coder's own jail, which lacks those roots.
-- **The gate runs the toolkit's earlier fast tests (2026-11-04, user rule):** after the change's own
-  tests, Layer B runs every earlier test the toolkit leaves unmarked (`gate.FAST_TESTS`, `not slow and
-  not live`), each package's in its environment, once and outside the determinism maps; any that does
-  not pass fails `layer_b.regression`. A coder could still hide an earlier test (skip, ignore, delete);
+  knows. Real-data tests are marked `data("<name>")` and config `test_data` binds each named set
+  read-only into the CI test run only (2026-11-09, replacing `gate_readonly_roots`); a data test skipped
+  in CI fails the commit, and in the coder's own jail it skips with its reason until role formalization
+  (step 3) gives the coder the CI pipeline's command.
+- **The CI pipeline runs the toolkit's earlier fast tests (2026-11-04, user rule):** after the change's
+  own tests, the `regression` job runs every earlier test of the toolkit's fast class (contract
+  `test_classes.fast`, today `not slow and not live`), each package's in its environment, once and
+  outside the determinism maps; any that does not pass fails `layer_b.regression`. A coder could still hide an earlier test (skip, ignore, delete);
   the co-lead's diff review is the check for that.
 - **HEASoft parameter files are private per call (G4, 2026-11-04):** each toolkit call in the REPL,
   each `bash_exec` command and each watched gate call gets a fresh, empty user half of `PFILES`
-  (`builtin_server.private_param_dir`). A heasoftpy task object held at module level keeps its
-  learned values in memory; a `PFILES` without `;` gets no private folder.
-- **`_make_path_confiner`** — deprecated, unwired; use the `PreToolUse` hook.
+  (`builtin_server.private_folders`, from the declaration `env_externals.heasoft.private: {PFILES: ";"}`,
+  2026-11-09). A heasoftpy task object held at module level keeps its learned values in memory; a value
+  without the declared separator, or a variable no external declares, gets no private folder.
 - **`PathGuard` denies governance basenames everywhere**, incl. research_toolkit's own contract —
   ruling: leave it.
 - **WhatsApp/Twilio connector deprecated** — prefer `telegram` or `cli`.
@@ -1148,13 +1184,13 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **Slack Socket Mode can stop delivering events after idle, silently** (bolt-python#1529, closed
   not-planned 2026-09-14); ruling 2026-09-25: Telegram is the channel, Slack not pursued.
 - **`retrieval.vector_search`** — `NotImplementedError` stub (§12 RAG).
-- **Environment pipeline residuals (2026-10-07):** after any unjailed build, the sticky taint makes
-  every jailed build fresh until a human removes `built/unjailed.json`; [F30] closed 2026-11-04 (D3b): jailed
+- **Environment pipeline residuals (2026-10-07):** every build is jailed (2026-11-09); a build record
+  not marked jailed is rebuilt, and a conda dir still holding the old `built/unjailed.json` taint
+  refuses to build until a human moves it aside; [F30] closed 2026-11-04 (D3b): jailed
   builds share a read-only package archive (`<agent conda dir>/pkgs-archive/`, conda's second
   `pkgs_dirs`; a file is used only when its URL is in `urls.txt` and its md5/sha256 matches the
   lock, else refetched; files enter it only after a successful build, hash-checked, outside the
-  jail), so a rebuild of known packages downloads nothing (pip wheels still download; unjailed
-  builds do not use it); a build kept aside is put back when the same lock returns; a failed
+  jail), so a rebuild of known packages downloads nothing (pip wheels still download); a build kept aside is put back when the same lock returns; a failed
   rebuild over an earlier definition's build keeps that build in use, its results flagged untested
   env; input hashing resolves a worker's paths on
   the host, not in its jail ([F29]); the shell server keeps `-P`, so the analysis interpreter must
@@ -1304,3 +1340,22 @@ Compacted 2026-10-19 (every entry); detail in git history.
   (Claude Opus 5); a commit finding naming no changed file is the auditor's error, never scored.
 - 2026-11-05 — §10: live tests opt in by the `live` marker and `--live` (`tests/conftest.py`); the per-file
   switches retire, except those guarding a message to a person or a destructive step.
+- 2026-11-09 — §9.10 (user rulings, plan `tmp_phase3/0a/`): 0a sharpened — one toolkit contract, the gate becomes the CI
+  pipeline (required jobs held by the orchestration, minting checks among them; toolkit-declared test classes incl.
+  `data("<name>")`), the analysis environment into the toolkit, `PFILES` on its external; new step 0b, the data store
+  (store-defined roles held per unit, a recorder process, fingerprint/check/copy, argument kinds `store`/`record`);
+  step 3 becomes role formalization (access per unit), absorbing [F21] [F33] [H13] [I26] [I6 E4]. Topology stays
+  open on top of the abstraction (§9.11 q2).
+- 2026-11-09 — **Step 0a built** (plan `tmp_phase3/0a/`, rulings D1–D26): §4 the domain is the toolkit's
+  (prompts point to its READMEs); §8 the gate is the **CI pipeline** (required jobs incl. minting; test
+  classes fast/`slow`/`live`/`data("<name>")`; every test of a change runs; live tests listed for the
+  co-lead) and the jail is **on unconditionally** (no `agent_os_jail`; no toolkit code in the orchestrator
+  process — manifests read as data, one-shot jailed calls); §9.5 the toolkit contract (`toolkits:`
+  block, `default_env`, `human_envs`, `test_data`); §9.6 `analyze_*` keys retired into `envs/analysis/`,
+  F21 closed; §9.11 q3 and q5 closed; §12 jail default → egress control; §13 jail-off residuals retired,
+  git-hook residual added, reviewer live cells, `test_data`.
+- 2026-11-10 — **Step 0a Done.** Live seat sweep on the default config (W9b, W9e, W9f; ~$37): status monitor,
+  lead, librarian, reviewer (four cells, incl. `test_a_real_librarian_report_reaches_the_reviewer` through
+  `run_research` with a real librarian), worker (`test_live_ref_chain.py` rewritten on today's `xspec_utils`, test
+  data mounted read-only for that test only), coder mechanism cells and the pressure cell (pin → toolkit main
+  45348d8) pass. §13: XSPEC session tools carry no ancestry (accepted; XSPEC to be retired, user ruling).

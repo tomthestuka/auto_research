@@ -52,48 +52,6 @@ def test_worker_file_tools_deny_auto_research(tmp_path):
     assert out.is_error and "not permitted" in out.text
 
 
-def test_shell_commands_are_confined_by_whichever_layer_is_actually_running(tmp_path, monkeypatch):
-    """Two mechanisms, one property, and which one applies depends on the host.
-
-    With an OS jail running, the orchestration repo is not in the mount namespace at all, so the
-    command-string scan is redundant and is retired -- it enforced nothing the kernel does not, and
-    cost false positives (a python glob reading as a path, a `cwd`-relative path reading as
-    absolute). Without a jail there is no kernel enforcement to fall back on, so the scan stays.
-
-    This test asserts the *second* half directly, because a unit test cannot observe a mount
-    namespace; the jail's own suite covers that side.
-    """
-    from auto_research.agents import react
-
-    if not load_fs_allowlist():
-        pytest.skip("agent_fs_allow not configured — guard inactive")
-
-    class _Reg:
-        def kind_for_function(self, name):
-            return f"mcp.builtin.{name}"
-
-    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda *_a: False)
-    p = SandboxToolProvider(_Reg(), sandbox=None, cwd=tmp_path)
-    out = asyncio.run(p.execute(
-        "bash_exec", {"command": "cat /data/fzhou/auto_research/src/auto_research/sandbox/gate.py"}))
-    assert out.is_error and "not permitted" in out.text
-
-    # And with a jail running the same command is passed through to the sandbox, where the kernel
-    # confines it -- the point being that it is no longer rejected *here*.
-    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda *_a: True)
-    p2 = SandboxToolProvider(_Reg(), sandbox=None, cwd=tmp_path)
-    try:
-        out2 = asyncio.run(p2.execute(
-            "bash_exec",
-            {"command": "cat /data/fzhou/auto_research/src/auto_research/sandbox/gate.py"}))
-        message = out2.text
-    except Exception as exc:  # noqa: BLE001 — it got past the guard and into the fake registry
-        message = f"{type(exc).__name__}: {exc}"
-    # Whatever happens next, it is no longer a path rejection: the command went on to the sandbox,
-    # which is where the kernel confines it.
-    assert "not permitted" not in message
-
-
 def _names(provider):
     return {d["name"] for d in provider.tool_definitions()}
 
@@ -549,13 +507,18 @@ class _FakeSession:
 
 
 def _check(passed, *, layer="A", name="determinism", detail="ok"):
-    return SimpleNamespace(passed=passed, layer=layer, name=name, detail=detail)
+    from auto_research.schemas import CheckResult
+
+    return CheckResult(passed=passed, layer=layer, name=name, detail=detail)
 
 
 def _gate(passed, *, layer_a=None, layer_b=None, reason="gate"):
-    return SimpleNamespace(
-        passed=passed, layer_a=layer_a or [], layer_b=layer_b or [], reason=reason
-    )
+    """A gate report as the gate gives it: a pass lists every job passed (``GateReport`` refuses a
+    pass without them)."""
+    from auto_research.schemas import GATE_JOBS, GateJob, GateReport
+
+    jobs = [GateJob(name=job, status="pass") for job in GATE_JOBS] if passed else []
+    return GateReport(passed=passed, jobs=jobs, layer_a=layer_a or [], layer_b=layer_b or [], reason=reason)
 
 
 def _review(approved, *, issues=None, rationale="r", commit_summary="add my_tool"):
@@ -600,7 +563,7 @@ def test_submit_gate_failure_reports_checks_and_does_not_commit():
         review=_review(True),
     )
     out = asyncio.run(execute_submit(sess))
-    assert "GATE FAILED" in out.text and "no_fabrication.vocabulary" in out.text
+    assert "CI PIPELINE FAILED" in out.text and "no_fabrication.vocabulary" in out.text
     assert sess.committed_with is None  # gate is the immovable wall
 
 
@@ -940,3 +903,17 @@ def test_react_answers_a_garbled_call_instead_of_running_it():
     results = [p for m in model.seen[1] for p in getattr(m, "results", []) or []]
     assert results and results[0].is_error
     assert "not valid JSON" in results[0].content and '{"n": ' in results[0].content
+
+
+def test_a_read_only_role_is_told_which_root_is_the_toolkit_and_its_readme_briefing(tmp_path):
+    """W6: the domain lives in the toolkit's README files, so the role's reach names the toolkit root
+    (the bound contract's), labelled, beside its other roots."""
+    from pathlib import Path
+
+    from auto_research.toolkit_contract import toolkit
+
+    root = Path(toolkit().root).resolve()
+    reach = ReadOnlyToolProvider(roots=[tmp_path, root]).tool_definitions()
+    read = next(d for d in reach if d["name"] == "read_file")["description"]
+    assert f"{root} (the toolkit; its README.md files brief its domain)" in read
+    assert f"{tmp_path.resolve()} (the toolkit" not in read

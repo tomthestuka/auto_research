@@ -7,9 +7,11 @@ machine-readable report handle (JSONL) and a human one (compilable LaTeX/PDF).
 
 The system also **extends its own analysis reach**: when a task needs a capability its
 domain tool library (`research_toolkit`, a separate repo) lacks, the analyst team
-authors the tool itself — through a deterministic mergeability gate (three Layer-A jobs: the
-tests run twice, a no-fabrication scan, and an allow-list check that every changed path sits
-under a `*_utils` package; Layer B runs the tool's own tests and checks what each new tool returns)
+authors the tool itself — through a deterministic gate run as the toolkit's CI pipeline (seven
+required jobs, each reported pass, fail or skip with its reason: change scope, environment
+definitions, a no-fabrication scan, structure, the minting checks that keep every result citable,
+the tool's own tests run twice, and the toolkit's earlier fast tests; a test of the `data` class
+runs on a data set the host names, and one the gate skips fails the change)
 plus a provider-decorrelated code review, landing
 one atomic commit per tool on a working branch. The design goal is **verifiability, not
 trust**: every authored tool ships a human-runnable interface and tests a human can
@@ -20,9 +22,9 @@ at all — self-modification is impossible by construction.
 Coding agents: read **`CLAUDE.md`** before doing anything. It is the single source of
 truth for how this project is built — current status, the phase spec, and the build
 order live there, not here. **Phase 3 (active):** generalizing the agent unit inside this
-repository (per-unit toolkit and sandbox, subagent grants). Its first step decouples the
-orchestration from `research_toolkit`: every coupling is removed or written into one toolkit
-contract, so any toolkit that meets it pairs with the orchestration. Its software-environment stream is
+repository (per-unit toolkit and sandbox, subagent grants). Its first step (done 2026-11-10)
+decoupled the orchestration from `research_toolkit`: every coupling is removed or written into one
+toolkit contract, so any toolkit that meets it pairs with the orchestration; next is the data store. Its software-environment stream is
 built and live-verified: the coding pipeline defines and builds environments, and each toolkit call
 runs in its package's own. The Phase 2 spec is archived in `CLAUDE_p2.md`.
 
@@ -51,8 +53,7 @@ the machine-local `config/orchestration.yaml` + `config/observations.yaml` (deri
 `agent_fs_allow` for you), copies the sandbox hooks, and runs the launch preflight as a smoke
 test. A re-run is an **upgrade**: it seeds every prompt from your existing config.
 
-Machine-local files (`config/orchestration.yaml`, `config/observations.yaml`,
-`src/auto_research/sandbox/{analyst_env.sh,repl_init.py}`) are **gitignored**; the repo tracks a
+Machine-local files (`config/orchestration.yaml`, `config/observations.yaml`) are **gitignored**; the repo tracks a
 `*.example` template for each. The installer writes the live copies; a fresh clone that skips the
 installer must copy each `*.example` by hand.
 
@@ -66,8 +67,8 @@ conda activate auto_research
 pytest -q          # ~477 deterministic tests; no API keys needed
 ```
 
-The suite is **portable**: tests that need a fully-provisioned machine (a real `analyze_env`
-interpreter, `obsdb_catalog` in the toolkit, a populated data root) **skip** gracefully when those
+The suite is **portable**: tests that need a fully-provisioned machine (a real analysis
+environment, `obsdb_catalog` in the toolkit, a populated data root) **skip** gracefully when those
 are absent, rather than failing — so a fresh clone reports passes + skips, not errors. Live/XSPEC
 tests are opt-in: marked `live`, skipped unless `--live` is passed.
 
@@ -76,8 +77,9 @@ tests are opt-in: marked `live`, skipped unless `--live` is passed.
 1. **Orchestration env** (`auto_research`) — required for everything: the LangGraph graph, LLM
    calls, librarians, reviewer, report composition. Pure Python + API keys. `claude-agent-sdk`
    (tool authoring) and `langgraph-cli` (Studio) come from the `pip:` block in `environment.yml`.
-2. **Analysis sandbox env** (`analyze_env`) — required only so analyst workers can execute the
-   `research_toolkit` tools (XSPEC `xspec_utils.*`, archive `heasarc_utils.acquire`). This is
+2. **Analysis environment** — the toolkit's default environment (`envs/analysis/` in
+   `research_toolkit`, named by the contract's `default_env`, layered on a human conda prefix declared
+   in `human_envs`) — required only so analyst workers can execute the `research_toolkit` tools (XSPEC `xspec_utils.*`, archive `heasarc_utils.acquire`). This is
    HEASoft / PyXSPEC / `ixpeobssim` / `relxill` / `astroquery` plus the `research_toolkit` repo and
    the observation data. Heavy and host-specific. **Without it the graph still runs end-to-end** —
    only the analyst tool calls fail (caught by the error-feedback loop).
@@ -90,10 +92,12 @@ environments or package cache), runs the package's tests in it at the gate, and 
 it for the workers. Every receipt names the environment it ran in, and
 `auto_research.env.replay_environment(<fingerprint>)` rebuilds a recorded state. Optional config:
 `conda_exe` (default `$CONDA_EXE` or `conda` on `PATH`) and `env_externals` (software outside conda,
-such as HEASoft and CALDB, stamped on every receipt). `xspec_utils` runs in `ar-xspec` (toolkit `envs/xspec/`);
-a package that names no environment runs in the configured analysis environment. A routed tool runs
-only with `agent_os_jail: true`, and every path its activation or boot file reads (for `ar-xspec`,
-HEASoft, CALDB and the relxill folder) must be on the allow-list. The first launch builds `ar-xspec`
+such as HEASoft and CALDB, stamped on every receipt; `private` names a variable, like HEASoft's `PFILES`, whose folder each process and call gets fresh). `xspec_utils` runs in `ar-xspec` (toolkit `envs/xspec/`);
+a package that names no environment, and a unit's own REPL and shell, run in the toolkit's default
+environment (`ar-analysis`, derived from the human prefix `human_envs.astropy`). Every runtime
+process runs inside the `bwrap` jail (a host that cannot run it is refused at launch), so every path
+an activation or boot file reads (for `ar-xspec`, HEASoft, CALDB and the relxill folder) must be on
+the allow-list. The first launch builds `ar-xspec`
 (about a minute on local disk; much longer when the runtime dir is on NFS).
 
 ### Manual setup (or what the installer automates)
@@ -104,22 +108,22 @@ Everything the installer does, by hand:
 2. **Config** — `cp config/orchestration.yaml.example config/orchestration.yaml` and
    `cp config/observations.yaml.example config/observations.yaml`; edit the paths. Keep
    `agent_fs_allow` in sync with them (the installer derives it).
-3. **HEASoft (incl. PyXSPEC)** — install HEASoft; `cp src/auto_research/sandbox/analyst_env.sh.example
-   src/auto_research/sandbox/analyst_env.sh` and edit `HEADAS`/`CALDB`; point `analyze_ini_sh` at it.
-4. **Analysis Python env** — `conda env create -f environment-analyst.yml -p <prefix>`; set
-   `analyze_env: <prefix>`. (This env excludes PyXSPEC/CALDB/`relxill` — those come from the HEASoft
-   build + `analyst_env.sh`.)
-5. **`relxill` / REPL session setup** — `cp src/auto_research/sandbox/repl_init.py.example
-   src/auto_research/sandbox/repl_init.py`, set the `relxill` path inside it, and point `repl_init_py`
-   at it. (This file is exec'd at each analyst REPL boot — the domain session hook.)
-6. **`research_toolkit`** — clone the sibling repo, `git checkout -b ai` (the branch the runtime
-   commits authored tools onto), ensure a git `user.name`/`user.email`, and set `toolkit_root`.
-7. **Observation data** — put data under one folder with a `<MISSION>` subdirectory per mission;
+3. **HEASoft (incl. PyXSPEC)** — install HEASoft and CALDB; declare them in `env_externals`. The
+   toolkit's `envs/*/activate.sh` source them (absolute paths; `research_toolkit` CLAUDE.md §6b).
+4. **Analysis Python env** — `conda env create -f environment-analyst.yml -p <prefix>`; declare it
+   as `human_envs: {<name>: <prefix>}`, the name the toolkit's `envs/analysis/env.yaml` gives as its
+   `base`. (This env excludes PyXSPEC/CALDB/`relxill` — those come from the HEASoft build; the XSPEC
+   session and the `relxill` path are `research_toolkit/envs/xspec/boot.py`.)
+5. **`research_toolkit`** — clone the sibling repo, `git checkout -b ai` (the branch the runtime
+   commits authored tools onto), ensure a git `user.name`/`user.email`, and fill the `toolkits:`
+   block (the toolkit contract: its `name`, `root`, `package_glob`, `template_package`,
+   `authoring_branch`, `default_env`, `test_classes`; `config/DOCS.md`).
+6. **Observation data** — put data under one folder with a `<MISSION>` subdirectory per mission;
    set `obs_db_root`. Missions are discovered from disk (a subdir with a `catalog.json` is a mission).
 
 If you only care about the literature/reviewer loop, you still need `research_toolkit` present on
-its `ai` branch (the launch preflight checks it); set `analyze_probe: ""` to skip the analysis-stack
-smoke test.
+its `ai` branch (the launch preflight checks it); a default environment whose `env.yaml` names no
+`probe` skips the analysis-stack smoke test.
 
 ---
 
@@ -130,7 +134,7 @@ smoke test.
 | `.env` | API keys and optional tracing flags. Loaded automatically. Never committed (`cp .env.example .env`). |
 | `config/models.yaml` | Role → model-group mapping (OpenAI/Anthropic/Google/DeepSeek/Z.AI/Qwen). No model IDs in code. |
 | `config/model_capabilities.yaml` | What each model takes (images, PDF): the one capability source; every configured member's model needs an entry. |
-| `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `env_externals`, `conda_exe`, `disabled_tools`, `agent_fs_allow` (the per-agent filesystem allow-list), the internet-stability retry policy (`provider_retry_*` — transient provider failures waited out with growing cooldowns instead of killing the run), report formats, report retry cap, and Phase-2 authoring caps. |
+| `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkits` (the toolkit contract: name, root, package glob, template package, authoring branch, fast-test selection, default environment), `human_envs`, `env_externals`, `conda_exe`, `disabled_tools`, `agent_fs_allow` (the per-agent filesystem allow-list), the internet-stability retry policy (`provider_retry_*` — transient provider failures waited out with growing cooldowns instead of killing the run), report formats, report retry cap, and Phase-2 authoring caps. |
 | `config/observations.yaml` | `obs_db_root` — the single obs-db folder; it may start empty, and `acquire` creates a mission's folder, laid out as HEASARC's archive tree, on its first observation. Missions are its subdirs holding a `catalog.json`. |
 | `AUTO_RESEARCH_CONFIG_DIR` | Optional. Names a directory holding all five files below, and every reader honours it, so one process can be run against a whole different configuration — other model seats, another toolkit checkout, another runtime and obs root — without editing anything here. Unset (the normal case) is `config/`. An environment variable because the readers include subprocesses that inherit it and are not all Python. The `.example` templates and `.env` stay with the repo either way. |
 | `config/code_gate.yaml` | The Phase-2 gate's no-fabrication scan lists (banned vocabulary, hard-fail vs finding-tier code patterns — which list a pattern sits in decides its severity; RNG is finding-tier since Monte-Carlo tools need randomness — literal-array findings, ObsID allowlist). A Tier-1 word inside an explicit negation is demoted to the finding tier, so prose stating the no-fabrication discipline is not rejected for stating it. Human-tunable; no scan constant in code. |
@@ -539,8 +543,8 @@ repo it cannot write to, so it cannot modify itself — only extend the tool lib
 
 **Build-time coding agents never run git** — staging, commits, and pushes are the human's
 job. Separately, the runtime toolkit-branch flow is application behavior inside
-`merge_flow`: the author harness, deterministic gate, provider-decorrelated GPT co-lead
-review, and the `approve_edit()` atomic branch commit all exist now; merges to
+`merge_flow`: the author harness, the CI pipeline (the former deterministic gate), the
+provider-decorrelated co-lead review, and the `approve_edit()` atomic branch commit all exist now; merges to
 `research_toolkit` master remain manual and out of band.
 
 ---

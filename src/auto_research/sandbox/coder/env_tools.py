@@ -133,12 +133,10 @@ class CandidateEnvs:
     def _solve(self, folder: Path, specs: list[str]) -> str:
         from auto_research.env import conda_executable
         from auto_research.sandbox.env_build import solve
-        from auto_research.sandbox.jail import jail_enabled
 
         work = Path(tempfile.mkdtemp(prefix="solve-", dir=self._scratch()))
         try:
-            lock = solve(specs, conda_exe=conda_executable(), work=work, jailed=jail_enabled(),
-                         runner=self._runner)
+            lock = solve(specs, conda_exe=conda_executable(), work=work, runner=self._runner)
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
             return f"Not solved: {exc}"
         finally:
@@ -151,7 +149,6 @@ class CandidateEnvs:
 
     def _pin(self, env_id: str, folder: Path, requirements: list[str]) -> str:
         from auto_research.sandbox.env_build import pin_wheels
-        from auto_research.sandbox.jail import jail_enabled
 
         from auto_research.sandbox.env_build import read_definition
 
@@ -170,7 +167,7 @@ class CandidateEnvs:
             return f"Activate the candidate first (cand_env_activate('{env_id}')): its Python picks the wheels."
         work = Path(tempfile.mkdtemp(prefix="pin-", dir=self._scratch()))
         try:
-            lines = pin_wheels(python, requirements, work=work, jailed=jail_enabled(), runner=self._runner)
+            lines = pin_wheels(python, requirements, work=work, runner=self._runner)
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
             return f"Not pinned: {exc}"
         finally:
@@ -187,12 +184,10 @@ class CandidateEnvs:
             return step(*args)
 
     def _activate(self, env_id: str, folder: Path) -> str:
-        from auto_research.env import agent_conda_dir, analysis_environment, conda_executable, declared_externals
+        from auto_research.env import agent_conda_dir, conda_executable, declared_externals, human_environments
         from auto_research.sandbox.env_build import PACKAGE_ARCHIVE, build, read_definition, validate
-        from auto_research.sandbox.jail import jail_enabled
 
-        human = analysis_environment()
-        bases = {human.name: human} if human is not None else {}
+        bases = human_environments()
         externals = declared_externals()
         problems = validate(folder, base_envs=bases, externals=externals)
         if problems:
@@ -200,7 +195,7 @@ class CandidateEnvs:
         try:
             environment = build(read_definition(folder), conda_dir=self.cand_dir / "conda",
                                 conda_exe=conda_executable(), base_envs=bases, externals=externals,
-                                jailed=jail_enabled(), runner=self._runner,
+                                runner=self._runner,
                                 package_archive=agent_conda_dir() / PACKAGE_ARCHIVE)
         except Exception as exc:  # noqa: BLE001 — a failed build is the tool's answer, never a crash
             # A rebuild replaces the prefix the wrappers point at: they go with it.

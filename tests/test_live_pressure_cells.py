@@ -56,9 +56,10 @@ load_dotenv()
 STAMP = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "pressure-cells" / STAMP
 CYCLE_TIMEOUT_S = float(os.getenv("AUTO_RESEARCH_CYCLE_TIMEOUT_S", "5400"))
-#: This test's own pinned toolkit base: toolkit `main` HEAD on 2026-11-05 (after the output-kind
-#: migration and the HEASARC archive tree). science_bench keeps its own `BASE_REF`.
-BASE_REF = "f409d09"
+#: This test's own pinned toolkit base: toolkit `main` HEAD on 2026-11-09 (the toolkit contract:
+#: `envs/analysis/`, the `data` test marker), which today's orchestration needs as its default
+#: environment. science_bench keeps its own `BASE_REF`.
+BASE_REF = "45348d8"
 REPEATS = 3
 #: The auditor's seat, a vendor apart from the coder's and the co-lead's (checked before a cell
 #: spends), built through the registry under its own role key.
@@ -309,7 +310,9 @@ def _git(repo: Path, *args: str) -> str:
 def _branch() -> str:
     from auto_research.graph.runtime import load_orchestration_config
 
-    return str(load_orchestration_config().get("tool_author_branch", "ai"))
+    from auto_research.toolkit_contract import toolkit
+
+    return toolkit(load_orchestration_config()).authoring_branch
 
 
 def _clone(branch: str) -> tuple[Path, str]:

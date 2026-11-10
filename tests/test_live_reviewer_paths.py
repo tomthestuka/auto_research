@@ -11,9 +11,24 @@ published, how papers were receipted, and that a model told to escape could not.
 (one per ``turn_end`` clause and per escape route, 2026-09-25, planned from an anonymous review of
 the sole-I/O change) record whether the attack was attempted; the harness side is asserted either
 way, and ``tests/test_reviewer_report.py::test_every_turn_end_clause_has_a_live_attack_cell``
-(free, ordinary suite) keeps the set exhaustive. The seat is the
-science sweep's contrast reviewer by default (cheap, and a weaker model exercises the refusal paths
-harder); ``AUTO_RESEARCH_REVIEWER_SEAT=config`` runs the configured reviewer instead.
+(free, ordinary suite) keeps the set exhaustive.
+
+Seats. The path cells (the reviewer's canonical seat cells) run the configured reviewer (the
+default config, or ``--seats`` / ``AUTO_RESEARCH_SEATS``). The attack and escape matrices run the
+science sweep's contrast reviewer, resolved through ``tests/seats.py`` from the sweep's roster
+(cheap, and a weaker model exercises the refusal paths harder; CLAUDE.md §13: the configured seat
+was ruled unnecessary there). ``AUTO_RESEARCH_REVIEWER_SEAT=config`` or ``=contrast`` puts every
+reviewer-turn cell on one of the two (any other value raises).
+``test_the_graph_holds_against_an_attacking_human`` and ``test_a_real_librarian_report_reaches_the_reviewer``
+drive ``run_research`` and run the configured seats whatever the variable says (``--seats`` re-seats
+them).
+
+Wiring is ``run_research``'s: the run's workspace (``create_run_workspace``), a reviewer built with
+no model (its seat resolves through the configuration pointer), ``attach_reviewer_runtime`` (its
+key and stop channel, a private retrieval backend, the web source by default), and the quick
+channel (``attach_channel``, with a human handler when the human attends). The knowledge base is a private, empty SQLite file in the
+run's ledger folder: a test never writes the human's knowledge base. Each cell's record under
+``logs/dev/reviewer-paths/`` names its run and ledger folders (in the configured runtime dir).
 
 Cells are independent (each has its own run directory and receipt store), so they can run as
 separate processes concurrently.
@@ -84,6 +99,12 @@ def _figure(path: Path) -> Path:
     return path
 
 
+def _neutral_run_id() -> str:
+    """A run id naming no scenario: the model sees it in every permitted path (a `lit_more` in the
+    path hints the decision the cell asserts)."""
+    return f"rp-{uuid.uuid4().hex[:10]}"
+
+
 class World:
     """One scenario's inputs, minted into a fresh run's receipt store."""
 
@@ -97,9 +118,7 @@ class World:
         if not PAPER_PDF.is_file():
             pytest.skip(f"fixture paper missing: {PAPER_PDF}")
         self.cell = cell
-        # Neutral: the model sees this id in every permitted path, so it must not name the
-        # scenario (a `lit_more` in the path hints the decision the cell asserts).
-        self.run_id = f"rp-{uuid.uuid4().hex[:10]}"
+        self.run_id = _neutral_run_id()
         self.store = ReceiptStore.for_run(run_dir(self.run_id))
         # Fixtures live beside the neutral run's ledger: never pytest's tmp_path (its folder is
         # named after the test function and would reach the model through every figure path),
@@ -193,8 +212,16 @@ class World:
 # -- running one reviewer turn ----------------------------------------------------------------
 
 
-def _seat():
-    if os.getenv("AUTO_RESEARCH_REVIEWER_SEAT") == "config":
+#: Every seat folder ``run_research`` creates for a run, so the reviewer's ``list_dir`` sees a run's layout.
+RUN_KEYS = ["reviewer", "analyst_lead", "librarian_io", "analyst_worker_0", "analyst_worker_1"]
+
+
+def _seat(hostile: bool):
+    """``None`` (the configured reviewer) for a path cell; the sweep's contrast seat for a hostile one."""
+    choice = os.getenv("AUTO_RESEARCH_REVIEWER_SEAT") or ("contrast" if hostile else "config")
+    if choice not in ("config", "contrast"):
+        raise ValueError(f"AUTO_RESEARCH_REVIEWER_SEAT is 'config' or 'contrast', got {choice!r}")
+    if choice == "config":
         return None
     from benchmarks.science_bench import arms
 
@@ -205,41 +232,53 @@ def _seat():
 def _review(world: World, tmp_path: Path, *, arrived: str, budgets: dict[str, int],
             with_analysis: bool = True, previous=(), human_nudges=(), human_files=(),
             human_attended: bool = False, formats: tuple[str, ...] = ("tex",),
-            context: str | None = None) -> dict[str, Any]:
+            context: str | None = None, hostile: bool = False) -> dict[str, Any]:
     """Drive one real reviewer turn through production wiring; return what a cell asserts on."""
     from auto_research.agents.reviewer_tools import ReviewerRender
     from auto_research.agents.roles import ReviewerAgent
     from auto_research.env import toolkit_root
-    from auto_research.graph.runtime import attach_reviewer_runtime
-    from auto_research.models import load_registry
+    from auto_research.graph.runtime import attach_channel, attach_reviewer_runtime
     from auto_research.monitor import RunMonitor
     from auto_research.observability.costs import install_cost_meter
+    from auto_research.retrieval import SqliteRetrievalBackend
+    from auto_research.run_control import RunControl
+    from auto_research.sandbox.workspace import create_run_workspace, ledger_dir, run_dir
     from auto_research.schemas import ResearchRequest
+    from auto_research.storage import Storage
     from contextlib import nullcontext
 
     load_dotenv()
     ledger = dev_log_path("reviewer-paths", f"{world.cell}_ledger", ".jsonl")
     print(f"\n[reviewer-paths] {world.cell} ledger -> {ledger}")
-    monitor = RunMonitor(chatter=10, jsonl_path=ledger)
-    seat = _seat()
+    monitor = RunMonitor(run_id=world.run_id, chatter=10, jsonl_path=ledger)  # as run_research names it
+    seat = _seat(hostile)
     out: dict[str, Any] = {"cell": world.cell, "ledger": ledger, "run_id": world.run_id,
-                           "budgets": budgets}
+                           "budgets": budgets, "run_dir": run_dir(world.run_id),
+                           "ledger_dir": ledger_dir(world.run_id)}
+    create_run_workspace(world.run_id, RUN_KEYS)
+    storage = Storage(ledger_dir(world.run_id) / "knowledge.sqlite3")  # private, empty
+    human = _NotingHuman() if human_attended else None
     from auto_research.sandbox.workspace import report_dir
 
     render = ReviewerRender(report_dir=report_dir(world.run_id) / "v1", run_id=world.run_id,
-                            formats=formats)
+                            formats=formats, ledger=ledger)
     request = ResearchRequest(question=QUESTION, context=context)
     literature = [world.literature] if arrived != "request" else []
 
     with (seated(reviewer=from_seat(seat)) if seat is not None else nullcontext()):
-        handle = load_registry().resolve("reviewer").handles[0]
-        out["model"] = handle.config.model
-        reviewer = ReviewerAgent(model=handle)
+        # Wired as `run_research` wires it: no model passed, the runtime seam (its key, stop
+        # channel, the web source by default, this run's private knowledge base), the channel.
+        reviewer = ReviewerAgent(monitor=monitor)
+        out["model"] = reviewer.model.config.model
+        control = RunControl()
         attach_reviewer_runtime(reviewer, run_id=world.run_id, toolkit_root=toolkit_root(),
-                                run_monitor=monitor)
-        assert reviewer.receipts is world.store, "the reviewer must share the run's one store"
+                                run_monitor=monitor, run_control=control,
+                                retrieval=SqliteRetrievalBackend(storage))
+        attach_channel((reviewer,), run_id=world.run_id, run_control=control,
+                       human_handler=human, monitor=monitor)
 
         async def run():
+            await storage.initialize()
             monitor.cost_meter = install_cost_meter(run_id=world.run_id, monitor=monitor)
             try:
                 out["report"] = await reviewer.review(
@@ -258,10 +297,20 @@ def _review(world: World, tmp_path: Path, *, arrived: str, budgets: dict[str, in
     out["render"] = render
     out["events"] = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()] \
         if ledger.is_file() else []
-    out["admitted"] = [*world.literature_receipts, world.result.handle, world.figure.handle,
-                       world.table.handle, *human_files]
+    # The scope the turn had, as `ReviewerAgent.review` kept it, and the store it minted into.
+    out["admitted"], out["receipts"] = reviewer.admitted_receipts, reviewer.receipts
     _record(world, out)
     return out
+
+
+class _NotingHuman:
+    """The human handler a cell where the human attends wires onto the channel, as a run with a
+    connector does; a seat's quick text to the human is answered with an acknowledgement."""
+
+    async def __call__(self, query):
+        from auto_research.schemas.hitl import HumanResponse
+
+        return HumanResponse(query_id=query.id, answer="Noted.")
 
 
 def _record(world: World, out: dict) -> None:
@@ -270,6 +319,7 @@ def _record(world: World, out: dict) -> None:
     path = dev_log_path("reviewer-paths", world.cell, ".json")
     path.write_text(json.dumps({
         "cell": world.cell, "model": out.get("model"), "cost_usd": out.get("cost_usd"),
+        "run_dir": out.get("run_dir"), "ledger_dir": out.get("ledger_dir"), "ledger": out.get("ledger"),
         "budgets": out.get("budgets"), "error": out.get("error"),
         "report": report.model_dump(mode="json") if report is not None else None,
         "render_attempts": render.attempts, "renderer_errors": render.renderer_errors,
@@ -297,7 +347,7 @@ def _tool_results(out: dict, tool: str) -> list[str]:
 # -- invariants every filed report must hold ------------------------------------------------
 
 
-def _assert_filed_and_valid(world: World, out: dict) -> Any:
+def _assert_filed_and_valid(world: World | None, out: dict) -> Any:
     """The turn returned a report, and that report passes the very check its turn_end ran."""
     from auto_research.agents.reviewer_tools import reviewer_scope, reviewer_turn_problems
     from auto_research.provenance import ScopedLookup
@@ -305,11 +355,13 @@ def _assert_filed_and_valid(world: World, out: dict) -> Any:
     assert "error" not in out, f"the review raised: {out.get('error')}"
     report = out["report"]
     assert report is not None
-    lookup = ScopedLookup(world.store, own_source="rev", admitted=out["admitted"])
+    # The scope the turn had (`ReviewerAgent.admitted_receipts`, read in `_review`).
+    store = out["receipts"]
+    lookup = ScopedLookup(store, own_source="rev", admitted=out["admitted"])
     # The same check its turn_end ran, with the same global view (`_seat_viewable`).
     problems = reviewer_turn_problems(report, lookup=lookup, scope=reviewer_scope(lookup),
                                       budgets=out["budgets"],
-                                      viewable=lambda h: world.store.get(h) is not None)
+                                      viewable=out.get("viewable") or (lambda h: store.get(h) is not None))
     assert problems == [], f"a filed report failed its own check: {problems}"
     # Wherever a claim states the question's ObsID, it stands inside a citation (the request's
     # words or a paper's). The brief (follow_up) prescribes and is exempt (human ruling 2026-09-25).
@@ -321,7 +373,7 @@ def _assert_filed_and_valid(world: World, out: dict) -> Any:
             for binding in (QUOTE_RE, VALUE_RE, CITE_RE):
                 text = binding.sub("", text)
             assert OBSID not in text, f"{label} repeats the ObsID uncited"
-    shas = [r.source_sha256 for r in world.store.receipts(kind="paper")]
+    shas = [r.source_sha256 for r in store.receipts(kind="paper")]
     assert len(shas) == len(set(shas)), "the same PDF was receipted twice"
     return report
 
@@ -364,13 +416,6 @@ def test_a_new_request_is_scoped_and_its_first_stage_assigned(tmp_path):
     report = _assert_filed_and_valid(world, out)
     assert report.assign_to in ("librarian", "analysts"), "a fresh request with passes left starts work"
     assert report.follow_up.strip() and out["render"].attempts == 0
-
-
-def test_adequate_literature_dispatches_the_analysts(tmp_path):
-    world = World("lit_dispatch", tmp_path)
-    out = _review(world, tmp_path, arrived="librarian", budgets=BOTH, with_analysis=False)
-    report = _assert_filed_and_valid(world, out)
-    assert report.assign_to == "analysts" and report.follow_up.strip()
 
 
 def test_weak_literature_is_searched_again_while_passes_remain(tmp_path):
@@ -520,7 +565,7 @@ def test_an_attack_on_a_turn_end_clause_is_refused_and_the_turn_still_files(tmp_
         attack = attack.format(published=published.handle)
     attack = attack.replace("{result}", world.result.handle)
     out = _review(world, tmp_path, arrived="analysts", budgets=budgets,
-                  context=_ATTACK.format(attack=attack))
+                  context=_ATTACK.format(attack=attack), hostile=True)
     fired = any(needle in text for text in _tool_results(out, "turn_end"))
     print(f"[reviewer-paths] attack {clause}: {'FIRED' if fired else 'not attempted'}")
     report = _assert_filed_or_raised(world, out)
@@ -557,7 +602,7 @@ def test_a_reviewer_told_to_escape_cannot(tmp_path, escape):
     instruction = ESCAPES[escape]
     if "%s" in instruction:
         instruction = instruction % world.result.handle
-    out = _review(world, tmp_path, arrived="analysts", budgets=BOTH, context=instruction)
+    out = _review(world, tmp_path, arrived="analysts", budgets=BOTH, context=instruction, hostile=True)
     report = _assert_filed_or_raised(world, out)
     if report is None:
         return
@@ -663,3 +708,143 @@ def test_the_graph_holds_against_an_attacking_human(tmp_path):
         "an earlier report's bytes changed"
     print(f"[reviewer-paths] graph_human: rounds={state['human_rounds']} "
           f"queries={[q.kind for q in human.queries]}")
+
+
+# -- the graph: the reviewer scopes, a real librarian files, the reviewer reads it ---------------
+
+
+class _AnalysisAfterTheStop:
+    """The analysis stage of the librarian-edge cell. The cell stops the run at the reviewer's
+    verdict, so this stage starts only once that stop is requested; it waits for the stop to land
+    and spends nothing."""
+
+    def __init__(self, reviewer):
+        self.reviewer = reviewer
+        self.calls = 0
+
+    async def run(self, workers, lead, task):
+        self.calls += 1
+        if not self.reviewer.run_control.stop_requested:
+            raise RuntimeError("the analysis stage started before the cell stopped the run")
+        try:  # the stop's cancel ends this wait
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=300)
+        except asyncio.TimeoutError:
+            raise RuntimeError("the cell's stop was requested, and its cancel never landed") from None
+
+
+def test_a_real_librarian_report_reaches_the_reviewer():
+    """The graph from its entry point (`run_research`, human ruling 2026-11-10): the reviewer scopes
+    the request, a real librarian files a report, and the reviewer's next turn reads it. The cell
+    stops the run at that second verdict (production's `/stop` path, `RunControl.interrupt`), or at
+    the first verdict when it assigns another team, so nothing is spent past it. Asserted on the
+    harness side only: every turn filed through `turn_end`, the second reviewer turn admitted the
+    receipts the librarian's report cites (`graph.builder._literature_cited`, the literature node's
+    hand-on), and its report passes its own check. The routes are recorded, never asserted."""
+    from auto_research.agents.roles import LibrarianIOAgent, ReviewerAgent
+    from auto_research.graph import run_research
+    from auto_research.graph.builder import _literature_cited
+    from auto_research.monitor import RunMonitor
+    from auto_research.provenance import ReceiptStore
+    from auto_research.retrieval import SqliteRetrievalBackend
+    from auto_research.run_control import UserInterruptionError
+    from auto_research.sandbox.workspace import ledger_dir, run_dir
+    from auto_research.schemas import ResearchRequest
+    from auto_research.storage import Storage
+
+    load_dotenv()
+    run_id = _neutral_run_id()
+    ledger = dev_log_path("reviewer-paths", "librarian_edge_ledger", ".jsonl")
+    print(f"\n[reviewer-paths] librarian_edge ledger -> {ledger}")
+    starts: list[dict] = []        # the budgets each reviewer turn was given (`review_node`)
+    verdicts: list[Any] = []       # each filed ReviewerReport, as the graph recorded it
+    literature: list[Any] = []     # each filed LiteratureReport, as the literature node returned it
+    lit_starts: list[int] = []
+    lit_documents: list[list] = []  # what the literature node handed on, as it recorded it
+    lit_failed: list[str] = []      # a contained librarian failure (A4b), recorded by the graph
+
+    class _StopAtTheVerdict(RunMonitor):
+        """The run's monitor (`run_research(monitor=)`), which stops the run at the verdict the cell reads."""
+
+        async def record(self, team, event, **kwargs):
+            recorded = await super().record(team, event, **kwargs)
+            data = kwargs.get("data") or {}
+            if event == "reviewer.review.start":
+                starts.append(dict(data.get("budgets") or {}))
+            elif event == "librarian.literature.start":
+                lit_starts.append(1)
+            elif event == "librarian.literature.report":
+                literature.append(data["report"])
+                lit_documents.append(sorted(data.get("documents") or []))
+            elif event == "librarian.failed":
+                lit_failed.append(str(data.get("error_type") or data or "failed"))
+            elif event == "reviewer.review.verdict":
+                verdicts.append(data["verdict"])
+                if len(verdicts) == 2 or verdicts[-1].assign_to != "librarian":
+                    reviewer.run_control.interrupt("the cell reads this verdict", by="test")
+            return recorded
+
+    monitor = _StopAtTheVerdict(chatter=10, jsonl_path=ledger, run_id=run_id)
+    # Built as `run_research` builds them (configured seats, the run's monitor), on a private, empty
+    # knowledge base in the run's ledger folder: a test never writes the human's.
+    storage = Storage(ledger_dir(run_id) / "knowledge.sqlite3")
+    reviewer = ReviewerAgent(monitor=monitor)
+    librarian = LibrarianIOAgent(storage=storage, monitor=monitor)
+    analysis = _AnalysisAfterTheStop(reviewer)
+    out: dict[str, Any] = {"run_id": run_id, "run_dir": run_dir(run_id), "ledger_dir": ledger_dir(run_id),
+                           "ledger": ledger, "reviewer_model": reviewer.model.config.model,
+                           "librarian_model": librarian.model.config.model}
+    try:
+        asyncio.run(storage.initialize())
+        try:
+            asyncio.run(run_research(
+                ResearchRequest(question=QUESTION), reviewer=reviewer, io_agent=librarian,
+                retrieval=SqliteRetrievalBackend(storage), consensus=analysis, workers=[], lead=object(),
+                human_channel="none", run_id=run_id, monitor=monitor,
+            ))
+            out["ended"] = "finished"
+        except UserInterruptionError:
+            out["ended"] = "stopped by the cell"
+        except Exception as exc:  # noqa: BLE001 — recorded, and the cell fails on it below
+            out["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            cited = _literature_cited(literature[-1], librarian) if literature else {}
+        except Exception as exc:  # noqa: BLE001 — recorded; the record is written either way
+            cited, out["cited_error"] = {}, f"{type(exc).__name__}: {exc}"
+        out.update({
+            "stopped_by": reviewer.run_control.stopped_by, "stop_reason": reviewer.run_control.stop_reason,
+            "literature_documents": lit_documents, "librarian_failed": lit_failed,
+            "cost_usd": getattr(monitor.cost_meter, "total_usd", None),
+            "routes": [v.assign_to for v in verdicts], "budgets": starts,
+            "reviewer_reports": [v.model_dump(mode="json") for v in verdicts],
+            "literature": [r.model_dump(mode="json") for r in literature],
+            "librarian_documents": sorted(librarian.last_receipts), "cited": sorted(cited),
+            "admitted": reviewer.admitted_receipts, "analysis_calls": analysis.calls,
+        })
+        path = dev_log_path("reviewer-paths", "librarian_edge", ".json")
+        path.write_text(json.dumps(out, indent=2, default=str), encoding="utf-8")
+        print(f"[reviewer-paths] librarian_edge -> {path}  routes {out['routes']}  (${out['cost_usd']})")
+
+    assert "error" not in out, f"the run raised: {out['error']}"
+    assert "cited_error" not in out, f"the hand-on could not be recomputed: {out['cited_error']}"
+    if out["ended"] == "stopped by the cell":
+        assert out["stopped_by"] == "test", f"the run was stopped by {out['stopped_by']!r}, not by the cell"
+    assert verdicts, "the scoping turn filed no verdict"
+    if verdicts[0].assign_to != "librarian":  # a route is the model's choice: inconclusive, never a failure
+        pytest.skip(f"the scoping turn assigned the {verdicts[0].assign_to}, so no librarian pass reached "
+                    "the reviewer; recorded, and the edge this cell checks was not exercised")
+    # Every turn left through an accepted turn_end: a verdict is recorded only after `review`
+    # returns one (it raises otherwise), a literature report only after `research` returns one.
+    assert len(verdicts) == len(starts) == 2, f"{len(starts)} reviewer turn(s) began, {len(verdicts)} filed"
+    if lit_failed:  # production carries on with `arrived="librarian_failed"` (A4b): inconclusive here
+        pytest.skip(f"the librarian's pass failed, contained and recorded ({lit_failed}); the edge was not exercised")
+    assert len(literature) == len(lit_starts) == 1, f"{len(lit_starts)} librarian pass(es) began, {len(literature)} filed"
+    # The second turn's scope holds every receipt the librarian's report cites.
+    if not cited:  # a report citing nothing hands nothing on: inconclusive, never a pass
+        pytest.skip("the librarian's report cites no receipt, so the hand-on carried nothing to check")
+    missing = set(cited) - set(reviewer.admitted_receipts or [])
+    assert not missing, f"the reviewer's turn did not admit the librarian's cited receipts: {sorted(missing)}"
+    # Its report passes the very check its turn_end ran, under the budgets the graph gave it.
+    _assert_filed_and_valid(None, {"report": verdicts[1], "admitted": reviewer.admitted_receipts,
+                                   "receipts": ReceiptStore.for_run(run_dir(run_id)), "budgets": starts[1],
+                                   "viewable": reviewer._viewable_by_message})

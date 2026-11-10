@@ -154,39 +154,3 @@ def test_the_commit_time_build_records_its_start_and_a_heartbeat(tmp_path, monke
     assert len(mon.of("env.build.progress")) >= 2
     [built] = mon.of("env.build")
     assert built["data"]["fresh"] == "missing"
-
-
-def test_a_rebuild_the_reconcile_read_as_intact_is_announced_and_reads_built(tmp_path, monkeypatch):
-    """D1b: the definition and prefix are intact, but the record was built unjailed and the jail is
-    now on, so `build` rebuilds; the launch says so once (level 2, cause `unjailed`) and the
-    result reads `built` with that cause."""
-    from tests.test_env_build import _fake_conda
-
-    from auto_research.graph import runtime
-    from auto_research.sandbox import env_build, jail
-    from auto_research.sandbox.merge_flow import reconcile_environments
-
-    toolkit, _folder, _ = _reconcile_setup(tmp_path, monkeypatch)
-    fake = _fake_conda([])
-    reconcile_environments(toolkit, runner=fake)  # built with the jail off
-    monkeypatch.setattr("auto_research.sandbox.jail.jail_enabled", lambda: True)
-    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
-    from tests.test_env_build import _conda_install
-
-    conda_exe = str(_conda_install(tmp_path / "opt" / "conda"))  # a jailed build binds its install
-    monkeypatch.setattr("auto_research.env.conda_executable", lambda: conda_exe)
-
-    class _Conda(env_build.StoppableRunner):
-        def __call__(self, argv, **kwargs):
-            return fake(argv, **kwargs)
-
-    monkeypatch.setattr(env_build, "StoppableRunner", _Conda)
-    mon = _Ledger()
-    asyncio.run(runtime._reconcile_environments(toolkit, mon))
-
-    [start] = mon.of("env.build.start")
-    assert start["data"] == {"env": "built", "cause": "unjailed"} and start["level"] == 2
-    assert not mon.of("env.build.error"), mon.of("env.build.error")
-    [built] = mon.of("env.build")
-    assert built["data"]["status"] == "built" and built["data"]["cause"] == "unjailed"
-    assert built["summary"] == "built ar-built (its build ran unjailed and the jail is on)"

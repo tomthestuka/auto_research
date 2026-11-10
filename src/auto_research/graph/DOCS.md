@@ -86,10 +86,10 @@ the published artifact paths and handles (`report_artifacts`).
   report_formats=None, checkpointer=None) -> CompiledStateGraph` —
   pure constructor.  `retrieval` defaults to `SqliteRetrievalBackend()`.
   `consensus` defaults to `DebateToConverge(max_rounds=max_iterations, monitor=monitor, registry=registry)`.
-  `registry` defaults to `ToolkitRegistry(Path("/data/fzhou/research_toolkit"))` and is
+  `registry` defaults to `ToolkitRegistry(toolkit().root)` (the toolkit contract) and is
   used for tool catalogue injection into task instructions.
   Raises `ValueError` if `max_iterations < 1`. Reads no environment at import.
-  `analyze_env`, `analyze_ini_sh`, `tool_retry_cap`, and `toolkit_root` are no longer
+  The workers' environment, `tool_retry_cap`, and the toolkit root are no longer
   `build_graph()` parameters — they are consumed when constructing `PersistentSandbox`
   and `DebateToConverge` in `runtime.py`.
 - `async run_request(request, *, reviewer=None, io_agent=None, retrieval=None,
@@ -164,8 +164,10 @@ the published artifact paths and handles (`report_artifacts`).
   checkpointer; the connector already was) goes through `_closed`: a close that raises is
   recorded as `run.teardown.<what>_error` and never replaces the run's own outcome.
   Missing dependencies are constructed from `config/models.yaml`. Reads
-  `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
-  `config/orchestration.yaml`.  Creates per-run workspace
+  `tool_retry_cap` and the toolkit contract (`toolkits:`: its root, authoring branch and default
+  environment) from `config/orchestration.yaml`, read once before the preflight and the contract bound
+  then (`bind_run_contract`); the workers' REPL and shell run in the toolkit's default environment
+  (`SandboxSettings.from_config`).  Creates per-run workspace
   (`<runtime_dir>/runs/{run_id}/`; `runtime_dir` from `config/orchestration.yaml`), spawns one `PersistentSandbox`
   per `AnalystWorkerAgent`, assigns each worker's `sandbox`,
   then tears all sandboxes down after the graph completes or raises.
@@ -218,9 +220,10 @@ the published artifact paths and handles (`report_artifacts`).
   `research(follow_up=…)` or the analysts' instructions; a report to the human is published and
   sent. `max_iterations` caps librarian and analysis passes per run; a human reply changes no
   budget (the human nudges, the reviewer assigns).
-- Live graph verification is opt-in:
-  `pytest tests/test_live_graph.py --live -s`. Writes
-  JSONL plus Markdown logs under `logs/dev/step-10/`.
+- Live graph verification is opt-in (`--live`) through `run_research`:
+  `tests/test_live_b_run.py`, `tests/test_live_reviewer_paths.py::test_the_graph_holds_against_an_attacking_human`
+  and `::test_a_real_librarian_report_reaches_the_reviewer` (the reviewer scopes, a real librarian
+  files, the reviewer's next turn reads it; the cell stops the run at that verdict).
 - Live sandbox verification is opt-in:
   `pytest tests/test_live_sandbox.py --live -s`.
   Writes logs under `logs/dev/step-11/`.
@@ -249,7 +252,10 @@ the published artifact paths and handles (`report_artifacts`).
   every document the librarian opened (`_literature_cited`; user ruling 2026-11-03: only a report
   filed through `turn_end` is citable downstream, the edge worker → lead's shape). The reviewer
   admits them to its scope and lists them as `literature_documents`; any other document stays
-  viewable with `view_receipt`.
+  viewable with `view_receipt`. The live cell
+  `tests/test_live_reviewer_paths.py::test_a_real_librarian_report_reaches_the_reviewer` checks
+  through `run_research` that the reviewer's turn after a real librarian pass admits every receipt
+  `_literature_cited` hands on.
 - `ReviewerLike` — protocol with `async review(request, *, arrived="request", literature=(),
   literature_receipts=None, report=None, previous=(), human_nudges=(), human_files=(),
   budgets=None, human_attended=False, render=None) -> ReviewerReport`.
@@ -258,14 +264,45 @@ the published artifact paths and handles (`report_artifacts`).
 - `_report_message(report, *, attached)` — the human's message: title, abstract, how to reply;
   the sections too when no PDF is attached.
 - `_refuse_pre_sole_io_checkpoint(existing)` (runtime) — raises on a pre-2026-09-25 checkpoint.
-- `attach_reviewer_runtime(reviewer, *, run_id, toolkit_root, run_monitor=None, retrieval=None,
-  web_source=None, human_handler=None)` — the reviewer's production wiring (tools via
-  `readonly_tools_for("reviewer")`, `report_dir`, the run's `ReceiptStore`), called by
-  `run_research` and by live cells so they drive the same reviewer.
+- `attach_reviewer_runtime(reviewer, *, run_id, toolkit_root, run_monitor=None, run_control=None,
+  retrieval=None, web_source=None)` — the reviewer's production wiring: its key
+  `reviewer` (its channel address; a pre-wired key stays), its stop channel when `run_control` is
+  given, tools via `readonly_tools_for("reviewer")` with `retrieval` defaulting to
+  `SqliteRetrievalBackend()` and `web_source` to `WebSource()` (a caller cannot leave the reviewer
+  without production's web tools; a pre-wired `tools` stays), `report_dir`, the run's
+  `ReceiptStore`. The human reaches it through `attach_channel`. Called by `run_research` and by
+  live cells so they drive the same reviewer.
+- `stamp_run_environments(run_id, *, analysis=None) -> str` — the launch's environment stamp (env
+  plan B1): the run's `ReceiptStore.default_env` takes the orchestrator's fingerprint
+  (`host_environment`) with its lock written (`fingerprint_and_lock` into `env_lock_dir`); with
+  `analysis` (an `Environment`), its lock is written too. Returns the fingerprint; raises when an
+  environment cannot be read (`run_research` records `env.fingerprint.error` and runs on).
+- `SandboxSettings(environment, catalogue=None, probe=None)`; `.from_config(orch=None)` — the
+  toolkit's default environment (`env.analysis_environment`), the environments a unit may list
+  (`env_catalogue`) and the default environment's `env.yaml` probe (the `bash_exec` description's
+  example). One definition: the REPL and the shell of every caller come from it.
+- `bind_run_contract(orch, run_id)` / `release_run_contract(run_id)` — binds the process to `orch`'s
+  toolkit contract (`toolkit_contract.bind`) and holds it for the run; `run_research` binds with the
+  configuration it read once, before its preflight, and releases when it ends however it ends, so
+  every reader (`toolkit()`) sees the contract the run was launched with. While a run of the process
+  holds it, a run whose configuration declares another contract (or an invalid block) is refused; a
+  run with the same contract shares it; once none holds it, a later run binds its own configuration's
+  whole contract. With none holding it, an invalid block binds nothing; the preflight's contract
+  check refuses it.
+- `_builtin_server_config(environment, toolkit_root, cwd=None, probe=None, writable_dirs=None)` — the
+  builtin shell server in `environment`: a pipeline one through `envs.in_environment` (activation
+  sourced inside the jail; `bash` the launched command, `-P -c <source>` passed through), a human one
+  from its activation script; `AR_ENV_PROBE` carries `probe`; the jail (unconditional, D25: the argv
+  starts with bwrap) and private folders as the REPL's.
+- `worker_mcp_client(workers, *, run_id, toolkit_root, sandbox_settings=None)
+  -> MCPToolClient` — the workers' shell server (`bash_exec`), unstarted: `_builtin_server_config`
+  in the toolkit's default environment, inside the jail, with the run folder as its cwd and each
+  `AnalystWorkerAgent`'s own folder writable. Settings default to the configured ones. The caller starts it, loads it into the registry
+  and shuts it down; `run_research` and the worker live cells build theirs here.
 - `attach_librarian_runtime(io_agent, *, run_id, run_control=None)` — the librarian's production
   wiring (its key, its report folder, its stop channel, the run's one `ReceiptStore`; a pre-wired
   field stays; a store that cannot open raises), called by `run_research` and by live cells so
-  they drive the same librarian.
+  they drive the same librarian (`tests/test_live_librarian.py`).
 - `readonly_tools_for(role, *, roots, retrieval=None, web_source=None) -> ReadOnlyToolProvider` — the read-only inspection loop production gives the
   `reviewer` or the `analyst_lead`. The two differ on purpose: the lead gets the data catalog and,
   when a human is reachable, the budget-free design channel, and is denied the paper knowledge
@@ -274,9 +311,8 @@ the published artifact paths and handles (`report_artifacts`).
 - `readonly_roots_for(run_id, toolkit_root) -> list[Path]` — the three roots those two roles may
   read: the run directory, the papers directory, the toolkit. Report files are not in it: they
   live beside the ledger.
-- `attach_worker_runtime(workers, *, run_id, registry, toolkit_root, analyze_env=None,
-  analyze_ini_sh=None, repl_init_py=None, mcp_client=None, run_control=None)
-  -> list[PersistentSandbox]` — gives each `AnalystWorkerAgent` its stable key,
+- `attach_worker_runtime(workers, *, run_id, registry, toolkit_root, sandbox_settings=None,
+  mcp_client=None, run_control=None) -> list[PersistentSandbox]` — gives each `AnalystWorkerAgent` its stable key,
   report directory, one persistent sandbox and the registry, and registers the sandbox's aborter
   so a human stop cancels an in-flight tool call. Returns the sandboxes for the caller to shut
   down. **Without it a worker has no tool loop**: `analyze()` runs its inner ReAct loop only when
@@ -286,8 +322,8 @@ the published artifact paths and handles (`report_artifacts`).
 - `run_request(request, ...)` — compatibility entry point; delegates to
   `run_research()` and returns the final `ReviewVerdict`.
 - `run_research(request, ...)` — monitored high-level entry point; returns
-  `ResearchRun`. Reads `tool_retry_cap`, `toolkit_root`, `analyze_env`,
-  `analyze_ini_sh`, and `mcp_servers` from `orchestration.yaml`, starts one
+  `ResearchRun`. Reads `tool_retry_cap` and the toolkit contract from
+  `orchestration.yaml`, starts one
   persistent sandbox per analyst worker, and shuts down sandboxes/MCP clients in
   `finally`.
 - `ResearchRun(request, verdict, final_state, monitor)` — result object with
@@ -395,3 +431,14 @@ and 2026-10-19 (every entry); detail in git history.
 - 2026-11-04 — Z1e: the launch preflight ends with the paid `member_media` probe (models DOCS).
 - 2026-11-04 — H2: `_build_task` names an obs-db root that holds no mission yet and that `acquire` creates a mission's folder on its first observation.
 - 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire.
+- 2026-11-09 — Phase 3 step 0a W5 (D19): `_builtin_server_config` gives the shell server its own folder for each declared private variable through `runner.private_folders(env, env.private_variables(), at=...)` (was `with_private_param_dir` on `PFILES`); same folders as before for HEASoft.
+- 2026-11-09 — Phase 3 step 0a W9c: `worker_mcp_client` builds the workers' shell server (extracted from `run_research`, which calls it); `attach_reviewer_runtime(run_control=)` sets the reviewer's key and stop channel (moved from `run_research`) and defaults `retrieval`/`web_source` to production's. Behaviour unchanged. The worker and reviewer live cells (`ref_chain`, `provenance_html`, `reviewer_paths`) use the seams. Tests: `tests/test_role_wiring_seams.py`.
+- 2026-11-09 — Phase 3 step 0a W9c: `stamp_run_environments` stamps the run store's default environment and writes the analysis environment's lock (extracted from `run_research`, which calls it). Behaviour unchanged. Test: `tests/test_role_wiring_seams.py`.
+- 2026-11-09 — Phase 3 step 0a W2: `run_research` and `_default_graph` read the toolkit root and authoring branch from the toolkit contract (`toolkit_contract.toolkit(orch)`); the `"ai"` branch default is gone. `build_graph`'s standalone registry reads the contract's root.
+- 2026-11-09 — Phase 3 step 0a W9c review: `attach_reviewer_runtime` drops its unused `human_handler` parameter (the human reaches the reviewer through `attach_channel`) and builds its default retrieval and web source inside the tool-construction guard. The run path's behaviour is unchanged (`run_research` always passed both). A caller that omits the web source now gets production's: the reviewers of `test_live_agents.py`, `test_live_honest_failure.py` and `test_live_seat_probe.py` gain web tools (and the default knowledge base) in their live cells.
+- 2026-11-09 — Phase 3 step 0a W9d: `tests/test_live_graph.py` deleted (ruling D23): it built the graph by hand without the `attach_*` seams and read the removed `LeadCycleOutcome.verdict`; the `run_research` cells cover the graph end to end.
+- 2026-11-09 — W2 review (M2): the run reads the process's bound toolkit contract (`toolkit_contract.toolkit()`), the one the launch preflight bound and the evidence predicate reads.
+- 2026-11-09 — Phase 3 step 0a W4: `SandboxSettings` holds `environment` (the toolkit's default one, `env.analysis_environment`), `catalogue` and `probe`; its `analyze_env`/`analyze_ini_sh`/`repl_init_py`/`analyze_probe` fields and `_env_spelling` go. `_builtin_server_config(environment, toolkit_root, cwd, probe, writable_dirs)` starts the shell server through `envs.in_environment` for a pipeline environment (F21 closed: the activation is sourced inside the jail, the toolkit's files mounted), records `jailed` from the launched command, and passes the probe as `AR_ENV_PROBE`. `run_research` reads its configuration once before the preflight and binds the toolkit contract there (`bind_run_contract`, review finding: readers took the contract from a fresh file read); a second run binds its own. Tests: `tests/test_role_wiring_seams.py`.
+- 2026-11-09 — W4 review L3: `bind_run_contract(orch, run_id)` holds the bound contract for the run (`_CONTRACT_RUNS`, released by `release_run_contract` on every exit); a concurrent in-process run declaring another contract is refused, a finished run's binding is replaced. Test: `test_role_wiring_seams::test_a_run_started_while_another_holds_the_contract_cannot_change_it`.
+- 2026-11-09 — Phase 3 step 0a W10 (ruling D25): `_builtin_server_config` always jails the shell server (no unjailed fallback; the `"jailed"` server-config flag is gone); `worker_mcp_client` loses `orch` and the `mcp_servers` key (a configured server ran unjailed): the workers' shell is the builtin server. `_reconcile_environments` drops the `unjailed`/`tainted` build causes and the `env.tainted` event.
+- 2026-11-10 — Phase 3 step 0a W9f (human ruling: drive the real graph, record the route): the reviewer's live dispatch cell `test_adequate_literature_dispatches_the_analysts` (a hand-written one-paper literature report, route asserted) is replaced by `tests/test_live_reviewer_paths.py::test_a_real_librarian_report_reaches_the_reviewer`: `run_research` with a stub analysis, the reviewer scopes the request, a real librarian files, and the reviewer's next turn reads it; the cell stops the run at that verdict through `RunControl.interrupt` (the `/stop` path). Asserted: every turn filed through `turn_end`, the second reviewer turn admitted every receipt `_literature_cited` hands on, its report passes its own check under `review_node`'s budgets, the route is within its cap. Routes recorded, not asserted. No code change here.

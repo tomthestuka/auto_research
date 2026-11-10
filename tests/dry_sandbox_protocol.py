@@ -11,11 +11,10 @@ import asyncio
 import tempfile
 from pathlib import Path
 
+from auto_research.graph.runtime import SandboxSettings
 from auto_research.sandbox.persistent import PersistentSandbox
 
 TOOLKIT = "/data/fzhou/research_toolkit"
-ANALYZE_ENV = "/grad/fzhou/.conda/envs/astropy"
-ANALYZE_INI = "/nfsdata1/fzhou/auto_research/src/auto_research/sandbox/analyst_env.sh"
 
 
 async def main() -> None:
@@ -23,8 +22,7 @@ async def main() -> None:
     sb = PersistentSandbox(
         toolkit_root=TOOLKIT,
         workdir=workdir,
-        analyze_env=ANALYZE_ENV,
-        analyze_ini_sh=ANALYZE_INI,
+        environment=SandboxSettings.from_config().environment,  # the toolkit's default environment
     )
     await sb.start()
     print("started; is_alive =", sb.is_alive)

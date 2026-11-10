@@ -50,8 +50,6 @@ from auto_research.sandbox.coder.claude_sdk import (  # noqa: F401 — re-export
     _default_sdk_client_factory,
     _drive_author,
     _make_escalation_server,
-    _make_fs_guard_hook,
-    _make_path_confiner,
     _record_coder_cost,
     _with_live_anthropic_key,
 )
@@ -97,33 +95,10 @@ def _cap(key: str, default: int) -> int:
 
 
 def _resolve_toolkit_root() -> Path:
-    """The ``research_toolkit`` checkout the runtime commits authored tools into (§9.9)."""
-    return Path(_orchestration_config().get("toolkit_root", "")).expanduser()
+    """The toolkit checkout the runtime commits authored tools into (§9.9; the toolkit contract)."""
+    from auto_research.toolkit_contract import toolkit
 
-
-def check_toolkit_root_configured() -> None:
-    """Launch-time preflight (no LLM): assert ``toolkit_root`` is configured and is a directory.
-
-    Every runtime path hint derives from ``config/orchestration.yaml: toolkit_root`` — the
-    coder's structure context (its cwd + the template layout), the reviewer/lead read-only
-    roots, and the ``ToolkitRegistry`` discovery root. A missing or wrong key would send
-    agents hunting for the checkout (and silently mask the fault behind a stale default), so
-    we fail loudly at launch with a precise message. Runs before ``check_toolkit_git_identity``
-    so a misconfigured root reports as such rather than as a confusing "not a git checkout".
-    Registered in ``auto_research.preflight``.
-    """
-    raw = str(_orchestration_config().get("toolkit_root", "")).strip()
-    if not raw:
-        raise RuntimeError(
-            "toolkit_root is not set in config/orchestration.yaml — set it to the "
-            "research_toolkit checkout path (where the runtime authors tools)."
-        )
-    root = Path(raw).expanduser()
-    if not root.is_dir():
-        raise RuntimeError(
-            f"toolkit_root {str(root)!r} (config/orchestration.yaml) is not a directory — "
-            "set it to the research_toolkit checkout path."
-        )
+    return toolkit().root
 
 
 def check_toolkit_git_identity() -> None:
@@ -137,7 +112,7 @@ def check_toolkit_git_identity() -> None:
     root = _resolve_toolkit_root()
     if not (root / ".git").exists() and not root.is_dir():
         raise RuntimeError(
-            f"toolkit_root {root!r} (config/orchestration.yaml) is not a git checkout; "
+            f"toolkit root {root!r} (config/orchestration.yaml `toolkits:`) is not a git checkout; "
             "the runtime cannot commit authored tools there."
         )
     missing = [
@@ -150,7 +125,7 @@ def check_toolkit_git_identity() -> None:
     ]
     if missing:
         raise RuntimeError(
-            f"research_toolkit ({root}) has no git commit identity ({', '.join(missing)} unset). "
+            f"The toolkit ({root}) has no git commit identity ({', '.join(missing)} unset). "
             f"Set it so runtime tool commits don't fail, e.g.:\n"
             f"  git -C {root} config user.name 'auto_research'\n"
             f"  git -C {root} config user.email 'auto-research@localhost'"
@@ -158,8 +133,11 @@ def check_toolkit_git_identity() -> None:
 
 
 def _resolve_tool_author_branch() -> str:
-    """The branch the runtime authors tools on directly (CLAUDE.md §9.9; default ``ai``)."""
-    return str(_orchestration_config().get("tool_author_branch", "ai"))
+    """The branch the runtime authors tools on directly (CLAUDE.md §9.9; the toolkit contract's
+    ``authoring_branch``)."""
+    from auto_research.toolkit_contract import toolkit
+
+    return toolkit().authoring_branch
 
 
 def _current_branch(root: Path) -> str:
@@ -216,8 +194,8 @@ def check_toolkit_branch_clean(root: Path | None = None, branch: str | None = No
     """Launch-time preflight (no LLM): assert ``research_toolkit`` is on the authoring branch
     and has a clean working tree (CLAUDE.md §9.9, step 7).
 
-    Direct-branch authoring commits straight onto ``branch`` (default ``ai``) in
-    ``toolkit_root``. A wrong branch would commit authored tools to the wrong place. A dirty
+    Direct-branch authoring commits straight onto ``branch`` (the contract's ``authoring_branch``)
+    in the toolkit root. A wrong branch would commit authored tools to the wrong place. A dirty
     tree **at launch** means a prior run was interrupted before its in-run auto-reset could run
     (``propose_and_pr`` resets a non-committed attempt back to HEAD — §9.9) or a human left
     edits; either way the human inspects/cleans before the next run, lest unrelated changes get
@@ -232,12 +210,12 @@ def check_toolkit_branch_clean(root: Path | None = None, branch: str | None = No
     current = _current_branch(root)
     if current != branch:
         raise RuntimeError(
-            f"research_toolkit ({root}) is on branch {current!r}, not the authoring branch "
+            f"The toolkit ({root}) is on branch {current!r}, not the authoring branch "
             f"{branch!r}. Switch before running, e.g.:\n  git -C {root} checkout {branch}"
         )
     if _is_dirty(root):
         raise ToolkitBranchUnclean(
-            f"research_toolkit ({root}) has uncommitted changes on {branch!r}. A prior tool "
+            f"The toolkit ({root}) has uncommitted changes on {branch!r}. A prior tool "
             f"authoring may have failed terminally and left edits for you to inspect (§9.9).\n"
             f"Uncommitted paths:\n" + "".join(f"  {p}\n" for p in _dirty_paths(root))
             + f"Review and clean before the next run, or re-run with resume=True to auto-heal:\n"
@@ -267,8 +245,8 @@ def _resolve_coder_model() -> str:
 def _build_structure_context(workdir: Path) -> str:
     """Assemble the local-structure context the author is seeded with.
 
-    Runtime-safe sources only (CLAUDE.md §4): the real ``xspec_utils`` template layout +
-    its top-level source, plus the configured mission observation paths. Never reads any
+    Runtime-safe sources only (CLAUDE.md §4): the layout of the toolkit contract's
+    ``template_package`` + its top-level source, plus the configured mission observation paths. Never reads any
     ``DOCS.md``/``CLAUDE.md``.
 
     ``workdir`` is the author's actual working directory (its cwd) — the ``research_toolkit``
@@ -279,21 +257,25 @@ def _build_structure_context(workdir: Path) -> str:
     (``/root/…`` → EACCES → ``find /``). The mission observation paths are the absolute
     locations of the validation ObsIDs the tool's tests run against.
     """
+    from auto_research.toolkit_contract import toolkit
+
     workdir = Path(workdir)
+    contract = toolkit()
     parts: list[str] = [
         f"# Working directory (your cwd): {workdir}\n"
-        "This absolute path is the research_toolkit checkout you edit; every tool package "
+        f"This absolute path is the {contract.name} checkout you edit; every tool package "
         "lives directly under it, and the paths below are absolute — use them verbatim."
     ]
-    template = workdir / "xspec_utils"
-    if template.is_dir():
+    name = contract.template_package
+    template = workdir / name
+    if template.is_dir():  # present at launch (``check_toolkit_contract``)
         tree = sorted(
             str(p)
             for p in template.rglob("*")
             if p.is_file() and "__pycache__" not in p.parts
         )
-        parts.append("# Template package layout (mirror xspec_utils exactly):\n" + "\n".join(tree))
-        for rel in ("xspec_utils/__init__.py", "xspec_utils/skills/__init__.py"):
+        parts.append(f"# Template package layout (mirror {name} exactly):\n" + "\n".join(tree))
+        for rel in (f"{name}/__init__.py", f"{name}/skills/__init__.py"):
             src = workdir / rel
             if src.is_file():
                 parts.append(f"# {src}\n```python\n{src.read_text(encoding='utf-8')}\n```")
@@ -302,40 +284,67 @@ def _build_structure_context(workdir: Path) -> str:
     if obs:
         lines = "\n".join(f"- {mission}: {path}" for mission, path in obs.items())
         parts.append(
-            "# Mission observation paths — your real validation ObsIDs live under these absolute "
-            "directories, read-only to the gate (a synthetic one is a marked `synth<YYMMDD>-<hex>` "
-            "ObsID your tests build in their fixture obs-db):\n"
+            "# Mission observation paths — the observation databases the analysts read, under these "
+            "absolute directories. A test reaches real data through a data set the CI pipeline "
+            "provides (listed below, when the host provides any); a synthetic input is a marked "
+            "`synth<YYMMDD>-<hex>` ObsID your tests build in their fixture obs-db:\n"
             + lines
         )
+    data_sets = _data_set_context()
+    if data_sets:
+        parts.append(data_sets)
     environments = _environment_context(workdir)
     if environments:
         parts.append(environments)
     return "\n\n".join(parts)
 
 
+def _data_set_context() -> str:
+    """The data sets the CI pipeline provides to a ``data("<name>")`` test (config ``test_data``,
+    each whose folder exists: ``gate._gate_data``), and the variable a test reads each one's folder
+    from. Empty when the host provides none."""
+    from auto_research.sandbox.gate import _gate_data
+    from auto_research.toolkit_contract import data_variable
+
+    try:
+        provided = _gate_data()
+    except Exception:  # noqa: BLE001 — names for the seed only; a config gap leaves them out
+        return ""
+    if not provided:
+        return ""
+    lines = "\n".join(f"- `{name}`: a test marked `data(\"{name}\")` reads its folder from "
+                       f"`{data_variable(name)}`" for name in sorted(provided))
+    return ("# Data sets the CI pipeline provides (bound read-only in its test run; unset in your own "
+            "shell, where a data test skips with its reason):\n" + lines)
+
+
 def _environment_context(workdir: Path) -> str:
     """The environments a coder can name or layer on (env plan B3c-3): each package's ``env:``, the
-    definitions under ``envs/``, the human environments a definition may name as ``base`` and the
-    declared externals. Names only, from the tree and config."""
+    definitions under ``envs/``, the default one (where a package naming none runs), the human
+    environments a definition may name as ``base`` and the declared externals. Names only, from
+    the tree, the toolkit contract and config."""
     from auto_research.sandbox.gate import _package_env
+    from auto_research.toolkit_contract import toolkit
 
     named = {
-        package.name: env for package in sorted(workdir.glob("*_utils"))
-        if package.is_dir() and (env := _package_env(package))
+        package: env for package in toolkit().packages(workdir) if (env := _package_env(workdir / package))
     }
     definitions = sorted(p.name for p in (workdir / "envs").glob("*") if p.is_dir()) \
         if (workdir / "envs").is_dir() else []
     try:
-        from auto_research.env import analysis_environment, declared_externals
+        from auto_research.env import declared_externals, human_environments
 
-        human = analysis_environment()
+        humans = sorted(human_environments())
         externals = sorted(declared_externals())
+        default = toolkit().default_env
     except Exception:  # noqa: BLE001 — names for the seed only; a config gap leaves them out
-        human, externals = None, []
+        humans, externals, default = [], [], None
     lines = [f"- package {pkg}: env `{env}`" for pkg, env in named.items()]
     lines.append(f"- definitions under envs/: {', '.join(definitions) or 'none yet'}")
-    if human is not None:
-        lines.append(f"- human environment a definition may use as `base`: {human.name}")
+    if default:
+        lines.append(f"- a package naming no env runs in `{default}` (envs/{default}/)")
+    if humans:
+        lines.append(f"- human environments a definition may use as `base`: {', '.join(humans)}")
     if externals:
         lines.append(f"- declared externals: {', '.join(externals)}")
     return "# Software environments (see your system prompt's environment section):\n" + "\n".join(lines)
@@ -677,7 +686,7 @@ def _stage_judged(worktree: Path, manifest: dict[str, str]) -> None:
             data = handle.read() if stat.S_ISREG(info.st_mode) else b""
         mode = stat.S_IMODE(info.st_mode)
         if f"{mode:o}:{hashlib.sha256(data).hexdigest()}" != entry:
-            raise RuntimeError(f"the changeset changed after the gate judged it: [{rel!r}]")
+            raise RuntimeError(f"the changeset changed after the CI pipeline judged it: [{rel!r}]")
         blob = subprocess.run(["git", "-C", str(worktree), "hash-object", "-w", "--no-filters", "--stdin"],
                               input=data, capture_output=True, check=True,
                               timeout=_GIT_TIMEOUT_S).stdout.decode().strip()
@@ -708,11 +717,11 @@ def approve_edit(
     if manifest is not None:
         # [G3]: exactly what the gate judged, unchanged since — or no commit at all.
         if base and _git_in(worktree, "rev-parse", "HEAD").strip() != base:
-            raise RuntimeError("HEAD moved after the gate judged the changeset; submit again")
+            raise RuntimeError("HEAD moved after the CI pipeline judged the changeset; submit again")
         current = changeset_manifest(worktree)
         changed = sorted(k for k in set(manifest) | set(current) if manifest.get(k) != current.get(k))
         if changed:
-            raise RuntimeError(f"the changeset changed after the gate judged it: {changed[:10]}")
+            raise RuntimeError(f"the changeset changed after the CI pipeline judged it: {changed[:10]}")
         _stage_judged(worktree, manifest)
     else:
         rels = sorted(str(p.relative_to(worktree)) for p in collect_targets(worktree))
@@ -1052,14 +1061,14 @@ def committed_environments(toolkit_root: Path, manifest: dict[str, str]) -> list
     """The environment ids a commit concerns (env plan B3c-4): every definition it changed (and did
     not delete) and the environment every package it changed names in ``tool_config.yaml``."""
     from auto_research.sandbox.env_build import _NAME
-    from auto_research.sandbox.gate import _ENV_DEF_RE, _TOOLKIT_PKG_RE, _package_env
+    from auto_research.sandbox.gate import _ENV_DEF_RE, _in_package, _package_env
 
     toolkit_root = Path(toolkit_root)
     ids: set[str] = set()
     for path in manifest:
         if match := _ENV_DEF_RE.match(path):
             ids.add(match.group(1))
-        elif _TOOLKIT_PKG_RE.match(path):
+        elif _in_package(path):
             env = _package_env(toolkit_root / path.split("/", 1)[0])
             if env and _NAME.fullmatch(env):
                 ids.add(env)
@@ -1155,15 +1164,13 @@ def build_committed_environments(
     ``fresh`` (the reason, :func:`env_build.build`'s ``on_build``) when a fresh build started rather
     than an intact prefix being reused — set as it starts, so a failed build carries it too. Blocking. ``on_start(env_id, reason)``, when given, is called from
     this thread as a fresh build begins (D1/D1b)."""
-    from auto_research.env import agent_conda_dir, analysis_environment, conda_executable, declared_externals
+    from auto_research.env import agent_conda_dir, conda_executable, declared_externals, human_environments
     import subprocess as _subprocess
 
     from auto_research.sandbox.env_build import PACKAGE_ARCHIVE, build, read_definition
-    from auto_research.sandbox.jail import jail_enabled
 
     runner = runner or _subprocess.run
-    human = analysis_environment()
-    bases = {human.name: human} if human is not None else {}
+    bases = human_environments()
     externals = declared_externals()
     results: list[dict[str, Any]] = []
     for env_id in env_ids:
@@ -1181,7 +1188,7 @@ def build_committed_environments(
             definition = read_definition(Path(toolkit_root) / "envs" / env_id)
             entry["definition_sha256"] = definition.digest()
             environment = build(definition, conda_dir=agent_conda_dir(), conda_exe=conda_executable(),
-                                base_envs=bases, externals=externals, jailed=jail_enabled(), runner=runner,
+                                base_envs=bases, externals=externals, runner=runner,
                                 on_build=on_build, package_archive=agent_conda_dir() / PACKAGE_ARCHIVE,
                                 on_restore=lambda kept, entry=entry: entry.update(restored=kept))
             entry.update(ok=True, name=environment.name, prefix=str(environment.prefix))
@@ -1209,31 +1216,25 @@ def reconcile_environments(
       ``ar-<id>.drift-<fp8>``, a fresh build from the unchanged definition; when that build fails
       the drifted prefix is put back and stays in use;
     - every other definition goes through :func:`env_build.build`, which reuses an intact prefix and
-      refreshes its record (activation, boot file, externals; a build the jail setting no longer
-      admits is redone);
+      refreshes its record (activation, boot file, externals);
     - a built environment whose declared externals' stamps changed → reported and recorded.
 
     One result per definition (``status``: ``ok``, ``built``, ``restored`` — a kept build of this
-    definition put back, its name in ``restored`` —, ``drift``, ``external_changed``, ``failed``),
-    plus ``tainted`` when an unjailed build ran in the conda dir and the jail is on.
+    definition put back, its name in ``restored`` —, ``drift``, ``external_changed``, ``failed``).
     Blocking; never raises for one environment. ``on_start(env_id, cause)``, when given, is called
     from this thread as each fresh build begins (``cause``: ``missing``, ``stale``, ``drift``, or
-    what :func:`env_build.build` found: ``unjailed``, ``tainted``, ``interrupted``); a reused prefix
+    what :func:`env_build.build` found: ``interrupted``); a reused prefix
     is not announced (D1/D1b)."""
-    from auto_research.env import agent_conda_dir, analysis_environment, declared_externals
+    from auto_research.env import agent_conda_dir, declared_externals, human_environments
     from auto_research.sandbox import env_build as B
     from auto_research.sandbox.envs import _external_stamp
-    from auto_research.sandbox.jail import jail_enabled
 
     envs_dir = Path(toolkit_root) / "envs"
     ids = sorted(p.name for p in envs_dir.iterdir() if (p / "env.yaml").is_file()) if envs_dir.is_dir() else []
     conda_dir = agent_conda_dir()
     externals = declared_externals()
-    human = analysis_environment()
-    bases = {human.name: human} if human is not None else {}
+    bases = human_environments()
     results: list[dict[str, Any]] = []
-    if jail_enabled() and os.path.lexists(conda_dir / "built" / f"{B._UNJAILED}.json"):
-        results.append({"env": "*", "status": "tainted", "marker": str(conda_dir / "built" / f"{B._UNJAILED}.json")})
     causes: dict[str, str | None] = {}
     for env_id in ids:
         if getattr(runner, "stopped", False):
@@ -1276,8 +1277,8 @@ def reconcile_environments(
     built = (build_committed_environments(toolkit_root, list(causes), runner=runner, on_start=started)
              if causes else [])
     for entry in built:
-        # The reconcile's own reading, else what `build` found (D1b: a record built unjailed, a
-        # tainted conda dir, a prefix gone): either way a fresh build reads `built`.
+        # The reconcile's own reading, else what `build` found (D1b: a prefix gone): either way a
+        # fresh build reads `built`.
         cause = causes.get(entry["env"]) or entry.get("fresh")
         # A kept build of this definition put back is one event of its own: nothing was built (D3c).
         status = ("restored" if entry.get("restored") else "built" if cause else "ok") if entry["ok"] else "failed"
@@ -1404,8 +1405,9 @@ _DEFAULT_APPROVE_EDIT = approve_edit
 _HOST_TOOLING_PREFIXES = ("CLAUDE", "COPILOT", "VSCODE")
 
 
-def _author_pfiles(worktree_base: Path | None, toolkit_root: Path) -> Path | None:
-    """The Claude author's private PFILES folder: in its artifacts dir, never inside the toolkit.
+def _author_private_at(worktree_base: Path | None, toolkit_root: Path) -> Path | None:
+    """Where the Claude author's private folders go (``runner.private_folders``): its artifacts
+    dir, never inside the toolkit.
 
     A caller with no artifacts dir falls back to the toolkit root as ``worktree_base``; a folder
     there would dirty the tree the gate scans, so that case gets none.
@@ -1416,23 +1418,25 @@ def _author_pfiles(worktree_base: Path | None, toolkit_root: Path) -> Path | Non
     tree = Path(toolkit_root).resolve()
     if base == tree or base.is_relative_to(tree):
         return None
-    return base / "pfiles"
+    return base
 
 
 def _author_env(
-    toolkit_root: Path, pfiles_dir: Path | None = None, active_bin: Path | None = None,
+    toolkit_root: Path, private_at: Path | None = None, active_bin: Path | None = None, *,
+    home: Path | None = None,
 ) -> dict[str, str] | None:
-    """The environment the SDK author's ``Bash`` runs in — **identical to how the analyst
-    sandbox and the gate execute toolkit code** (CLAUDE.md §9.4): the analyst conda interpreter
-    first on ``PATH`` (so ``python``/``pytest`` carry the full science stack — ``xspec`` via the
-    sourced HEASoft env, ``ixpeobssim`` from the conda env), HEASoft/CALDB sourced from
-    ``analyze_ini_sh``, and ``toolkit_root`` on ``PYTHONPATH``. Without this the author would run
-    in the orchestration env (no science stack) and could not run the real tests it authors —
-    only the gate could — so it would be blind to import-time failures (§9.4 the author and the
-    analysts are the only code-runners; both must share the analyst env).
+    """The environment the SDK author's ``Bash`` runs in — **the toolkit's default environment, as
+    the analyst shell and the gate start it** (CLAUDE.md §9.4): its activation's variables (sourced
+    by the shared launcher inside the analysis jail and read back: ``runner.analysis_activation_env``;
+    what it derived from that jail's home rewritten onto ``home``, the author's own jail home), its
+    interpreter first on ``PATH`` (so ``python``/``pytest`` carry its stack and externals), and
+    ``toolkit_root`` on ``PYTHONPATH``. Without this the author would run in the orchestration env
+    (no science stack) and could not run the real tests it authors — only the gate could — so it
+    would be blind to import-time failures (§9.4 the author and the analysts are the only
+    code-runners; both must share the analyst env).
 
-    Best-effort: returns ``None`` (inherit the parent env) when the analyst env isn't configured
-    or can't be sourced, so unit tests and science-stack-free setups still build options.
+    Best-effort: returns ``None`` (inherit the parent env) when the default environment cannot be
+    resolved or sourced, so unit tests and science-stack-free setups still build options.
 
     ``active_bin`` (env plan B3c-3) goes first on ``PATH``: the folder ``cand_env_activate`` fills
     with wrappers for a candidate environment, empty until then, so plain ``python``/``pytest``
@@ -1441,23 +1445,12 @@ def _author_env(
     import os
 
     cfg = _orchestration_config()
-    from auto_research.env import analysis_environment
-
-    environment = analysis_environment(cfg)
-    ini_sh = cfg.get("analyze_ini_sh")
-    if environment is None and not ini_sh:
-        if active_bin is None:
-            return None
-        env = {k: v for k, v in os.environ.items() if not k.upper().startswith(_HOST_TOOLING_PREFIXES)}
-        env["PATH"] = f"{active_bin}:" + env.get("PATH", "")
-        return env
     try:
-        from auto_research.sandbox.runner import _source_ini_env
+        from auto_research.env import analysis_environment
+        from auto_research.sandbox.runner import analysis_activation_env
 
-        if environment is not None:
-            env = environment.activation_env()
-        else:  # an init script with no prefix configured
-            env = dict(_source_ini_env(ini_sh))
+        environment = analysis_environment(cfg)
+        env = analysis_activation_env(cfg, home=str(home) if home is not None else None)
     except Exception:  # noqa: BLE001 — inherit rather than fail the whole options build
         if active_bin is None:
             return None
@@ -1470,17 +1463,17 @@ def _author_env(
     # Copilot variable out of it — constant across benchmark arms, so not condition-bearing, but
     # host identity reaching an actor all the same.
     env = {k: v for k, v in env.items() if not k.upper().startswith(_HOST_TOOLING_PREFIXES)}
-    if environment is not None:
-        env["PATH"] = f"{environment.prefix / 'bin'}:" + env.get("PATH", "")
+    env["PATH"] = f"{environment.prefix / 'bin'}:" + env.get("PATH", "")
     if active_bin is not None:
         env["PATH"] = f"{active_bin}:" + env.get("PATH", "")
     existing_pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(toolkit_root) + (":" + existing_pp if existing_pp else "")
-    if pfiles_dir is not None:
-        # Its own HEASoft parameter folder (F23), inside a place the author's jail lets it write.
-        from auto_research.sandbox.runner import with_private_param_dir
+    if private_at is not None:
+        # Its own folder for each declared private variable (F23), where the author's jail lets it write.
+        from auto_research.env import private_variables
+        from auto_research.sandbox.runner import private_folders
 
-        env = with_private_param_dir(env, pfiles_dir)
+        env, _ = private_folders(env, private_variables(cfg), at=private_at)
     return env
 
 
@@ -1518,9 +1511,9 @@ def _restored_note(entry: dict) -> str:
         "build on them.",
     ]
     if entry.get("gate_passed") is True:
-        lines.append("That submission passed the deterministic gate.")
+        lines.append("That submission passed the CI pipeline.")
     elif entry.get("gate_passed") is False:
-        lines.append("That submission was rejected by the deterministic gate.")
+        lines.append("That submission was rejected by the CI pipeline.")
     issues = entry.get("review_issues")
     # Written in a coder-writable folder: only a list of texts is a list of issues.
     issues = [str(i)[:300] for i in issues] if isinstance(issues, list) else []
@@ -1531,9 +1524,18 @@ def _restored_note(entry: dict) -> str:
     return "\n".join(lines)
 
 
+def gate_jobs_line(gate: GateReport) -> str:
+    """The pipeline's jobs on one line, each with its status (and a skip's reason), or ``""``."""
+    return ("Jobs: " + "; ".join(f"{j.name} {j.status}" + (f" ({j.reason})" if j.status == "skip" else "")
+                                 for j in gate.jobs)) if gate.jobs else ""
+
+
 def _gate_feedback_message(gate: GateReport) -> str:
     failed = [c for c in (*gate.layer_a, *gate.layer_b) if not c.passed]
     detail = "\n".join(f"- {c.name}: {c.detail}" for c in failed) or gate.reason
+    # The pipeline's jobs first, each with its status, so the coder sees which ran and which waited.
+    if gate.jobs:
+        detail = gate_jobs_line(gate) + "\n" + detail
     # When the structural checks fail, the tool's tests are not run yet — warn the coder so a
     # partial "looks done" fix isn't submitted before the remaining feedback can surface.
     tests_not_run = (not gate.layer_b) and any(not c.passed for c in gate.layer_a)
@@ -1543,7 +1545,7 @@ def _gate_feedback_message(gate: GateReport) -> str:
         if tests_not_run else ""
     )
     return (
-        "The gate rejected your tool. Fix EVERY issue listed below before you resubmit — a "
+        "The CI pipeline rejected your tool. Fix EVERY issue listed below before you resubmit — a "
         "partial fix is rejected again — then re-run pytest in the worktree:\n"
         f"{detail}\n\nNever fabricate data or results; fix the underlying cause rather than "
         f"weakening a check to pass.{tail}"
@@ -2049,7 +2051,7 @@ class AuthoringSession:
             if head is not None or self._base_ref is not None:
                 _git_in(self.worktree, "reset", "--mixed", "-q", self._base_ref or "HEAD")
         except RuntimeError as exc:
-            g = GateReport(passed=False, reason=f"the worktree could not be unstaged before the gate: {exc}")
+            g = GateReport(passed=False, reason=f"the worktree could not be unstaged before the CI pipeline: {exc}")
             self.last_gate = g
             await _emit(self._monitor, "gate.result", level=4, summary="gate rejected",
                         data={"passed": False, "failing_checks": ["unstage"], "reason": g.reason})
@@ -2089,13 +2091,13 @@ class AuthoringSession:
         except (OSError, ValueError, subprocess.SubprocessError, RecursionError, MemoryError) as exc:
             # An unreadable file or a failed git call is the gate's failure, reported to the lead,
             # never an exception that ends the authoring (§9.3.8).
-            g = GateReport(passed=False, reason=f"the gate could not read the changeset: {type(exc).__name__}: {exc}")
+            g = GateReport(passed=False, reason=f"the CI pipeline could not read the changeset: {type(exc).__name__}: {exc}")
         failed = [f"[{c.layer}] {c.name}" for c in (*g.layer_a, *g.layer_b) if not c.passed]
         await _emit(
             self._monitor, "gate.result", level=4,
             summary=f"gate {'passed' if g.passed else 'rejected'}",
             data={"passed": g.passed, "failing_checks": failed, "report_hash": g.report_hash,
-                  "reason": g.reason},
+                  "reason": g.reason, "jobs": {j.name: j.status for j in g.jobs}},
         )
         self.last_gate = g
         if self._base_ref is not None:
@@ -2384,7 +2386,7 @@ def _build_backend(
     member: RoleModelConfig,
     worktree: Path,
     toolkit_root: Path,
-    worktree_base: Path | None = None,
+    worktree_base: Path,
     system_prompt: str,
     ask_lead: Callable[..., Awaitable[str]],
     ask_human: Callable[..., Awaitable[str]],
@@ -2396,10 +2398,9 @@ def _build_backend(
     """Build the author harness ``member`` names (§6, ``coder.harness``).
 
     Both backends receive the same brief, the same working tree, the same escalation handlers and
-    the same filesystem allow-list; what differs is the mechanism each harness offers for them.
-    The Claude SDK hosts the escalation tools in-process and gates the filesystem with a hook; the
-    Codex app-server takes an MCP endpoint by URL and enforces the allow-list as writable roots at
-    the OS level (see :mod:`auto_research.sandbox.coder.codex_sdk`).
+    the same jail (``jail.coder_policy``); what differs is how each harness hosts the escalation
+    tools: the Claude SDK in-process, the Codex app-server through an MCP endpoint by URL (see
+    :mod:`auto_research.sandbox.coder.codex_sdk`).
 
     ``member`` is passed in rather than read from config here so one caller can author with a
     member the config does not name, which is what lets a benchmark sweep the author across vendors
@@ -2412,35 +2413,35 @@ def _build_backend(
     coder_model = member.model
     active_bin = env_tools.active_bin if env_tools is not None else None
     cand_ro = (str(env_tools.cand_dir),) if env_tools is not None else ()
-    if member.harness == "codex":
-        from auto_research.sandbox.coder.codex_sdk import CodexBackend
-        from auto_research.sandbox.coder.escalation_server import EscalationServer
-        from auto_research.sandbox.fs_guard import PathGuard, load_fs_allowlist
+    from auto_research.sandbox.jail import coder_home
 
-        # The allow-list becomes this harness's writable roots, with the working tree always in
-        # it: one configured list, enforced by the OS rather than by a hook.
-        roots = [str(Path(root)) for root in load_fs_allowlist()]
-        if str(worktree) not in roots:
-            roots.append(str(worktree))
+    if member.harness == "codex":
+        from auto_research.sandbox.coder.codex_sdk import CodexBackend, jail_label
+        from auto_research.sandbox.coder.escalation_server import EscalationServer
+
         return CodexBackend(
             member=member,
             worktree=worktree,
             system_prompt=system_prompt,
-            guard=PathGuard.from_config(),
             escalation=EscalationServer(ask_lead, ask_human, env_tools=env_tools),
-            env=_author_env(toolkit_root, active_bin=active_bin),  # author's shell == analyst/gate
-            # execution env; its private PFILES is set by the backend, which knows its home (F23)
-            writable_roots=roots,
+            # author's shell == analyst/gate execution env, read for its own jail home; its private
+            # folders are set by the backend, which knows that home (F23)
+            env=_author_env(toolkit_root, active_bin=active_bin,
+                            home=coder_home(jail_label(worktree)).resolve()),
             jail_readonly=cand_ro,
             monitor=monitor,
         )
 
+    from auto_research.sandbox.coder.claude_sdk import jail_label
+
     options = _build_options(
         worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,
         escalation_server=_make_escalation_server(ask_lead, ask_human, env_tools), max_turns=max_turns,
-        # author's Bash == analyst/gate code-execution env; its PFILES in its writable artifacts dir
-        env=_author_env(toolkit_root, _author_pfiles(worktree_base, toolkit_root), active_bin),
-        worktree_base=worktree_base,    # where the jail launcher is written, when the jail is on
+        # author's Bash == analyst/gate code-execution env, read for its own jail home; its private
+        # folders in its artifacts dir
+        env=_author_env(toolkit_root, _author_private_at(worktree_base, toolkit_root), active_bin,
+                        home=coder_home(jail_label(worktree_base)).resolve()),
+        worktree_base=worktree_base,    # where the jail launcher is written
         jail_readonly=cand_ro,
     )
     return ClaudeSdkBackend(sdk_client_factory(options), monitor=monitor, coder_model=coder_model)
@@ -2569,7 +2570,7 @@ def build_authoring_session(
     from auto_research.sandbox.coder.env_tools import CandidateEnvs
 
     # A caller with no artifacts dir passes the toolkit as `worktree_base`; candidates there would
-    # dirty the tree the gate scans, so that session has no environment tools (as `_author_pfiles`).
+    # dirty the tree the gate scans, so that session has no environment tools (as `_author_private_at`).
     cand_root = worktree_base / "envs_cand"
     inside = [root.resolve() for root in (toolkit_root, worktree)]
     env_tools = None if any(cand_root.resolve().is_relative_to(root) for root in inside) else \
@@ -2628,7 +2629,7 @@ async def propose_and_pr(
     (headless fail-safe).
 
     ``direct_branch`` selects runtime authoring mode (§9.9): when set, the author works in
-    ``toolkit_root`` on that ambient branch (default ``ai``, asserted clean) instead of an
+    ``toolkit_root`` on that ambient branch (the contract's ``authoring_branch``, asserted clean) instead of an
     isolated worktree, and a **non-committed** attempt auto-resets the tree back to HEAD (a
     patch artifact of the discarded work is saved under ``worktree_base`` first). ``None``
     keeps the isolated-worktree behaviour (tests/future use).

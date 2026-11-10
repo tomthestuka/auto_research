@@ -498,7 +498,9 @@ def test_the_frozen_key_is_outside_every_root_an_actor_can_read():
 
     source = yaml.safe_load(Path(orchestration_yaml()).read_text(encoding="utf-8")) or {}
     key_path = Path(extract.ANSWER_KEY).resolve()
-    roots = [source.get(name) for name in ("runtime_dir", "papers_dir", "toolkit_root")]
+    from auto_research.toolkit_contract import toolkit
+
+    roots = [source.get(name) for name in ("runtime_dir", "papers_dir")] + [toolkit(source).root]
     roots += list(source.get("agent_fs_allow") or [])
     for root in [r for r in roots if r]:
         resolved = Path(str(root)).expanduser().resolve()

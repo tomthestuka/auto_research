@@ -187,7 +187,6 @@ def test_both_backends_satisfy_the_interface():
             member=_member(harness="codex", provider="deepseek", base_url="https://x/"),
             worktree=Path("/tmp"),
             system_prompt="p",
-            guard=_AllowAll(),
         ),
         CoderBackend,
     )
@@ -236,38 +235,18 @@ def test_claude_successful_turn_carries_no_error_marker():
     assert asyncio.run(ClaudeSdkBackend(client).drive("go")) == "done"
 
 
-class _AllowAll:
-    def is_allowed(self, path: str) -> bool:
-        return True
-
-    def forbidden_in_command(self, command: str):
-        return None
-
-
-class _DenyPath:
-    """The shape of the real PathGuard: an allow-list over paths plus a command scan."""
-
-    def __init__(self, denied: str) -> None:
-        self.denied = denied
-
-    def is_allowed(self, path: str) -> bool:
-        return self.denied not in str(path)
-
-    def forbidden_in_command(self, command: str):
-        return self.denied if self.denied in command else None
-
-
-def _codex(guard) -> CodexBackend:
+def _codex() -> CodexBackend:
     return CodexBackend(
         member=_member(harness="codex", provider="deepseek", base_url="https://api.deepseek.com/"),
         worktree=Path("/tmp/wt"),
         system_prompt="prompt",
-        guard=guard,
     )
 
 
-def test_codex_gate_accepts_what_the_allow_list_permits():
-    backend = _codex(_AllowAll())
+def test_codex_accepts_a_command_or_patch_approval_the_jail_confines():
+    """The approval policy is ``never``; a command or patch approval that arrives anyway is
+    accepted, since the jail is the wall."""
+    backend = _codex()
     assert backend.approve(
         "item/commandExecution/requestApproval", {"command": "pytest -q"}
     ) == {"decision": "accept"}
@@ -276,54 +255,7 @@ def test_codex_gate_accepts_what_the_allow_list_permits():
     ) == {"decision": "accept"}
 
 
-def test_codex_gate_denies_a_command_naming_a_forbidden_path():
-    backend = _codex(_DenyPath("/nfsdata1/fzhou/auto_research"))
-    decision = backend.approve(
-        "item/commandExecution/requestApproval",
-        {"command": "cat /nfsdata1/fzhou/auto_research/CLAUDE.md"},
-    )
-    assert decision["decision"] == "deny"
-    assert "allow-list" in decision["reason"]
-
-
-def test_codex_gate_denies_a_patch_outside_the_allow_list():
-    backend = _codex(_DenyPath("auto_research"))
-    decision = backend.approve(
-        "item/fileChange/requestApproval",
-        {"changes": [{"path": "/tmp/wt/ok.py"}, {"path": "/nfsdata1/fzhou/auto_research/x.py"}]},
-    )
-    assert decision["decision"] == "deny"
-    assert "auto_research" in decision["reason"] or "x.py" in decision["reason"]
-
-
-def test_codex_gate_reads_the_nested_item_shape_too():
-    """The request may carry its subject under `item` rather than at the top level."""
-    backend = _codex(_DenyPath("secret"))
-    assert backend.approve(
-        "item/fileChange/requestApproval", {"item": {"changes": [{"path": "/tmp/secret.py"}]}}
-    )["decision"] == "deny"
-    assert backend.approve(
-        "item/commandExecution/requestApproval", {"item": {"command": "cat /tmp/secret.py"}}
-    )["decision"] == "deny"
-
-
-def test_codex_gate_fails_open_on_a_guard_bug():
-    """A guard fault must never brick authoring, matching the Claude hook's behaviour."""
-
-    class _Broken:
-        def is_allowed(self, path):
-            raise RuntimeError("boom")
-
-        def forbidden_in_command(self, command):
-            raise RuntimeError("boom")
-
-    backend = _codex(_Broken())
-    assert backend.approve("item/commandExecution/requestApproval", {"command": "ls"}) == {
-        "decision": "accept"
-    }
-
-
-def test_codex_thread_config_carries_the_allow_list_and_the_provider_block():
+def test_codex_thread_config_carries_the_provider_block_and_no_harness_sandbox():
     backend = CodexBackend(
         member=_member(
             harness="codex",
@@ -334,14 +266,11 @@ def test_codex_thread_config_carries_the_allow_list_and_the_provider_block():
         ),
         worktree=Path("/tmp/wt"),
         system_prompt="prompt",
-        guard=_AllowAll(),
-        writable_roots=["/tmp/wt", "/data/obs"],
         escalation_url="http://127.0.0.1:5/mcp",
         escalation_token_env="AR_ESCALATION_TOKEN",
     )
     config = backend._config_payload()
-    assert config["sandbox_workspace_write"]["writable_roots"] == ["/tmp/wt", "/data/obs"]
-    assert config["sandbox_workspace_write"]["network_access"] is False
+    assert "sandbox_workspace_write" not in config  # the jail is the author's reach, not Codex's sandbox
     provider_block = config["model_providers"]["deepseek"]
     assert provider_block["base_url"] == "https://api.deepseek.com/"
     assert provider_block["wire_api"] == "responses"
@@ -381,7 +310,6 @@ def test_codex_items_map_onto_the_harness_independent_event_names():
         member=_member(harness="codex", provider="deepseek", base_url="https://x/"),
         worktree=Path("/tmp/wt"),
         system_prompt="p",
-        guard=_AllowAll(),
         monitor=monitor,
     )
     texts: list[str] = []
@@ -424,44 +352,8 @@ def test_codex_items_map_onto_the_harness_independent_event_names():
     assert texts == ["hello"]
 
 
-def test_codex_records_a_read_outside_the_allow_list():
-    """Codex grants full-disk read access, so a crossing is recorded rather than prevented."""
-    monitor = _Monitor()
-    backend = CodexBackend(
-        member=_member(harness="codex", provider="deepseek", base_url="https://x/"),
-        worktree=Path("/tmp/wt"),
-        system_prompt="p",
-        guard=_DenyPath("auto_research"),
-        monitor=monitor,
-    )
-
-    async def run() -> None:
-        await backend._record_notification(
-            _Note(
-                "item/completed",
-                _Payload(
-                    item=_Payload(
-                        type="commandExecution",
-                        command="grep -r x .",
-                        exit_code=0,
-                        aggregated_output="",
-                        command_actions=[
-                            _Payload(path="/nfsdata1/fzhou/auto_research/CLAUDE.md"),
-                            _Payload(path="/tmp/wt/ok.py"),
-                        ],
-                    )
-                ),
-            ),
-            [],
-        )
-
-    asyncio.run(run())
-    audit = [data for event, data in monitor.events if event == "coder.read_outside_allowlist"]
-    assert audit and audit[0]["paths"] == ["/nfsdata1/fzhou/auto_research/CLAUDE.md"]
-
-
 def test_codex_drive_before_connect_is_an_explicit_error():
-    backend = _codex(_AllowAll())
+    backend = _codex()
     with pytest.raises(RuntimeError, match="before connect"):
         asyncio.run(backend.drive("go"))
 
@@ -528,7 +420,7 @@ def test_thread_params_layer_the_role_prompt_rather_than_replacing_codex_instruc
     """`prompts/coder.md` is policy; Codex's own account of its tools is harness knowledge worth
     keeping, so the prompt goes in as developer instructions (both were live-checked to be
     honoured, 2026-08-19)."""
-    backend = _codex(_AllowAll())
+    backend = _codex()
     params = None
 
     class _Client:
@@ -545,10 +437,7 @@ def test_thread_params_layer_the_role_prompt_rather_than_replacing_codex_instruc
     assert backend._start_thread() == "t-1"
     assert params["developerInstructions"] == "prompt"
     assert "baseInstructions" not in params
-    # approvalPolicy depends on the jail (machine-local config); its own test sweeps both.
     assert params["approvalsReviewer"] == "user"
-    # Not asserted here: the sandbox mode depends on whether the kernel jail is on, which is
-    # machine-local config. Its own test sweeps both values.
     assert params["modelProvider"] == "deepseek"
 
 
@@ -564,15 +453,17 @@ def test_build_backend_dispatches_on_the_members_harness(tmp_path):
     async def ask_human(message: str) -> str:  # pragma: no cover — never called here
         return ""
 
+    options: list = []
     kwargs = dict(
         worktree=tmp_path,
         toolkit_root=tmp_path,
+        worktree_base=tmp_path / "authoring",
         system_prompt="p",
         ask_lead=ask_lead,
         ask_human=ask_human,
         max_turns=5,
         monitor=None,
-        sdk_client_factory=lambda options: _FakeSdkClient(),
+        sdk_client_factory=lambda built: options.append(built) or _FakeSdkClient(),
     )
 
     claude = merge_flow._build_backend(
@@ -580,6 +471,9 @@ def test_build_backend_dispatches_on_the_members_harness(tmp_path):
         **kwargs,
     )
     assert isinstance(claude, ClaudeSdkBackend)
+    # The SDK execs its CLI through the jail launcher, never directly.
+    assert Path(options[0].cli_path) == tmp_path / "authoring" / "claude-jailed"
+    assert Path(options[0].cli_path).read_text().startswith("#!/bin/sh\nexec ")
 
     # The member is an argument, not ambient config, so one process can build both backends —
     # which is what lets a benchmark sweep the author across vendors in one batch.
@@ -593,8 +487,6 @@ def test_build_backend_dispatches_on_the_members_harness(tmp_path):
         **kwargs,
     )
     assert isinstance(codex, CodexBackend)
-    # The configured allow-list becomes the harness's writable roots, with the working tree in it.
-    assert str(tmp_path) in codex._writable_roots
 
 # --------------------------------------------------------------------------- escalation fail-safe
 
@@ -715,43 +607,6 @@ def test_ask_human_with_a_handler_delivers_its_answer_verbatim():
     )
     assert sent == ["[Reply from the human] Use epoch 2 and state the assumption."]
 
-def test_codex_audit_resolves_a_relative_read_against_the_command_cwd():
-    """The regression the live matrix found: Codex's command parse yields paths relative to the
-    command's directory, and resolving them against this process's cwd instead flagged every
-    ordinary in-worktree read (47 false events in one session)."""
-    monitor = _Monitor()
-    backend = CodexBackend(
-        member=_member(harness="codex", provider="deepseek", base_url="https://x/"),
-        worktree=Path("/tmp/wt"),
-        system_prompt="p",
-        guard=_DenyPath("auto_research"),
-        monitor=monitor,
-    )
-
-    async def run() -> None:
-        await backend._record_notification(
-            _Note(
-                "item/completed",
-                _Payload(
-                    item=_Payload(
-                        type="commandExecution",
-                        command="sed -n '1,40p' demo_utils/lib/demo_help.py",
-                        cwd="/tmp/wt",
-                        exit_code=0,
-                        aggregated_output="",
-                        command_actions=[_Payload(path="demo_utils/lib/demo_help.py")],
-                    )
-                ),
-            ),
-            [],
-        )
-
-    asyncio.run(run())
-    assert not [event for event, _ in monitor.events if event == "coder.read_outside_allowlist"], (
-        "an in-worktree relative read was recorded as a boundary crossing"
-    )
-
-
 def test_codex_config_is_flattened_into_cli_overrides():
     """MCP servers and provider blocks are read when the app-server process starts, not per
     thread (measured live: a thread-level escalation server never connected), so the config is
@@ -761,20 +616,20 @@ def test_codex_config_is_flattened_into_cli_overrides():
     flat = _flatten_overrides(
         {
             "mcp_servers": {"escalation": {"url": "http://127.0.0.1:5/mcp"}},
-            "sandbox_workspace_write": {"writable_roots": ["/a", "/b"], "network_access": False},
+            "tools": {"web_search": True, "names": ["/a", "/b"]},
             "model_provider": "deepseek",
         }
     )
     assert 'mcp_servers.escalation.url="http://127.0.0.1:5/mcp"' in flat
-    assert 'sandbox_workspace_write.writable_roots=["/a", "/b"]' in flat
-    assert "sandbox_workspace_write.network_access=false" in flat
+    assert 'tools.names=["/a", "/b"]' in flat
+    assert "tools.web_search=true" in flat
     assert 'model_provider="deepseek"' in flat
 
 
 def test_codex_thread_params_carry_no_config_block():
     """Whatever the app-server does with a thread-level `config`, it is not where MCP servers or
     provider blocks take effect, so nothing is sent there twice."""
-    backend = _codex(_AllowAll())
+    backend = _codex()
     params = None
 
     class _Client:
@@ -795,7 +650,7 @@ def test_codex_answers_an_mcp_elicitation_in_its_own_vocabulary():
     """The live matrix's second find: an MCP tool call is offered as an *elicitation*, which takes
     `{"action": ...}`. Replying with `{"decision": ...}` reads as a rejection, and the author loses
     `ask_lead`/`ask_human` entirely while appearing to have called them."""
-    backend = _codex(_AllowAll())
+    backend = _codex()
     request = {
         "serverName": "escalation",
         "mode": "form",
@@ -811,49 +666,11 @@ def test_codex_answers_an_mcp_elicitation_in_its_own_vocabulary():
 
 def test_codex_declines_an_elicitation_from_a_server_the_runtime_did_not_configure():
     """Our escalation server is this process; anything else asking to run a tool is not ours."""
-    backend = _codex(_AllowAll())
+    backend = _codex()
     decision = backend.approve(
         "mcpServer/elicitation/request", {"serverName": "somebody-elses-server"}
     )
     assert decision == {"action": "decline"}
-
-def test_codex_audit_unwraps_a_model_wrapped_cwd():
-    """`CommandExecutionThreadItem.cwd` is a RootModel, so `str()` on it yields `root='/tmp/…'`.
-    Using that as the base turned every relative read into a boundary crossing (40 false events
-    in one live session, after the first fix and before this one)."""
-    monitor = _Monitor()
-    backend = CodexBackend(
-        member=_member(harness="codex", provider="deepseek", base_url="https://x/"),
-        worktree=Path("/tmp/wt"),
-        system_prompt="p",
-        guard=_DenyPath("auto_research"),
-        monitor=monitor,
-    )
-
-    class _Wrapped:
-        def __init__(self, value):
-            self.root = value
-
-    async def run() -> None:
-        await backend._record_notification(
-            _Note(
-                "item/completed",
-                _Payload(
-                    item=_Payload(
-                        type="commandExecution",
-                        command="ls demo_utils",
-                        cwd=_Wrapped("/tmp/wt"),
-                        exit_code=0,
-                        aggregated_output="",
-                        command_actions=[_Payload(path=_Wrapped("demo_utils"))],
-                    )
-                ),
-            ),
-            [],
-        )
-
-    asyncio.run(run())
-    assert not [e for e, _ in monitor.events if e == "coder.read_outside_allowlist"]
 
 # --------------------------------------------------------------------------- unverified pairings
 
@@ -906,7 +723,7 @@ def test_member_parameters_reach_the_codex_config_and_win():
         parameters={"model_reasoning_effort": "high", "tools": {"web_search": False}},
     )
     backend = CodexBackend(
-        member=member, worktree=Path("/tmp/wt"), system_prompt="p", guard=_AllowAll()
+        member=member, worktree=Path("/tmp/wt"), system_prompt="p"
     )
     config = backend._config_payload()
     assert config["model_reasoning_effort"] == "high"
@@ -921,8 +738,8 @@ def _codex_backend(member, env=None, monkeypatch=None, tmp_path=None):
     from auto_research.sandbox.coder.codex_sdk import CodexBackend
 
     return CodexBackend(
-        member=member, worktree=tmp_path, system_prompt="p", guard=None,
-        escalation=None, env=env, writable_roots=[str(tmp_path)], monitor=None,
+        member=member, worktree=tmp_path, system_prompt="p",
+        escalation=None, env=env, monitor=None,
     )
 
 
@@ -1036,7 +853,6 @@ def test_the_child_environment_carries_the_live_key_not_the_stale_one(monkeypatc
                        key_env="OPENAI_API_KEY"),
         worktree=tmp_path,
         system_prompt="p",
-        guard=None,
         env={"OPENAI_API_KEY": "stale-inherited"},
         client_factory=_factory,
     )
@@ -1047,25 +863,16 @@ def test_the_child_environment_carries_the_live_key_not_the_stale_one(monkeypatc
     keymod.reset_pools()
 
 
-@pytest.mark.parametrize("jailed, expected", [(True, "danger-full-access"), (False, "workspace-write")])
-def test_the_harness_sandbox_stands_down_exactly_when_the_kernel_jail_is_on(
-    monkeypatch, tmp_path, jailed, expected
-):
-    """One enforcement layer, not two — and the invariant is asserted at both settings.
+def test_the_harness_sandbox_stands_down_for_the_kernel_jail(tmp_path):
+    """One enforcement layer, not two.
 
     This harness's own sandbox *is* bubblewrap, so running it inside our bubblewrap jail nests the
     same mechanism: it cannot spawn its sandbox helper, every shell command is rejected, and the
     author reaches the gate having read and written nothing, which looks like a weak model rather
-    than broken plumbing. When the jail is on it therefore stands down and the kernel is the wall;
-    when the jail is off it is the only wall and stays on.
-
-    Swept rather than pinned to one value, because the flag is gitignored machine-local config: a
-    test that reads it is a test of one machine (the 2026-07-28 lesson, and this test hit it).
+    than broken plumbing. It therefore stands down and the kernel is the wall.
     """
-    from auto_research.sandbox import jail
     from auto_research.sandbox.coder.codex_sdk import CodexBackend
 
-    monkeypatch.setattr(jail, "jail_enabled", lambda: jailed, raising=True)
     params = {}
 
     class _Started:
@@ -1078,17 +885,15 @@ def test_the_harness_sandbox_stands_down_exactly_when_the_kernel_jail_is_on(
 
     backend = CodexBackend(
         member=_member(harness="codex", provider="deepseek", base_url="https://api.deepseek.com/"),
-        worktree=tmp_path, system_prompt="prompt", guard=None,
+        worktree=tmp_path, system_prompt="prompt",
     )
     backend._client = _Client()
     backend._start_thread()
 
-    assert params["sandbox"] == expected
-    # Jailed, approvals are off too: that path had never run (the harness sandbox used to permit
-    # those commands without asking), and when it finally did it rejected `python` and `pytest`, so
-    # the author could not run the tests it wrote. The kernel makes out-of-jail paths absent, which
-    # is stronger than a command-string check.
-    assert params["approvalPolicy"] == ("never" if jailed else "untrusted")
+    assert params["sandbox"] == "danger-full-access"
+    # Approvals are off too: when that path finally ran it rejected `python` and `pytest`, so the
+    # author could not run the tests it wrote. The kernel makes out-of-jail paths absent.
+    assert params["approvalPolicy"] == "never"
 
 
 def test_an_author_may_write_only_its_worktree_and_its_own_settings_home(tmp_path):
@@ -1222,7 +1027,7 @@ def _pollers(exclude: frozenset = frozenset()) -> list:
 
 
 def _wired_codex(router: _FakeRouter) -> CodexBackend:
-    backend = _codex(_AllowAll())
+    backend = _codex()
     backend._client = _FakeCodexClient(router)
     backend._thread_id = "thread_1"
     return backend
@@ -1345,7 +1150,6 @@ def _login_probe(monkeypatch, member) -> _RecordingCodexClient:
         member=member,
         worktree=Path("/tmp/wt"),
         system_prompt="p",
-        guard=_AllowAll(),
         client_factory=_factory,
     )
     backend._build_client()
@@ -1399,7 +1203,7 @@ def test_the_shipped_coder_member_resolves_a_key_variable():
 
     member = coder_member()
     backend = CodexBackend(
-        member=member, worktree=Path("/tmp/wt"), system_prompt="p", guard=_AllowAll(),
+        member=member, worktree=Path("/tmp/wt"), system_prompt="p",
     )
     assert backend._key_env, f"the coder member {member.name!r} resolves no key variable"
 
@@ -1427,7 +1231,7 @@ def test_codex_steer_reaches_the_turn_in_flight():
     state its answer would have cleared (measured live 2026-09-12, twice in one run).
     """
     router = _FakeRouter()
-    backend = _codex(_AllowAll())
+    backend = _codex()
     backend._client = _SteerableCodexClient(router)
     backend._thread_id = "thread_1"
     client = backend._client
@@ -1449,7 +1253,7 @@ def test_codex_steer_reaches_the_turn_in_flight():
 
 def test_codex_steer_off_a_live_turn_is_refused_rather_than_misdelivered():
     """No turn in flight → False, so the caller starts one instead of steering into the void."""
-    backend = _codex(_AllowAll())
+    backend = _codex()
     backend._client = _SteerableCodexClient(_FakeRouter())
     backend._thread_id = "thread_1"
     assert asyncio.run(backend.steer("late")) is False
@@ -1459,7 +1263,7 @@ def test_codex_steer_that_loses_the_race_reports_false():
     """`turn_steer` carries the turn id it expects, so a steer racing the turn's end is refused
     by the server rather than landing in whatever comes next."""
     router = _FakeRouter()
-    backend = _codex(_AllowAll())
+    backend = _codex()
     backend._client = _SteerableCodexClient(router)
     backend._thread_id = "thread_1"
     backend._client.refuse = True
@@ -1500,7 +1304,7 @@ def test_claude_steer_uses_a_second_query_on_the_live_client():
 def test_both_backends_satisfy_the_extended_interface():
     """`steer` is part of the protocol, so a harness cannot be half-wired for the channel."""
     for backend in (
-        _codex(_AllowAll()),
+        _codex(),
         __import__(
             "auto_research.sandbox.coder.claude_sdk", fromlist=["ClaudeSdkBackend"]
         ).ClaudeSdkBackend(client=object()),
@@ -1512,7 +1316,7 @@ def test_both_backends_satisfy_the_extended_interface():
 def test_a_codex_close_that_raised_keeps_its_client_for_the_retry():
     """C2c: the app-server client is dropped only once it closed, so the run's teardown, closing
     the session again, closes the client again instead of finding nothing."""
-    backend = _codex(_AllowAll())
+    backend = _codex()
 
     class Client:   # the app-server process is outside the code under test
         closes = 0

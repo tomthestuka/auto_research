@@ -52,9 +52,10 @@ def _write_log(data: dict) -> Path:
 
 
 def test_persistent_sandbox_sets_xspec_policy_in_each_subprocess(tmp_path: Path) -> None:
-    """Both real HEASoft subprocesses boot with non-interactive XSPEC settings."""
+    """Both real HEASoft subprocesses boot with non-interactive XSPEC settings: the boot file of the
+    environment the XSPEC tools run in (``envs/xspec/boot.py``, built as ``ar-xspec``)."""
 
-    from auto_research.graph.runtime import load_orchestration_config
+    from auto_research.graph.runtime import SandboxSettings
     from auto_research.sandbox.persistent import PersistentSandbox
 
     probe = tmp_path / "xspec_policy_probe.py"
@@ -71,22 +72,18 @@ def status():
         encoding="utf-8",
     )
 
-    orch = load_orchestration_config()
-    analyze_env = Path(orch["analyze_env"]) if orch.get("analyze_env") else None
-    analyze_ini_sh = orch.get("analyze_ini_sh") or None
+    import dataclasses
 
-    worker_1 = PersistentSandbox(
-        toolkit_root=tmp_path,
-        workdir=tmp_path / "worker_1",
-        analyze_env=analyze_env,
-        analyze_ini_sh=analyze_ini_sh,
-    )
-    worker_2 = PersistentSandbox(
-        toolkit_root=tmp_path,
-        workdir=tmp_path / "worker_2",
-        analyze_env=analyze_env,
-        analyze_ini_sh=analyze_ini_sh,
-    )
+    from auto_research.toolkit_contract import toolkit
+
+    # The XSPEC environment's own activation and boot file over the default environment's prefix
+    # (building ar-xspec from its lock is a conda create; the boot policy is the file's).
+    definition = toolkit().root / "envs" / "xspec"
+    xspec = dataclasses.replace(SandboxSettings.from_config().environment, name="xspec-boot", owner="human",
+                                activate=definition / "activate.sh", boot=definition / "boot.py")
+
+    worker_1 = PersistentSandbox(toolkit_root=tmp_path, workdir=tmp_path / "worker_1", environment=xspec)
+    worker_2 = PersistentSandbox(toolkit_root=tmp_path, workdir=tmp_path / "worker_2", environment=xspec)
 
     async def run() -> dict:
         await asyncio.gather(worker_1.start(), worker_2.start())
@@ -120,7 +117,7 @@ def status():
 def test_sandbox_restarts_after_timeout(tmp_path: Path) -> None:
     """A timed-out REPL subprocess is killed and replaced; subsequent calls succeed."""
 
-    from auto_research.graph.runtime import load_orchestration_config
+    from auto_research.graph.runtime import SandboxSettings
     from auto_research.sandbox.persistent import PersistentSandbox
 
     (tmp_path / "slow_tool.py").write_text(
@@ -130,17 +127,10 @@ def test_sandbox_restarts_after_timeout(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    orch = load_orchestration_config()
-    analyze_env = Path(orch["analyze_env"]) if orch.get("analyze_env") else None
-    analyze_ini_sh = orch.get("analyze_ini_sh") or None
+    environment = SandboxSettings.from_config().environment  # the toolkit's default environment
 
     async def run() -> tuple[dict, int | None, int | None, dict, bool]:
-        sandbox = PersistentSandbox(
-            toolkit_root=tmp_path,
-            workdir=tmp_path,
-            analyze_env=analyze_env,
-            analyze_ini_sh=analyze_ini_sh,
-        )
+        sandbox = PersistentSandbox(toolkit_root=tmp_path, workdir=tmp_path, environment=environment)
         await sandbox.start()
         first_pid = sandbox._proc.pid if sandbox._proc else None
         try:
@@ -165,44 +155,39 @@ def test_sandbox_restarts_after_timeout(tmp_path: Path) -> None:
 def test_mcp_bash_env_xspec_and_toolkit(tmp_path: Path) -> None:
     """MCP bash_exec env has xspec on PATH and both xspec_utils import styles work.
 
-    Mimics _builtin_server_config exactly: reads the same config keys, builds
-    the same env dict, then probes via subprocess.run with the analysis Python.
-    Also confirms fit_tbabs_hss is absent from the tool catalogue and
-    fit_tbfeo_hss is present.
+    The shell server production builds (``_builtin_server_config`` on the toolkit's default
+    environment), probed through the real MCP client's ``bash_exec``. Also confirms fit_tbabs_hss is
+    absent from the tool catalogue and fit_tbfeo_hss is present.
     """
-    import os
-    import subprocess
-
-    from auto_research.graph.runtime import load_orchestration_config
+    from auto_research.graph.runtime import SandboxSettings, _builtin_server_config, load_orchestration_config
+    from auto_research.sandbox.mcp_client import MCPToolClient
     from auto_research.sandbox.registry import ToolkitRegistry
-    from auto_research.sandbox.runner import _source_ini_env
+    from auto_research.toolkit_contract import toolkit
 
     orch = load_orchestration_config()
-    analyze_env = Path(orch["analyze_env"])
-    analyze_ini_sh = orch["analyze_ini_sh"]
-    toolkit_root = Path(orch["toolkit_root"])
+    toolkit_root = toolkit().root
     disabled_tools: list[str] = orch.get("disabled_tools") or []
+    server = _builtin_server_config(SandboxSettings.from_config(orch).environment, toolkit_root, cwd=tmp_path)
 
-    python = str(analyze_env / "bin" / "python")
-    base_env = _source_ini_env(analyze_ini_sh)
-    existing = base_env.get("PYTHONPATH", "")
-    pythonpath = str(toolkit_root) + os.pathsep + str(toolkit_root.parent)
-    if existing:
-        pythonpath += os.pathsep + existing
-    env = {**base_env, "PYTHONPATH": pythonpath}
-
-    results: dict[str, dict] = {}
     probes = {
         "xspec": "import xspec; print('ok')",
         "xspec_utils": "import xspec_utils; print('ok')",
         "research_toolkit": "from research_toolkit import xspec_utils; print('ok')",
     }
-    for name, code in probes.items():
-        r = subprocess.run(
-            [python, "-c", code],
-            capture_output=True, text=True, env=env, timeout=30,
-        )
-        results[name] = {"rc": r.returncode, "stdout": r.stdout.strip(), "stderr": r.stderr.strip()}
+
+    async def go() -> dict[str, dict]:
+        client = MCPToolClient(servers=[server])
+        await client.start()
+        try:
+            out = {}
+            for name, code in probes.items():
+                r = await client.call_tool("mcp.builtin.bash_exec", {"command": f'python -c "{code}"'})
+                out[name] = {"rc": r["exit_code"], "stdout": r["stdout"].strip(), "stderr": r["stderr"].strip()}
+            return out
+        finally:
+            await client.shutdown()
+
+    results = asyncio.run(go())
 
     log = dev_log_path("step-11", "mcp_bash_env", ".json")
     log.write_text(json.dumps(results, indent=2), encoding="utf-8")

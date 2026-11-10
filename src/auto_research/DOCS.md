@@ -16,9 +16,9 @@ and the active Phase 2 build order in
 | Submodule | Step | Role |
 |---|---|---|
 | `config_paths.py` | — | Where the five config files are, resolved when asked for. `config_dir()` answers with the repository's own `config/` unless `AUTO_RESEARCH_CONFIG_DIR` names another, so a process can be run against a different configuration and every reader agrees. Before it, eleven modules each computed the location relative to their own source file. |
-| `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`, whose model-key requirements are **derived from `config/models.yaml`**: one group per provider a role is configured with, or the exact variable a member names with `key_env`); small `orchestration.yaml` accessors (`runtime_data_dir`, `papers_dir`, `sandbox_call_timeout_default`, `provider_retry_policy`). |
+| `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`, whose model-key requirements are **derived from `config/models.yaml`**: one group per provider a role is configured with, or the exact variable a member names with `key_env`); small `orchestration.yaml` accessors (`runtime_data_dir`, `papers_dir`, `sandbox_call_timeout_default`, `provider_retry_policy`, `private_variables` — `{variable: separator}` from `env_externals.<name>.private`, refused unless a variable name and a non-empty separator, a name outside `_RESERVED_PRIVATE`, and declared once, also up to case). |
 | `setup.py` | — | The install-script Python stage (`python -m auto_research.setup`, run by `install.sh`): discovers defaults, prompts (interactive `questionary`) or reads `--answers` (headless), then writes the gitignored `config/orchestration.yaml` + `observations.yaml` from their `*.example` templates (deriving `agent_fs_allow` from the answered paths) and runs the preflight smoke test. |
-| `preflight.py` | — | Launch-time **checklist** (`Preflight` / async `run_preflight()`): runs every launch precondition (all no-LLM but the last, `member_media`, one tiny image and PDF per chat member, Z1e), and carries a warning tier (`PreflightWarning`) for a precondition that is satisfiable but never proven live — the launch continues and the caution is recorded (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
+| `preflight.py` | — | Launch-time **checklist** (`Preflight` / async `run_preflight()`): runs every launch precondition (all no-LLM but the last, `member_media`, one tiny image and PDF per chat member, Z1e), and carries a warning tier (`PreflightWarning`) for a precondition that is satisfiable but never proven live — the launch continues and the caution is recorded (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, human environments, the default environment's private variables and `probe` stack smoke-test, human-channel ping) before any model client is built. |
 | `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
@@ -69,7 +69,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   historical three rather than relaxing to nothing.
 - `auto_research.preflight.run_preflight(*, human_handler=None, monitor=None)` (async) is the
   launch-time entry that runs the whole deterministic checklist (registered via
-  `build_default_preflight(human_handler)`): `check_required_env`,
+  `build_default_preflight(human_handler)`): `check_config_keys` (no retired `orchestration.yaml`
+  key, each named with what to do instead; an `agent_fs_allow` that is neither empty nor names `/`),
+  `check_required_env`,
   `models.keys.check_api_key_fallbacks` (an optional `<PROVIDER>_API_KEY_FALLBACK` is usable —
   not blank, not identical to the primary, not set without one; runs right after
   `check_required_env`, which is what loads `.env`),
@@ -81,16 +83,24 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `storage.check_database_health` (the runtime SQLite DB exists with its full schema,
   created if absent — so a fresh run's first `text_search` can't hit `no such table: papers`),
   `sandbox.review.check_author_reviewer_decorrelation`,
-  `sandbox.merge_flow.check_toolkit_root_configured` (`toolkit_root` is set in
-  `config/orchestration.yaml` and is a directory — every runtime path hint derives from it),
-  `sandbox.merge_flow.check_toolkit_git_identity` (the `research_toolkit` checkout has a git
+  `sandbox.jail.check_os_jail_available` (this host runs the bwrap jail; every runtime process runs
+  inside it, so a host that cannot is refused with the reason, D25) and
+  `sandbox.jail.check_os_jail_harness` (the author harness's CLI is reachable inside it),
+  `toolkit_contract.check_toolkit_contract` (the `toolkits:` block validates, its root is a
+  directory holding the template package and a `README.md` at its root and in every package, the
+  domain briefing the roles read — every runtime path hint derives from the contract),
+  `sandbox.merge_flow.check_toolkit_git_identity` (the toolkit checkout has a git
   commit identity, so a runtime tool commit can't fail mid-flow),
-  `sandbox.registry.check_toolkit_manifests` (every `*_utils` package imports and exposes a
-  `TOOL_MANIFEST`; a failing one would reach the analysts as missing tools and nothing else),
+  `sandbox.registry.check_toolkit_manifests` (every package of the contract's `package_glob` imports,
+  exposes a `TOOL_MANIFEST` and keys each tool `<name>.<package>.<tool>`; a failing one would reach
+  the analysts as missing tools and nothing else),
   `observations.check_catalog_health` (every mission's local data catalog is healthy via
   `research_toolkit`'s detect-only `obsdb_catalog.healthcheck`),
-  `sandbox.runner.check_analyze_probe` (runs the configured `analyze_probe` stack smoke-test under
-  `analyze_env`; skips when unset — the domain/lit-only escape hatch), and — when a channel is
+  `env.check_human_envs` (each `human_envs` prefix has a Python; every toolkit definition's `base`
+  is declared), `check_private_variables` (each declared private variable is set, with its
+  separator, by the default environment's activation, read back by `runner.analysis_activation_env`),
+  `sandbox.runner.check_analysis_probe` (runs the default environment's `env.yaml` `probe` as a
+  unit's REPL starts, inside the jail; no probe, nothing runs), and — when a channel is
   resolved — `hitl.make_human_channel_check` (pings the channel, green only on a reply). `run_research()`
   resolves the handler then awaits this before any LLM; aggregates every failure into one
   `PreflightError`.
@@ -104,7 +114,8 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   obs-db-location config and the launch-time health check.
   `check_catalog_health()` is the launch-time preflight check: it runs `research_toolkit`'s
   detect-only `obsdb_catalog.healthcheck` (pure stdlib, never writes) over every configured
-  mission and raises on any drift (malformed/missing/regressed/level-inconsistent/uncatalogued),
+  mission, each a one-shot call in the analysis jail (`sandbox.runner.call_in_jail`: the
+  orchestrator imports no toolkit code, D25), and raises on any drift (malformed/missing/regressed/level-inconsistent/uncatalogued),
   aggregating all missions; the human repairs via `obsdb_catalog.repair` out of band. The root
   itself must be a directory this user can write; an empty one is healthy (H2: `acquire` creates
   a mission's folder on its first observation).
@@ -119,6 +130,15 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   change together. `observations.obsid_mission(folder) -> str` names the mission folder of an
   ObsID folder under either layout, or the nearest folder above it holding a `catalog.json` (the
   HTML report's `observation <mission> <obsid>`).
+
+- `auto_research.toolkit_contract` — the toolkit contract: every fact the orchestration relies on
+  about a toolkit, read from the `toolkits:` block of `orchestration.yaml` (a list of exactly one
+  until Phase 3 step 2). Code reads the toolkit root, package glob, template package, authoring
+  branch, fast-test selection and the declared name through it only. The declared name decides
+  evidence (`is_toolkit_producer`, used by `provenance.store.is_evidence`): a producer
+  `<name>.<package>.<tool>` of a declared toolkit is a toolkit result. A name that is no identifier,
+  or equals or prefixes a harness producer (`provenance.store.HARNESS_PRODUCERS`), is refused when
+  the contract is built, so no configuration widens evidence to what a role only read (§2b).
 
 ## Dependencies
 - External: `pydantic`, `langgraph`, `langsmith`, provider SDKs (`anthropic`,
@@ -223,6 +243,40 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `discover_toolkit()` suggests prior/sibling checkouts; `page_toolkit(...)` resolves `toolkit_root`
   via point / clone / start-fresh.
 
+- `toolkit_contract.ToolkitContract` (frozen, `extra="forbid"`) — `name` (identifier, no harness
+  producer's first segment), `root` (expanded), `package_glob` (default `*_utils`, top-level only),
+  `template_package` (matches the glob), `authoring_branch` (required), `default_env` (required: the environment, a folder under `envs/`, a unit's own REPL and shell run in and where a package naming none runs and is tested; the launch refuses one without `envs/<default_env>/env.yaml`), `test_classes:
+  ToolkitTestClasses` (`fast`, default `"not slow and not live"`: the pytest `-m` expression the
+  gate's regression run selects; `live`, default `"live"`: the expression the gate deselects from a
+  change's own tests, its run having no network; `data`, default `"data"`: the marker of a test
+  reading a named data set, `data("<name>")`). Methods: `is_package(name)`, `packages(root=None)`
+  (top-level folders matching the glob), `owns(produced_by)` (the producer starts `<name>.`; the registry serves only keys `<name>.<package>.<tool>`), `key_problem(key, package)` (why a manifest key is outside the
+  contract, or `None`).
+- `toolkit_contract.test_data(config=None) -> dict[str, Path]` — the host's data sets for the
+  toolkit's `data` tests, `orchestration.yaml` `test_data: {name: folder}`; raises on a name outside
+  `[a-z][a-z0-9_]*` or a folder that is not absolute (an absent folder is allowed: its tests skip, and
+  the gate fails a change that leaves one skipped). Checked at launch by `check_toolkit_contract`.
+  `data_variable(name)` → `TOOLKIT_DATA_<NAME>` (`DATA_VARIABLE_PREFIX`), the variable the gate sets to
+  the folder and the toolkit's root `conftest.py` reads.
+- `toolkit_contract.data_needs(contract=None) -> (dict[str, list[str]], list[str])` — `({data set:
+  [files]}, problems)`: every data mark in the toolkit's package sources, read with `ast` (no test
+  collected or imported): `pytest.mark.<test_classes.data>(...)`, `mark.<data>(...)` with `mark`
+  imported from pytest under any name, or a name bound to either; a name that is not one string
+  literal is a problem, `file:line`. `check_toolkit_test_data()` — launch preflight `toolkit_test_data`:
+  every named data set is declared in `test_data` and every declared folder exists.
+- `toolkit_contract.toolkits(config=None) -> list[ToolkitContract]` — without `config`, the
+  process's **bound** contract: bound by the first successful read of the configured
+  `orchestration.yaml` (the launch preflight, in a run) and kept for the process's life, so the
+  evidence predicate, the run (`graph.runtime`) and every reader see one contract; with `config`,
+  that configuration parsed and never bound (a benchmark's trial config, a probe given a path).
+  Raises `ValueError` when the block is absent or holds other than one entry, a `ValidationError` on
+  a bad field. `toolkit(config=None)` — the one entry. `bind(config)` — bind a configuration held as
+  data; `reset()` — unbind (tests: `tests/conftest.py` resets around every test).
+  `is_toolkit_producer(produced_by) -> bool`. `RESERVED_FOLDER = "envs"`: `package_glob` may not
+  match it, nor be `*`, contain `**` or `/`; package and toolkit names are ASCII identifiers.
+  `harness_names() -> frozenset[str]` — the names a toolkit may not take.
+  `check_toolkit_contract()` — the launch check (registered as `toolkit_contract`).
+
 ## Changelog
 Compacted 2026-09-01, again 2026-09-24 (every entry), 2026-10-07 and 2026-10-19 (every entry);
 detail in git history.
@@ -265,3 +319,20 @@ detail in git history.
 - 2026-11-04 — Z1f: `setup.page_preflight` meters its preflight like a run (own run id, ledger under the runtime dir, cost meter, spend printed with the ledger path).
 - 2026-11-04 — H2 review: `obsid_folder` orders level-2 records newest first (toolkit 148b9bd), takes `mission=` and a lazy `index=` (`obsid_index`, one tree walk per call); `obsid_mission` walks up to the catalog for a folder recorded outside the tree; a parity test pins `OBSID_TREES == obsdb_catalog._domain.TREES` and `obsid_folder == locate`.
 - 2026-11-04 — Z1g: `setup.page_preflight` reports a setup ledger it cannot write (`[setup_ledger]`) with the checklist, counting the spend in memory.
+- 2026-11-09 — Phase 3 step 0a W5 (D19): `env.private_variables(config=None)` reads the variables the declared externals give every process and call a private folder (`env_externals.<name>.private: {VAR: separator}`); applied by `sandbox.runner.private_folders` (sandbox DOCS).
+- 2026-11-09 — W5 follow-up: preflight check `private_variables` (`preflight.check_private_variables` over `env.private_variables`, registered after `required_env`) refuses a malformed `env_externals.<name>.private` declaration at launch.
+- 2026-11-09 — W5 review: `env.private_variables` refuses a non-mapping, reserved names (`_RESERVED_PRIVATE`: `AR_PRIVATE_FOLDERS`, `PWD`, `MARK`, `HOME`, `PATH`, `TMPDIR`) and a variable declared twice or up to case; `preflight.check_private_variables` also sources the analysis activation (`sandbox.runner.analysis_activation_env`, the analyze probe's) and refuses a declared variable it leaves unset or sets without the separator, naming the external.
+- 2026-11-09 — Phase 3 step 0a W2: new `toolkit_contract` (the toolkit contract, a `toolkits:` block replacing `toolkit_root` and `tool_author_branch`; no default branch). Every reader goes through it: the evidence predicate (`provenance.store.is_evidence`, `HARNESS_PRODUCERS` and the name guard B2), `env.toolkit_root`, `env.env_catalogue` (definitions from the contract; none marked superseded for a config without the block), `observations._toolkit_root`, the registry's package discovery and manifest-key check, the gate's package tests and fast-test selection, the coder's template package, the run's root and branch, the jail probe, `graph.builder`. Preflight: `toolkit_contract` replaces `toolkit_root_configured`.
+- 2026-11-09 — W2 review (M1, M2, L1–L5): the contract is bound once per process (`bind`, `reset`; no per-call re-read), and the run reads the bound one (`toolkit()`); `package_glob` refuses `*`, `**`, `/` and a glob matching `envs`; package and toolkit names are ASCII identifiers. Tests: the producer-literal scan against `HARNESS_PRODUCERS`, wrong-package and four-segment keys, a non-default glob through the registry and the gate.
+- 2026-11-09 — W2 addition (main): `ToolkitContract.default_env` (required; checked at launch against `<root>/envs/<default_env>/env.yaml`); live config and `.example` name `analysis` (W4 creates the definition; until then the live launch check fails, expected mid-step).
+- 2026-11-09 — W2 re-review: the lead's catalog kind is the bound contract's (`react._catalog_kind()`, `<name>.catalog_utils.data_catalog`, read when used; the tool's agent-facing name `DATA_CATALOG_TOOL` stays until step 3); `key_problem` requires an ASCII tool segment; `benchmarks/conftest.py` resets the contract around every benchmark test; the producer scan is closed (every unresolved producer argument is a listed run-time site).
+- 2026-11-09 — Phase 3 step 0a W4: `env.analysis_environment(config=None)` is the toolkit's default environment (`default_env` of the bound contract, via `env.default_definition()`), resolved through `env_build.build`; new `env.human_environments(config=None)` (`human_envs`: name → bare human `Environment`) supplies every `base_envs`; new preflight `env.check_human_envs`; `env_catalogue` lists built and derived environments only (no bare human one). Preflight: `analysis_probe` (`runner.check_analysis_probe`) replaces `analyze_probe` and `os_jail_probe`; `private_variables` now runs after the toolkit checks, on the default environment's activation. Readers take the contract from the bound `toolkit()` only; `graph.runtime.bind_run_contract` binds it per run before the preflight. The installer helpers above still name the retired keys (frozen, D16).
+- 2026-11-09 — Phase 3 step 0a W3: `ToolkitTestClasses.live` and `.data`; `toolkit_contract.test_data`, `data_variable`, `DATA_VARIABLE_PREFIX`; `check_toolkit_contract` validates `test_data`.
+- 2026-11-09 — W4 review L4: `env.human_environments` refuses a name that is not an environment name and a prefix inside `agent_conda_dir()`; `check_human_envs` and `default_definition` name the unreadable `env.yaml` and join its problems into one sentence (`_problems_text`).
+- 2026-11-09 — W3 review: `toolkit_contract.data_needs`, `check_toolkit_test_data` (preflight `toolkit_test_data`).
+- 2026-11-09 — W3 re-review: `data_needs` reads every spelling of the data mark and reports non-literal names; `check_toolkit_contract`'s docstring names what `toolkit_test_data` checks.
+- 2026-11-09 — Phase 3 step 0a W10 (ruling D25): jailing is unconditional. `preflight`'s `os_jail_available` fails the launch (was a warning) on a host that cannot run bwrap; `env.analysis_environment` and `env.replay_environment` build and replay jailed always (the `jailed` argument of `env_build` is gone); `provenance.capture._allow_listed` always excludes the host `/tmp` (a list naming only it admits nothing).
+- 2026-11-09 — W10 review fixes: `preflight.check_config_keys` (registered first, `config_keys`) refuses each retired `orchestration.yaml` key with its replacement (`RETIRED_KEYS`: `agent_os_jail`, `mcp_servers`, `toolkit_root`, `tool_author_branch`, `analyze_env`, `analyze_ini_sh`, `repl_init_py`, `analyze_probe`, `gate_readonly_roots`) and an empty `agent_fs_allow`.
+- 2026-11-09 — W10 sweep (D25): `observations.check_catalog_health` runs `obsdb_catalog.healthcheck` through `runner.call_in_jail` (`_import_healthcheck` and its `sys.path` insertion are gone). Sweep of `src` for toolkit code run in the orchestrator: `ToolkitRegistry.load`/`reload` (now read manifests as data), `react.execute_data_catalog`/`data_catalog_tool_def` (jailed call, manifest as data), `runner.run_tool` (deleted), this check (jailed). What remains is jailed by construction: the REPL script (`persistent.py`), the gate's recorder plugin (`returns.py`, inside the gate's jailed pytest), and the reproduce code `report/html.py` writes for a human (text, never run). Guard: `tests/test_toolkit_contract.py::test_the_launch_path_imports_no_toolkit_module_into_the_orchestrator`.
+- 2026-11-09 — W10 sweep re-review: `check_config_keys` words each retired key as what to do (`agent_os_jail` "is retired (every runtime process runs in the jail); delete the key") and refuses an `agent_fs_allow` naming `/`.
+- 2026-11-09 — W6 review M2: `check_toolkit_contract` refuses a toolkit missing a `README.md` at its root or in any package (the roles read them as the domain briefing; the prompts point to them).

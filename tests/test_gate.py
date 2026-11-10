@@ -299,8 +299,9 @@ def test_toolkit_plotters_are_clean():
 
     from auto_research.graph.runtime import load_orchestration_config
 
-    root = load_orchestration_config().get("toolkit_root")
-    session = Path(root or "/nonexistent") / "xspec_utils" / "skills" / "session.py"
+    from auto_research.toolkit_contract import toolkit
+
+    session = toolkit(load_orchestration_config()).root / "xspec_utils" / "skills" / "session.py"
     if not session.is_file():
         pytest.skip("research_toolkit not on this host")
     assert scan_figure_shape("xspec_utils/skills/session.py", session.read_text()) == []
@@ -637,7 +638,8 @@ def test_layer_b_verdict_requires_a_passed_test():
     # All skipped -> fail, with a specific "not verified" reason (not a generic failure).
     bad, detail = gate._layer_b_verdict(0, {"t::a": "SKIPPED", "t::b": "SKIPPED"}, "logtail")
     assert not bad
-    assert "no test PASSED" in detail and "§9.4" in detail
+    assert "no test PASSED" in detail and "not verified" in detail
+    assert "§" not in detail  # a coder reads it: no reference into build-time governance (W6)
     # Empty map (e.g. junit unparseable on an rc==0 run) -> fail closed.
     empty_bad, _ = gate._layer_b_verdict(0, {}, "")
     assert not empty_bad
@@ -923,9 +925,9 @@ def _with_env(repo, monkeypatch, *, lock=_LOCK, names_it=True, extra=None):
 
     monkeypatch.setattr(app_env, "_orch_config", lambda: {"env_externals": {}})
     # The gate builds the definition it judges (B3c-2): conda faked at the process boundary.
-    from tests.test_env_build import _fake_conda
+    from tests.test_env_build import _conda, _fake_conda
 
-    from auto_research.sandbox import env_build, jail
+    from auto_research.sandbox import env_build
 
     fake = _fake_conda([])
 
@@ -934,8 +936,8 @@ def _with_env(repo, monkeypatch, *, lock=_LOCK, names_it=True, extra=None):
             return fake(argv, **kwargs)
 
     monkeypatch.setattr(env_build, "StoppableRunner", _Runner)
-    monkeypatch.setattr(jail, "jail_enabled", lambda: False)
-    monkeypatch.setattr(app_env, "conda_executable", lambda: "conda")
+    conda = _conda(repo.parent / f"{repo.name}-host")  # an installation the build's jail binds
+    monkeypatch.setattr(app_env, "conda_executable", lambda: conda)
     _write_pkg(repo)
     if names_it:
         (repo / "demo_utils" / "tool_config.yaml").write_text("env: sherpa\n")
@@ -1164,14 +1166,14 @@ def test_a_judged_file_swapped_for_a_link_or_made_executable_is_not_committed(tm
     assert report.passed
     test_file = repo / "demo_utils" / "lib" / "test_demo.py"
     test_file.chmod(0o755)
-    with pytest.raises(RuntimeError, match="changed after the gate"):
+    with pytest.raises(RuntimeError, match="changed after the CI pipeline"):
         approve_edit(repo, message="m", manifest=report.manifest)
     test_file.chmod(0o644)
     helper = repo / "demo_utils" / "lib" / "demo_help.py"
     (tmp_path / "copy.py").write_bytes(helper.read_bytes())
     helper.unlink()
     helper.symlink_to(tmp_path / "copy.py")
-    with pytest.raises(RuntimeError, match="changed after the gate"):
+    with pytest.raises(RuntimeError, match="changed after the CI pipeline"):
         approve_edit(repo, message="m", manifest=report.manifest)
 
 
@@ -1197,7 +1199,7 @@ def test_approve_edit_commits_exactly_what_the_gate_judged(tmp_path):
     report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
     assert report.passed and "demo_utils/lib/demo_help.py" in report.manifest
     (repo / "demo_utils" / "lib" / "demo_help.py").write_text("def my_tool(obsid):\n    return 0\n")
-    with pytest.raises(RuntimeError, match="changed after the gate"):
+    with pytest.raises(RuntimeError, match="changed after the CI pipeline"):
         approve_edit(repo, message="m", manifest=report.manifest)
     (repo / "demo_utils" / "lib" / "demo_help.py").write_text("def my_tool(obsid):\n    return load(obsid)\n")
     sha = approve_edit(repo, message="m", manifest=report.manifest)
@@ -1300,17 +1302,28 @@ def test_the_gate_hides_the_real_worktree_from_its_tests(tmp_path, monkeypatch):
     """The default runner masks the worktree, and the jail argv carries the mask (review 6)."""
     from auto_research.sandbox import gate, jail
 
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
+    monkeypatch.setattr(jail, "_config", lambda: {})
     seen = {}
     real = gate._jailed_pytest
 
     def capturing(argv, *, junit_path, worktree=None, masked=None, extra_ro=()):
         seen["masked"] = masked
-        monkeypatch.setattr(jail, "_config", lambda: {"agent_os_jail": True})
-        monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
         seen["argv"] = real(argv, junit_path=junit_path, worktree=worktree, masked=masked, extra_ro=extra_ro)
-        return argv  # run unjailed here; the argv above is what a jailed run would get
+        return seen["argv"]
 
     monkeypatch.setattr(gate, "_jailed_pytest", capturing)
+
+    async def host(export, env_id):  # the default environment the gate builds: this interpreter
+        import sys
+        from pathlib import Path
+
+        from auto_research.sandbox.envs import Environment
+
+        return Environment(name="host", prefix=Path(sys.prefix), owner="human"), ""
+
+    monkeypatch.setattr(gate, "_gate_environment", host)
     repo = _make_repo(tmp_path)
     _write_pkg(repo)
     asyncio.run(run_gate(repo, _spec()))
@@ -1344,7 +1357,7 @@ def test_approve_edit_reads_every_path_literally(tmp_path):
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout
     # A glob-named path is never a judged path, so a manifest naming one is refused outright …
     manifest = {"demo_utils/lib/[ab].py": "deleted", "demo_utils/lib/new.py": _entry(lib / "new.py")}
-    with pytest.raises(RuntimeError, match="changed after the gate"):
+    with pytest.raises(RuntimeError, match="changed after the CI pipeline"):
         approve_edit(repo, message="m", manifest=manifest)
     assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout == head
     # … and staging reads names literally all the same: `[ab].py` restored, `new.py` added alone.
@@ -1664,8 +1677,15 @@ def _derived_package(repo, monkeypatch, *, activate="export STACK_READY=1\n", te
     from auto_research.sandbox.envs import Environment
 
     base = Environment(name="testbase", prefix=Path(sys.prefix), owner="human")
-    monkeypatch.setattr(app_env, "_orch_config", lambda: {"env_externals": {}})
-    monkeypatch.setattr(app_env, "analysis_environment", lambda config=None: base)
+    monkeypatch.setattr(app_env, "_orch_config", lambda: {"env_externals": {}, "human_envs": {base.name: str(base.prefix)}})
+    from auto_research.toolkit_contract import toolkit
+
+    built = gate._gate_environment
+
+    async def default_is_base(export, env_id):  # a package naming none runs in the default environment
+        return (base, "") if env_id == toolkit().default_env else await built(export, env_id)
+
+    monkeypatch.setattr(gate, "_gate_environment", default_is_base)
     _write_pkg(repo)
     (repo / "demo_utils" / "tool_config.yaml").write_text("env: stack\n")
     (repo / "demo_utils" / "lib" / "test_demo.py").write_text(test_body or (
@@ -1743,11 +1763,6 @@ def test_each_environment_group_watches_only_its_own_tools(tmp_path, monkeypatch
     (other / "lib" / "test_other.py").write_text(
         "from other_utils.lib.other_help import other_tool\n"
         "def test_other():\n    assert other_tool('x') == {'stdout': 'fine'}\n")
-    from auto_research.sandbox import jail
-
-    # The stand-in analysis environment (this interpreter) is not on the jail's allow-list as the
-    # configured one is; the grouping is what this test is about.
-    monkeypatch.setattr(jail, "jail_enabled", lambda: False)
     report = asyncio.run(run_gate(repo, _spec()))
     failed = [c for c in report.layer_b if not c.passed]
     assert not failed, failed
@@ -1756,16 +1771,16 @@ def test_each_environment_group_watches_only_its_own_tools(tmp_path, monkeypatch
     assert len(watched) == 2 and all(c.passed for c in watched), watched
 
 
-def test_the_gates_readonly_roots_reach_its_test_run_only(tmp_path, monkeypatch):
-    """H1(3): `gate_readonly_roots` are bound read-only into Layer B's jail; the workers' analysis
-    policy never lists them."""
+def test_the_gates_test_data_reaches_its_test_run_only(tmp_path, monkeypatch):
+    """`test_data` folders (the toolkit's `data` test class) are bound read-only into Layer B's jail,
+    an absent one left out; the workers' analysis policy never lists them."""
     from auto_research.sandbox import gate as gate_module, jail
 
     old_tree = tmp_path / "old_obsdb"
     old_tree.mkdir()
     seen = []
-    monkeypatch.setattr(gate_module, "_orchestration_config", lambda: {"gate_readonly_roots": [str(old_tree),
-                                                                                              str(tmp_path / "absent")]})
+    monkeypatch.setattr(gate_module, "_orchestration_config", lambda: {"test_data": {"old": str(old_tree),
+                                                                                    "gone": str(tmp_path / "absent")}})
     monkeypatch.setattr(jail, "wrap", lambda argv, policy: seen.append(policy) or argv)
     gate_module._jailed_pytest(["python"], junit_path=str(tmp_path / "j" / "junit.xml"), worktree=tmp_path)
     assert str(old_tree) in seen[0].ro and str(old_tree) not in seen[0].rw
@@ -1780,14 +1795,228 @@ def test_the_gates_readonly_roots_reach_its_test_run_only(tmp_path, monkeypatch)
     cfg_dir = tmp_path / "config"
     shutil.copytree(config_dir(), cfg_dir)
     orch = yaml.safe_load((cfg_dir / "orchestration.yaml").read_text())
-    orch.update(gate_readonly_roots=[str(old_tree)], agent_os_jail=True)
+    orch.update(test_data={"old": str(old_tree)})
     (cfg_dir / "orchestration.yaml").write_text(yaml.safe_dump(orch))
     monkeypatch.setenv("AUTO_RESEARCH_CONFIG_DIR", str(cfg_dir))
     from auto_research.graph.runtime import load_orchestration_config
 
-    assert load_orchestration_config().get("gate_readonly_roots") == [str(old_tree)]  # the config is read
+    assert load_orchestration_config().get("test_data") == {"old": str(old_tree)}  # the config is read
     worker = jail.analysis_policy(label="w", toolkit_root=tmp_path / "tk", writable=(str(tmp_path / "w"),),
                                   tmp=tmp_path / "t", home=tmp_path / "h")
     base = jail.policy_from_config()
     assert str(old_tree) not in (*worker.ro, *worker.rw, *base.ro, *base.rw)
     assert old_tree.resolve() not in fs_guard.load_fs_allowlist()
+
+
+# ── the gate as the toolkit's CI pipeline (Phase 3 step 0a W3, D18) ──────────────
+
+
+def test_the_report_lists_every_required_job_in_order_with_its_status(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert [j.name for j in report.jobs] == list(gate.JOBS)
+    status = {j.name: j for j in report.jobs}
+    assert report.passed and status["tests"].status == "pass"
+    assert {n: status[n].status for n in ("change_scope", "no_fabrication", "structural", "minting")} == dict.fromkeys(
+        ("change_scope", "no_fabrication", "structural", "minting"), "pass")
+    # A job with nothing to run says why: no environment here, and a test runner given by the caller.
+    assert status["environments"].status == "skip" and "name none" in status["environments"].reason
+    assert status["regression"].status == "skip" and "own tests only" in status["regression"].reason
+    assert "structural.manifest_literal" in status["structural"].checks
+    assert "structural.argument_kinds" in status["minting"].checks
+
+
+def test_a_failed_structure_skips_the_test_jobs_with_the_reason_and_fails(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo, with_test=False)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    status = {j.name: j for j in report.jobs}
+    assert not report.passed and status["structural"].status == "fail"
+    assert "structural.test_present" in status["structural"].reason
+    assert status["tests"].status == status["regression"].status == "skip"
+    assert status["tests"].reason == "the structural job failed; the tests run once it passes"
+
+
+@pytest.mark.parametrize("check,job", [
+    ("structural.changes_allowed", "change_scope"), ("structural.tests_left_tree_unchanged", "change_scope"),
+    ("structural.env_resolves", "environments"), ("structural.env_definition.x", "environments"),
+    ("layer_b.env.x", "environments"), ("no_fabrication.vocabulary", "no_fabrication"),
+    ("structural.manifest_keys", "structural"), ("structural.manifest_literal", "structural"),
+    ("structural.argument_kinds", "minting"), ("provenance.figure_shape", "minting"),
+    ("layer_b.returns.placed", "minting"), ("layer_b.returns", "minting"),
+    ("layer_b.pytest", "tests"), ("determinism", "tests"), ("layer_b.data", "tests"),
+    ("layer_b.export", "tests"), ("layer_b.regression", "regression"),
+])
+def test_a_failed_check_fails_its_job_and_the_gate(check, job):
+    layer = "B" if check.startswith("layer_b") else "A"
+    clean = [CheckResult(name=name, layer="A", passed=True) for name in (
+        "structural.changes_allowed", "no_fabrication.scan", "structural.test_present", "structural.argument_kinds")]
+    tests = [CheckResult(name="layer_b.pytest", layer="B", passed=True)]
+    assert gate._passed(gate._pipeline(clean, tests, {}))  # the clean baseline passes
+    failed = CheckResult(name=check, layer=layer, passed=False)
+    jobs = gate._pipeline([*clean, *([failed] if layer == "A" else [])], [*tests, *([failed] if layer == "B" else [])], {})
+    assert [j.name for j in jobs if j.status == "fail"] == [job] and not gate._passed(jobs)
+
+
+def test_no_job_can_be_left_out_and_an_untested_change_fails_the_tests_job(tmp_path):
+    """The jobs come from the orchestration: a runner that runs no test of the change (as a toolkit
+    whose tests deselect themselves would) leaves the tests job failed, never skipped."""
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+
+    async def no_tests(worktree, test_paths):
+        return {"results": [], "deterministic": True}
+
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=no_tests))
+    status = {j.name: j for j in report.jobs}
+    assert [j.name for j in report.jobs] == list(gate.JOBS)
+    assert status["tests"].status == "fail" and "no test of the change ran" in status["tests"].reason
+    assert not report.passed and "no test of the change ran" in report.reason
+
+
+@pytest.mark.parametrize("files,where", [
+    ({"demo_utils/skills/__init__.py": "TOOL_MANIFEST = {}\nTOOL_MANIFEST['research_toolkit.demo_utils.x'] = {}\n"},
+     "demo_utils/skills/__init__.py:5"),
+    ({"demo_utils/skills/__init__.py": "TOOL_MANIFEST = {}\nTOOL_MANIFEST = dict(TOOL_MANIFEST)\n"},
+     "demo_utils/skills/__init__.py:5"),
+    ({"demo_utils/lib/demo_help.py": "from demo_utils.skills import TOOL_MANIFEST\n"
+                                     "TOOL_MANIFEST.update({})\n\n\ndef my_tool(obsid):\n    return obsid\n"},
+     "demo_utils/lib/demo_help.py:1"),
+    ({"demo_utils/lib/demo_help.py": "import demo_utils.skills as s\ns.TOOL_MANIFEST.clear()\n\n\n"
+                                     "def my_tool(obsid):\n    return obsid\n"},
+     "demo_utils/lib/demo_help.py:2"),
+    ({"demo_utils/__init__.py": "from .lib.demo_help import my_tool as TOOL_MANIFEST\n"}, "demo_utils/__init__.py:1"),
+])
+def test_a_manifest_bound_or_changed_beyond_its_one_literal_fails_the_structural_job(tmp_path, files, where):
+    """The gate reads the manifest's literal, the registry imports the package: anything else that
+    binds or touches `TOOL_MANIFEST` would make the two disagree (W2 review, finding b)."""
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    manifest = repo / "demo_utils" / "skills" / "__init__.py"
+    literal = manifest.read_text()
+    for rel, body in files.items():
+        path = repo / rel
+        path.write_text(literal + body.replace("TOOL_MANIFEST = {}\n", "", 1) if rel.endswith("skills/__init__.py")
+                        else body)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    check = next(c for c in report.layer_a if c.name == "structural.manifest_literal")
+    assert not check.passed and where in check.detail, check.detail
+    assert not report.passed and {j.name: j.status for j in report.jobs}["structural"] == "fail"
+
+
+def _default_env_contract(repo, default):
+    from auto_research import toolkit_contract
+
+    toolkit_contract.bind({"toolkits": [{"name": "research_toolkit", "root": str(repo), "template_package": "demo_utils",
+                                         "authoring_branch": "ai", "default_env": default}]})
+
+
+def test_deleting_the_toolkits_default_environment_fails(tmp_path, monkeypatch):
+    """A package naming no environment runs in the toolkit's default one, as a unit's REPL and shell
+    do: deleting that definition fails, even with no package naming it (W2 review, finding a)."""
+    repo = _make_repo(tmp_path)
+    folder = _with_env(repo, monkeypatch, names_it=False)
+    _default_env_contract(repo, "sherpa")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "committed env")
+    for path in folder.iterdir():
+        path.unlink()
+    folder.rmdir()
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        'def test_my_tool():\n    assert my_tool("synth240611-ab") is not None\n')
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    check = next(c for c in report.layer_a if c.name == "structural.env_definition.sherpa")
+    assert not check.passed and "default environment" in check.detail, check.detail
+    assert {j.name: j.status for j in report.jobs}["environments"] == "fail"
+
+
+def test_a_package_naming_no_environment_counts_as_the_default_environments_user(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path)
+    _with_env(repo, monkeypatch, names_it=False)
+    _default_env_contract(repo, "sherpa")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    check = next(c for c in report.layer_a if c.name == "structural.env_definition.sherpa")
+    assert check.passed, check.detail
+
+
+def test_a_change_to_the_default_environment_is_judged_on_the_export_and_leaves_the_live_build(tmp_path, monkeypatch):
+    """A package naming no environment is tested in the toolkit's default one, built by the gate from
+    the judged definition into its own conda folder: the changed activation is the one the tests see,
+    and the live build and its record are untouched by the unreviewed files (W4 review)."""
+    import sys
+
+    from auto_research import env as app_env
+
+    monkeypatch.setattr(app_env, "_orch_config", lambda: {"env_externals": {}, "human_envs": {"testbase": sys.prefix}})
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    folder = repo / "envs" / "stack"
+    folder.mkdir(parents=True)
+    (folder / "env.yaml").write_text("purpose: the demo tools' stack\nbase: testbase\n")
+    (folder / "activate.sh").write_text("export STACK_READY=1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "the default environment")
+    _default_env_contract(repo, "stack")
+    (folder / "activate.sh").write_text("export STACK_READY=2\n")
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        "import os\n\n\ndef test_runs_in_the_judged_default_environment():\n"
+        "    assert os.environ.get('STACK_READY') == '2'\n")
+    conda = app_env.agent_conda_dir()
+    live = sorted(p for p in conda.rglob("*") if "gate" not in p.relative_to(conda).parts) if conda.exists() else []
+    report = asyncio.run(run_gate(repo, _spec()))
+    assert report.passed, report.reason
+    assert next(c for c in report.layer_b if c.name == "layer_b.pytest").passed
+    after = sorted(p for p in conda.rglob("*") if "gate" not in p.relative_to(conda).parts)
+    assert after == live and not list(conda.glob("built/ar-stack*")), after
+    assert (conda / "gate").is_dir()  # built in the gate's own folder
+
+
+def test_a_failed_check_fails_its_job_even_when_the_job_is_marked_skipped():
+    """Fail wins over skip: a probe where the regression check failed and the job was also marked
+    skipped is a failed job and a failed gate."""
+    ran = [CheckResult(name="layer_b.pytest", layer="B", passed=True),
+           CheckResult(name="layer_b.regression", layer="B", passed=False, detail="broke one")]
+    jobs = gate._pipeline([CheckResult(name="determinism", layer="A", passed=True)], ran,
+                          {"regression": "the toolkit holds no earlier tests"})
+    regression = next(j for j in jobs if j.name == "regression")
+    assert regression.status == "fail" and not gate._passed(jobs)
+
+
+def test_a_job_with_no_check_fails_unless_it_may_have_nothing_to_run():
+    tests = [CheckResult(name="layer_b.pytest", layer="B", passed=True)]
+    jobs = {j.name: j for j in gate._pipeline([], tests, {})}
+    assert {n: j.status for n, j in jobs.items()} == {
+        "change_scope": "fail", "environments": "skip", "no_fabrication": "fail", "structural": "fail",
+        "minting": "fail", "tests": "pass", "regression": "skip"}
+    assert jobs["change_scope"].reason == "it ran no check"
+    assert not gate._passed(list(jobs.values()))
+
+
+def test_a_test_of_the_package_outside_its_tests_folder_is_held_to_the_one_manifest_literal(tmp_path):
+    """Only a package's tests/ run apart from the registry: a test-named file elsewhere is package code."""
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        "from demo_utils.skills import TOOL_MANIFEST\n\n\ndef test_my_tool():\n"
+        "    assert TOOL_MANIFEST and my_tool('synth240611-aa') is not None\n")
+    tests = repo / "demo_utils" / "tests"
+    tests.mkdir()
+    (tests / "test_manifest.py").write_text(
+        "from demo_utils.skills import TOOL_MANIFEST\n\n\ndef test_entry():\n    assert TOOL_MANIFEST\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    check = next(c for c in report.layer_a if c.name == "structural.manifest_literal")
+    assert not check.passed and "demo_utils/lib/test_demo.py:1" in check.detail
+    assert "demo_utils/tests/test_manifest.py" not in check.detail
+
+
+def test_a_changed_default_environment_with_no_package_running_in_it_says_how_to_test_it(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path)
+    _with_env(repo, monkeypatch, names_it=False)
+    (repo / "demo_utils" / "tool_config.yaml").write_text("env: sherpa\n")
+    folder = repo / "envs" / "stack"
+    folder.mkdir()
+    (folder / "env.yaml").write_text("purpose: the default stack\nbase: testbase\n")
+    _default_env_contract(repo, "stack")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    check = next(c for c in report.layer_a if c.name == "structural.env_definition.stack")
+    assert not check.passed and "the toolkit's default environment, and no touched package runs in it" in check.detail
+    assert "add `env: stack`" not in check.detail

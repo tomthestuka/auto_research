@@ -33,17 +33,6 @@ def test_empty_allowlist_is_inactive():
     g = PathGuard([])
     assert not g.active
     assert g.is_allowed("/anything/at/all")  # inactive guard allows everything
-    assert g.forbidden_in_command("cat /etc/shadow") is None
-
-
-def test_forbidden_in_command(tmp_path):
-    tk = tmp_path / "research_toolkit"
-    tk.mkdir()
-    g = PathGuard([tk])
-    assert g.forbidden_in_command('python -c "import xspec_utils"') is None  # no abs path named
-    assert g.forbidden_in_command(f"pytest {tk}/xspec_utils/tests -q") is None  # inside a root
-    bad = g.forbidden_in_command(f"cat {tmp_path}/auto_research/sandbox/gate.py")
-    assert bad is not None and "auto_research" in bad
 
 
 def test_real_config_denies_auto_research_allows_toolkit():
@@ -60,9 +49,11 @@ def test_real_config_denies_auto_research_allows_toolkit():
     # This test's repo IS auto_research; its root is deliberately absent from the allow-list.
     repo_root = Path(__file__).resolve().parents[1]
     assert not g.is_allowed(repo_root / "src" / "auto_research" / "sandbox" / "gate.py")
-    # The configured toolkit_root is allowed (same config that produced `roots`).
-    toolkit_root = load_orchestration_config().get("toolkit_root")
-    if toolkit_root:
+    # The configured toolkit root is allowed (same config that produced `roots`).
+    from auto_research.toolkit_contract import toolkit
+
+    toolkit_root = toolkit().root
+    if toolkit_root.is_dir():
         assert g.is_allowed(Path(toolkit_root) / "xspec_utils" / "lib" / "red_ixpe.py")
 
 

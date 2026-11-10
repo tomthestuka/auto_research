@@ -128,14 +128,22 @@ def test_a_toolkit_receipt_names_its_root_and_commit(tmp_path, mission):
 
 
 def test_the_leads_data_catalog_names_its_toolkit_root_and_commit(tmp_path, monkeypatch):
-    """Through the lead's production tool loop (`readonly_tools_for`), not the helper."""
+    """Through the lead's production tool loop (`readonly_tools_for`), not the helper; the read runs
+    in the jail."""
     import auto_research.env as env
     from auto_research.graph.runtime import readonly_tools_for
+    from auto_research.sandbox import jail
+
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
 
     root, _ = _toolkit(tmp_path)
     (root / "catalog_utils" / "lib").mkdir(parents=True)
-    (root / "catalog_utils" / "__init__.py").write_text(
-        "TOOL_MANIFEST = {'research_toolkit.catalog_utils.data_catalog': {'args_schema': {'properties': "
+    (root / "catalog_utils" / "skills").mkdir()
+    (root / "catalog_utils" / "__init__.py").write_text("from .skills import TOOL_MANIFEST\n")
+    (root / "catalog_utils" / "skills" / "__init__.py").write_text(
+        "TOOL_MANIFEST = {'research_toolkit.catalog_utils.data_catalog': {'module': 'catalog_utils.lib.catalog_read', "
+        "'fn': 'data_catalog', 'args_schema': {'properties': "
         "{'obs_db_path': {'kind': 'path'}, 'min_level': {'kind': 'setting'}}}}}\n")
     (root / "catalog_utils" / "lib" / "__init__.py").write_text("")
     (root / "catalog_utils" / "lib" / "catalog_read.py").write_text(
@@ -145,11 +153,6 @@ def test_the_leads_data_catalog_names_its_toolkit_root_and_commit(tmp_path, monk
     subprocess.run([*git, "commit", "-q", "-m", "catalog"], check=True)
     head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     monkeypatch.setattr(env, "toolkit_root", lambda: root)
-    monkeypatch.setattr(react, "_catalog_read_fn", None)
-    import sys
-
-    for name in [m for m in sys.modules if m.split(".")[0] == "catalog_utils"]:
-        monkeypatch.delitem(sys.modules, name)  # the real one comes back after this test
 
     store = ReceiptStore(tmp_path / "receipts")
     tools = readonly_tools_for("analyst_lead", roots=[tmp_path])
@@ -163,8 +166,11 @@ def test_the_leads_data_catalog_names_its_toolkit_root_and_commit(tmp_path, monk
     assert receipt.produced_by == "research_toolkit.catalog_utils.data_catalog"
     assert (receipt.toolkit_root, receipt.toolkit_commit) == (root.resolve(), head)
     assert [i.path.name for i in receipt.inputs] == ["catalog.json"]
-    for name in [m for m in sys.modules if m.split(".")[0] == "catalog_utils"]:
-        del sys.modules[name]  # this fake toolkit's modules, imported by the call
+    # Stamped with the environment it ran in, as a worker's toolkit call is.
+    from auto_research.env import analysis_environment
+    from auto_research.sandbox.envs import fingerprint
+
+    assert receipt.env == fingerprint(analysis_environment())
 
 
 def test_hand_authored_fixtures_flag_their_results_synthetic(tmp_path, mission):

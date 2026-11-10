@@ -259,7 +259,6 @@ def test_the_lead_seat_sustains_a_real_cycle_and_files_a_form(tmp_path, monkeypa
             roots=[tmp_path, *readonly_roots_for("seat-probe", toolkit_root)[1:]],
             retrieval=None,
             web_source=None,
-            human_handler=None,
         )
         lead._figure_catalog["analyst_worker_0"] = list(figures)
         outcome = asyncio.run(
@@ -328,9 +327,8 @@ def test_the_worker_seat_drives_a_tool_loop_and_sees_a_figure(tmp_path):
     from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL
     from auto_research.agents.roles import AnalystWorkerAgent
     from auto_research.env import toolkit_root as configured_toolkit_root
-    from auto_research.graph.runtime import attach_worker_runtime
+    from auto_research.graph.runtime import attach_worker_runtime, worker_mcp_client
     from auto_research.models import load_registry
-    from auto_research.sandbox.mcp_client import MCPToolClient
     from auto_research.sandbox.registry import ToolkitRegistry
     from auto_research.sandbox.workspace import create_run_workspace
     from auto_research.schemas import AnalysisTask, AnalystReport
@@ -358,10 +356,10 @@ def test_the_worker_seat_drives_a_tool_loop_and_sees_a_figure(tmp_path):
         run_id = "seat-probe"
         create_run_workspace(run_id, ["analyst_worker_0"])
         worker = AnalystWorkerAgent(model=recording, worker_index=0)
-        mcp_client = MCPToolClient(servers=[])
-        # `sandbox_settings` defaults to the configured ones, so the REPL this worker gets is the
-        # REPL production gives it. Passing nothing here previously built a sandbox that refused
-        # to start, which is the right failure and the reason the settings live in the factory.
+        # The workers' shell server, from the seam `run_research` calls, so this seat gets the
+        # shell (`bash_exec`) production gives it. `sandbox_settings` defaults to the configured
+        # ones in both seams, so the REPL and the shell are the ones production builds.
+        mcp_client = worker_mcp_client([worker], run_id=run_id, toolkit_root=toolkit_root)
         sandboxes = attach_worker_runtime(
             [worker], run_id=run_id, registry=registry, toolkit_root=toolkit_root,
             mcp_client=mcp_client,
@@ -389,14 +387,20 @@ def test_the_worker_seat_drives_a_tool_loop_and_sees_a_figure(tmp_path):
             figures=list(figures),
             status="succeeded",
         )
-        try:
-            report = asyncio.run(worker.analyze(task, peer_reports=[peer]))
-        finally:
-            for sandbox in sandboxes:
-                try:
-                    asyncio.run(sandbox.shutdown())
-                except Exception:  # noqa: BLE001 — teardown never fails a measured cell
-                    pass
+        async def main():
+            # Started outside the turn's try: a shell that fails to start fails the cell.
+            await mcp_client.start()
+            registry.load_mcp(mcp_client)
+            try:
+                return await worker.analyze(task, peer_reports=[peer])
+            finally:
+                for close in (*(sandbox.shutdown for sandbox in sandboxes), mcp_client.shutdown):
+                    try:  # leaf to root
+                        await close()
+                    except Exception:  # noqa: BLE001 — teardown never fails a measured cell
+                        pass
+
+        report = asyncio.run(main())
 
     _record(
         "worker_loop",

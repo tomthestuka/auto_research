@@ -97,14 +97,12 @@ def test_binary_files_and_fifos_are_answered_not_read(worker):
         assert out.is_error and ("binary" in out.text or "regular file" in out.text), out.text
 
 
-def test_with_the_jail_on_a_worker_is_sent_to_its_shell_for_tmp(worker, monkeypatch):
-    from auto_research.sandbox import jail
+def test_a_worker_is_sent_to_its_shell_for_tmp(worker, monkeypatch):
     from auto_research.sandbox import fs_guard
 
     provider, allowed, _ = worker
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [allowed.resolve(), __import__("pathlib").Path("/tmp").resolve()])
     provider._guard = fs_guard.PathGuard.from_config()
-    monkeypatch.setattr(jail, "jail_enabled", lambda *a, **k: True)
     out = _read(provider, path="/tmp/anything.log")
     assert out.is_error and "bash_exec" in out.text
 
@@ -130,10 +128,10 @@ def test_past_the_count_ahead_cap_the_footer_says_more_lines_follow(worker, monk
     assert "more lines follow" in out.text and "offset=2" in out.text
 
 
-def test_the_tmp_rule_with_the_jail_off_and_through_links(worker, monkeypatch, tmp_path):
+def test_the_tmp_rule_holds_through_links(worker, monkeypatch, tmp_path):
     from pathlib import Path
 
-    from auto_research.sandbox import fs_guard, jail
+    from auto_research.sandbox import fs_guard
 
     provider, allowed, _ = worker
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [allowed.resolve(), Path("/tmp").resolve()])
@@ -142,12 +140,9 @@ def test_the_tmp_rule_with_the_jail_off_and_through_links(worker, monkeypatch, t
     outside.write_text("host tmp\n")
     try:
         (allowed / "w0" / "to_tmp.log").symlink_to(outside)
-        monkeypatch.setattr(jail, "jail_enabled", lambda *a, **k: True)
         for path in (str(outside), "to_tmp.log", "/tmp"):
             out = _read(provider, path=path)
             assert out.is_error and "bash_exec" in out.text, path
-        monkeypatch.setattr(jail, "jail_enabled", lambda *a, **k: False)
-        assert "host tmp" in _read(provider, path=str(outside)).text
     finally:
         outside.unlink()
 

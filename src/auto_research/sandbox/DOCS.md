@@ -26,9 +26,8 @@ See [CLAUDE.md §9](../../../CLAUDE.md#9-phase-2--tool-authoring-the-active-phas
 sandbox/
 ├── registry.py       # ToolkitRegistry — manifest-based tool discovery
 ├── persistent.py     # PersistentSandbox — long-lived REPL subprocess per worker
-├── runner.py         # run_tool()     — one-shot subprocess (kept for ad-hoc use)
+├── runner.py         # run_in_environment() — one jailed command in an environment; result-text rules
 ├── workspace.py      # per-run/agent folder layout
-├── analyst_env.sh    # dedicated headless analyst env (HEADAS, CALDB, no cruft)
 ├── builtin_server.py # MCP stdio server: bash_exec, list_dir
 ├── mcp_client.py     # MCPToolClient — manages stdio MCP server sessions
 ├── merge_flow.py     # propose_and_pr() — author harness + rework loop (step 2);
@@ -37,9 +36,10 @@ sandbox/
 └── review.py         # make_review_hook() — provider-decorrelated co-lead review (step 4)
 ```
 
-**`TOOL_MANIFEST` convention:** each research_toolkit package exposes a
-module-level dict `TOOL_MANIFEST: dict[str, ToolSpec]` at its top level.
-`ToolkitRegistry` discovers tools by importing these manifests lazily. Adding
+**`TOOL_MANIFEST` convention:** each research_toolkit package holds one dict literal
+`TOOL_MANIFEST = {...}` in `<package>/skills/__init__.py` (re-exported by `<package>/__init__.py`
+for the REPL). `ToolkitRegistry` reads it **statically** (`registry.manifest_literal`: parsed and
+evaluated as data, no toolkit code runs in the orchestrator, D25). Adding
 a new tool to research_toolkit requires only adding it to `TOOL_MANIFEST` — no
 changes to `auto_research`.
 
@@ -86,16 +86,23 @@ so the single `tool_catalogue()` string given to workers describes both.
 `SandboxToolProvider` dispatches MCP tools via `registry.is_mcp(kind)`, so they use
 the same ReAct and memory-recording path as manifest tools.
 
-**Analyst env script:** `analyst_env.sh` is a minimal bash script sourced by
-`_source_ini_env()` before each persistent subprocess is spawned. The script is sourced in a
-**clean environment** (identity, locale and proxy variables plus a system `PATH`, from `/`, under
+**The default environment (W4, 2026-11-09).** A unit's own REPL and shell run in the toolkit's
+default environment (toolkit contract `default_env`; `envs/analysis/` in `research_toolkit`, built
+as `ar-analysis`): a derived definition layered on a human conda prefix the host declares by name
+(`human_envs`), with HEASoft and CALDB sourced by its `activate.sh`. Being pipeline-owned, its
+activation is sourced only inside the process that runs in it, by the shared launcher
+(`envs.in_environment`), inside the jail — so the boot file now lives in the toolkit,
+which the jail mounts (F21 closed). It has no `boot.py`: the default REPL runs only the packages that
+name no environment (download and catalog tools, no XSPEC), the XSPEC tools run in `ar-xspec`
+whose `boot.py` holds the session setup, and `bash_exec` runs in the shell server, which never
+runs a boot file. A human environment's activation script (a test's) is still sourced
+by `_source_ini_env()`, in a **clean environment** (identity, locale and proxy variables plus a system `PATH`, from `/`, under
 `bash --norc --noprofile` with stdin from `/dev/null` — bash sources `~/.bashrc` when stdin is a
 socket), so the REPL, the shell and the gate's test run never carry the parent's credentials or its
 `PWD`: before 2026-10-06 every API key `load_dotenv` had loaded reached them. The author harnesses
 are not covered: both SDKs merge their `env` over the parent's `os.environ`.  It sets only
 the analysis variables needed headlessly (HEADAS, CALDB, CALDBCONFIG, CALDBALIAS,
 GEOMAG_PATH) with no SSH agent, gnome-keyring, or interactive conda activation.
-`config/orchestration.yaml::analyze_ini_sh` points at this file.
 
 ## Interfaces / Contracts
 
@@ -142,12 +149,15 @@ Because provider function names must match `^[A-Za-z0-9_-]{1,64}$`, the dotted
 returned tool-call name back to the canonical `kind` the sandbox routes on.
 
 Invariants:
-- `load()` prepends `toolkit_root` to `sys.path` only during import, then
-  removes it. No ambient path pollution.
-- A `*_utils` package that fails to import, or exposes no `TOOL_MANIFEST`, contributes no tools
-  and is recorded in `import_errors` (`{package: reason}`, logged); `check_toolkit_manifests(root=None)`
-  is the launch-time preflight that refuses a toolkit with any (2026-10-27; it was skipped
-  silently before).
+- `load()` and `reload()` run no toolkit code: each manifest is the literal read from
+  `<package>/skills/__init__.py`; toolkit code runs only inside the jail.
+- Packages are the top-level folders matching the toolkit contract's `package_glob` with an
+  `__init__.py` (`toolkit_contract.ToolkitContract.packages` plus the `__init__.py` test).
+- A package whose `skills/__init__.py` holds no `TOOL_MANIFEST` dict literal contributes no tools
+  and is recorded in `import_errors` (`{package: reason}`, logged); a manifest key not of the form
+  `<toolkit name>.<package>.<tool>` (the declaring package) is not served and is recorded in
+  `key_errors`; `check_toolkit_manifests(root=None)` (root: the contract's) is the launch-time
+  preflight that refuses a toolkit with any (2026-10-27; it was skipped silently before).
 - Every `args_schema` property declares a `kind` (`data`, `parameter`, `path`, `setting`,
   `output` with its `shape`, 2026-11-04) and an optional parameter a `default` (2026-11-03; the input validator, `provenance.inputs`). `load()`
   records every tool the validator cannot check in `manifest_errors` (never raises, a malformed
@@ -183,12 +193,14 @@ write_lock(env, lock_dir) -> Path        # <lock_dir>/<fingerprint>.json, writte
 fingerprint_and_lock(env, lock_dir) -> str   # what a receipt stamps: never a fingerprint without a lock
 ```
 
-The application builds them: `auto_research.env.analysis_environment(config)` (from `analyze_env`,
-`analyze_ini_sh`, `repl_init_py`, `env_externals`), `host_environment()` (the orchestrator's own),
+The application builds them: `auto_research.env.analysis_environment(config)` (the toolkit's
+default environment, `default_env` of the bound contract, resolved through `env_build.build`; bases
+from `human_envs`, externals from `env_externals`), `host_environment()` (the orchestrator's own),
 `env_lock_dir()` (`<runtime>/conda/locks`). The REPL (`PersistentSandbox(environment=)`), the shell
-server (`SandboxSettings.environment` → `_env_spelling`), the gate's Layer-B run, the author's shell
-(`merge_flow._author_env`), the preflight probe and the jail probe all read the analysis
-environment through this one object; `runner.run_tool` (one-shot, ad hoc) still takes its keys.
+server (`SandboxSettings.environment` → `_builtin_server_config`), the gate's Layer-B run of a
+package naming no environment, the author's shell (`merge_flow._author_env`, its variables read back
+by `runner.analysis_activation_env`), the launch probe and the private-variable check all read the
+default environment through this one object.
 
 A lock (`<fingerprint>.json`) carries the components the fingerprint hashes (`components`), a conda
 explicit list, pip requirements (`name==version`, `name @ <url>` or `-e <url>` from
@@ -208,7 +220,9 @@ does not move the cache key; NFS attribute caching can delay a change made on an
 ### `env_build.py` — pipeline-owned environment definitions (env plan B3a)
 
 A definition is a folder `<toolkit>/envs/<name>/` holding only plain files (no links, no other
-hard links, nothing else): `env.yaml` (purpose, `base`, `externals`), `env.lock` (conda explicit:
+hard links, nothing else): `env.yaml` (purpose, `base` — a human environment's name, declared by
+the host in `human_envs` —, `externals`, and an optional one-line `probe` the launch runs for the
+default environment), `env.lock` (conda explicit:
 conda-forge URLs with md5 or `sha256:`, this machine's platform or noarch, one line per package),
 `env.pip` (wheels conda-forge lacks, each `name==version --hash=sha256:<hex>`), `activate.sh`,
 `boot.py`. Lock and pip files are plain ASCII with `\n` line ends. **Built** (a lock, no base) →
@@ -219,13 +233,13 @@ boot file.
 ```python
 read_definition(folder) -> EnvDefinition          # env.yaml read safely (no link/FIFO, size cap, no anchors/aliases); wrong types read as empty
 validate(folder, *, base_envs, externals) -> list[str]   # stages a private copy, checks the copy; reasons as fixes (lines quoted ≤48 chars, YAML errors by line)
-build(defn, *, conda_dir, conda_exe, base_envs, externals, jailed, runner=subprocess.run, timeout_s=3600, on_build=None, package_archive=None, on_restore=None) -> Environment   # on_restore(kept_name): a kept build put back (D3c)
-build_record(conda_dir, prefix) -> dict | None     # {"definition_sha256", "jailed", "name", "activate", "boot", "externals"} after a verified build; a derived one has "base" instead of "jailed"
+build(defn, *, conda_dir, conda_exe, base_envs, externals, runner=subprocess.run, timeout_s=3600, on_build=None, package_archive=None, on_restore=None) -> Environment   # on_restore(kept_name): a kept build put back (D3c)
+build_record(conda_dir, prefix) -> dict | None     # {"definition_sha256", "jailed": true, "name", "activate", "boot", "externals"} after a verified build; a derived one has "base" instead of "jailed"
 built_environments(conda_dir, externals, base_envs=None, definitions=None) -> list[Environment]   # every finished build, latest per name, activation only from activation/; a derived record resolves its base in base_envs (skipped if gone); `superseded` when its digest is not that of definitions/<id> (or that is gone)
 build_policy(*, conda_exe, staged, target, work) -> JailPolicy   # one build's jail
 forget(conda_dir, name) -> bool                    # drop ar-<name>'s record (definition deleted); the prefix stays
 installed_dists(prefix) -> list[str]               # <lib>/<name>.dist-info of every installed distribution, sorted
-replay(lock, *, conda_dir, conda_exe, jailed, runner=subprocess.run, timeout_s=3600) -> dict   # B4: a recorded state's conda part rebuilt into replay/<fp16>, compared
+replay(lock, *, conda_dir, conda_exe, runner=subprocess.run, timeout_s=3600) -> dict   # B4: a recorded state's conda part rebuilt into replay/<fp16>, compared
 recorded_dists(conda_dir, prefix) -> list[str] | None   # the baseline written at build (sidecar built/<prefix>.dists)
 StoppableRunner()                                  # subprocess.run stand-in; .stop() kills what it runs (own session each)
 conda_root(conda_exe) -> Path                      # the installation, as spelled; refused if not one or if it holds $HOME
@@ -243,9 +257,10 @@ verify(defn, prefix)                               # stages the definition, then
    (full sha256), built from and verified — a definition
    changed after review is never installed;
 3. a prefix whose record `<conda_dir>/built/<prefix>.json` (written only by the runtime, temp +
-   replace, `O_NOFOLLOW`) names this sha256 — and, for a jailed caller, says `jailed` in a
-   `conda_dir` no unjailed build has ever run in (`built/unjailed.json`, sticky) — is verified and
-   reused (a reused prefix failing `verify` raises every time: a loud tamper signal). Before a
+   replace, `O_NOFOLLOW`) names this sha256 and says `"jailed": true` (every build writes it) is
+   verified and reused — a record lacking it, or one an unjailed build wrote before D25
+   (`"jailed": false`), is rebuilt and never listed or swapped back — and nothing at all in a `conda_dir` holding that era's
+   `built/unjailed.json` marker, which `build` and `replay` refuse with how to rebuild (a reused prefix failing `verify` raises every time: a loud tamper signal). Before a
    rebuild the old record is deleted first, so an interrupted rebuild is never reused. The
    finished build a rebuild moves aside (`<prefix>.prev-<digest8>-*`, only the latest kept) keeps
    its record and distribution list under `built/kept/` (never listed); a later build of that very
@@ -259,10 +274,8 @@ verify(defn, prefix)                               # stages the definition, then
    `list_env`); every toolkit call routed into it is flagged `env_untested`, and the commit note
    and the launch event say "The previous build stays in use; its results are flagged untested
    env" (`merge_flow.PREVIOUS_IN_USE`). Each launch tries that build once more (a fix or a passing
-   network fault may have cleared it). The sticky
-   taint has no automatic reset: delete `built/unjailed.json` by hand once the `conda_dir` is
-   trusted again (until then every jailed build re-downloads); anything else at that path is removed (read-only leftovers made
-   writable first) and an empty target created;
+   network fault may have cleared it). Anything else at that path is removed (read-only leftovers
+   made writable first) and an empty target created;
 4. `conda config --show pkgs_dirs` must be exactly this build's own cache, then — when the caller
    passes `package_archive` (every runtime caller: the launch and commit builds, the gate, the
    coder's candidate builds) — the shared package archive `<agent conda dir>/pkgs-archive/`
@@ -272,8 +285,7 @@ verify(defn, prefix)                               # stages the definition, then
    refetched). After a successful build the runtime, outside the jail and under the archive's own
    lock, adds each package file the lock names whose bytes match its lock line
    (`_archive_packages`), so the next build of the same packages downloads nothing; the archive
-   holds package files and `urls.txt` only, never extracted folders. Only a jailed build reads it
-   (unjailed, conda would find it writable and extract into it), and an archive holding any
+   holds package files and `urls.txt` only, never extracted folders; an archive holding any
    folder is not used;
 5. every command's output goes to `staging/build-*/output.log` (no build binds it), never into
    memory; errors quote its last 400 bytes;
@@ -282,10 +294,9 @@ verify(defn, prefix)                               # stages the definition, then
 7. `verify`, then the record; the staging folder (copy, cache, home, `/tmp`) is removed whatever
    happened.
 
-`jailed` is required. With it, every command runs under `build_policy`: conda's installation and
+Every command runs in the jail of `build_policy` (unconditional, D25): conda's installation and
 the staged copy read-only; only the target prefix and the build's own cache and home writable;
-private `/tmp`; network on. No bwrap → refused. `jailed=False` is the caller's explicit choice,
-written into the record. The process environment is only `_BUILD_PASS` (PATH, locale, proxies, CA
+private `/tmp`; network on. No bwrap → refused. The process environment is only `_BUILD_PASS` (PATH, locale, proxies, CA
 bundle; a proxy URL with credentials is visible to package scripts — accepted) plus `HOME`,
 `CONDA_PKGS_DIRS`, `CONDA_ALWAYS_COPY=true`, `CONDA_CHANNELS=conda-forge`,
 `CONDA_REGISTER_ENVS=false`, `CONDA_SAFETY_CHECKS=enabled`, `CONDA_EXTRA_SAFETY_CHECKS=true`,
@@ -321,18 +332,18 @@ under the host temp root; no jailed agent binds it (reviewed) — `build` re-sta
 PATH). Live-verified 2026-10-06: a conda-exported lock rebuilt exactly, jailed, `~/.conda`
 untouched (`tests/test_env_build.py`, opt-in `--live`).
 
-**Solving and pinning (B3c-3).** `solve(specs, *, conda_exe, work, jailed, runner, timeout_s)` →
+**Solving and pinning (B3c-3).** `solve(specs, *, conda_exe, work, runner, timeout_s)` →
 `env.lock` text: a conda-forge-only `create --dry-run --json` into a throwaway prefix with an
 empty package cache, its `LINK` order mapped to `FETCH`'s URL and md5; specs must be plain
-constraints (`_SPEC`), nothing is installed. `pin_wheels(python, requirements, *, work, jailed,
+constraints (`_SPEC`), nothing is installed. `pin_wheels(python, requirements, *, work,
 runner)` → `env.pip` lines: each `name==version` downloaded as one binary wheel with the
 candidate's own Python (`--isolated --no-deps --only-binary=:all:`), hashed here. Both run with
-the build's environment and, jailed, only `work` writable.
+the build's environment, in the jail, with only `work` writable.
 
 **Build on commit (B3c-4).** A direct-branch `AuthoringSession.commit` builds every environment the
 commit concerns (`merge_flow.committed_environments(toolkit_root, manifest)`: each changed, undeleted
 definition and the `env:` of each changed package) into `env.agent_conda_dir()` with the configured
-human base, declared externals and the jail setting (`build_committed_environments`), before the
+human base and declared externals (`build_committed_environments`), before the
 caller reloads the registry; each result is a ledger event (`env.build` / `env.build.error`: env,
 name, prefix, definition digest, seconds, commit sha) and the lead's commit answer carries
 `session.env_note` ("Environment built: ar-x." or why it did not build; the commit stands). Worktree
@@ -343,8 +354,7 @@ whose activation, boot file or externals changed gets its record rewritten. The 
 `env_build.StoppableRunner` (each command in its own session), which a stop kills; the candidate
 tools use one too, killed by `CandidateEnvs.close()`. Any failure after the commit is a note, never
 an exception (the commit stands). Accepted residuals: a built→derived switch leaves the old prefix
-on disk without a record; after any unjailed build the sticky taint makes every jailed commit
-rebuild from scratch; the build reads the live tree just after the commit (a write in between is
+on disk without a record; the build reads the live tree just after the commit (a write in between is
 sabotage-only); a rebuild is visible at once to a new path lookup (the shell binds the whole
 `envs` folder), so a run sharing the runtime dir that uses `ar-x` while another rebuilds it may run
 a half-built prefix. The gate admits a deleted definition (`structural.env_definition.<name>`)
@@ -362,16 +372,15 @@ distributions differ from the baseline recorded at its build (`installed_dists`,
 included) is written to the lock store, the prefix kept as `ar-<id>.drift-<fp8>`, and a fresh build
 made from the unchanged definition; if that build fails the drifted prefix and its record are put
 back and stay in use. Every other definition goes through `build()`, which reuses an intact prefix
-and refreshes its record (an activation-only commit whose build was stopped), or redoes a build the
-jail setting no longer admits. A built environment whose declared externals' stamps changed is
-reported and the new stamps recorded (`external_stamps`; an external cannot be rebuilt). With the
-jail on and the unjailed taint present, one `tainted` result says nothing is reused until a human
-removes the marker. Ledger: `env.build`, `env.restored`, `env.drift`, `env.external_changed`, `env.build.error`,
-`env.tainted`, `env.reconcile.error`; nothing stops the launch. While it runs the ledger hears
+and refreshes its record (an activation-only commit whose build was stopped). A built environment whose declared externals' stamps changed is
+reported and the new stamps recorded (`external_stamps`; an external cannot be rebuilt). Ledger:
+`env.build`, `env.restored`, `env.drift`, `env.external_changed`, `env.build.error`,
+`env.reconcile.error`; nothing stops the launch. While it runs the ledger hears
 what it builds (D1/D1b; run polevo-20261104 was silent for 34 min): `merge_flow.run_builds` runs
 the builds in a thread, records `env.build.start` (level 2, with its cause) for each **fresh**
 build — `env_build.build(..., on_build=)` reports why it did not reuse the prefix (`missing`,
-`stale`, `unjailed`, `tainted`, `interrupted`; the reconcile adds `drift`), a reused prefix is not
+`stale`, `unjailed` — a record an unjailed build wrote before D25 —, `interrupted`; the reconcile
+adds `drift`), a reused prefix is not
 announced — and every `BUILD_HEARTBEAT_S` (5 min) `env.build.progress` naming the latest build
 started and the minutes elapsed; a fresh build's result reads `built` with that cause (its entry
 from `build_committed_environments` carries `fresh`, set as the build starts). The build
@@ -380,8 +389,7 @@ with the commit's SHA; its note to the lead names a restored environment as rest
 recorded (their prefix is the human's), their declared externals stamped like a built one's. A stop
 leaves the remaining environments untouched. Residuals: reconcile checks without the install lock,
 so a run sharing the runtime dir may race its record rewrite; a build from before the dist
-baseline takes its first baseline from its current state; a rebuild forced by the jail rule reads
-as `ok` (the `tainted` notice covers the usual cause). Units are told nothing yet:
+baseline takes its first baseline from its current state. Units are told nothing yet:
 per-call drift detection and the tool-result notice come with routing (B3b), when units run tools
 in these environments.
 
@@ -410,12 +418,16 @@ copied there so the jail can reach it) and the default runner runs pytest with t
 Python through `envs.in_environment` (`keep`: the return recorder's variables and `PYTHONPATH`), so
 a coder-written activation is sourced only inside the jail, which binds the prefix and the
 activation copy read-only (`_jailed_pytest(extra_ro=)`). A build failure is a failed
-`layer_b.env.<id>`; tests of a package naming none run in the analysis environment as before; one
+`layer_b.env.<id>`; tests of a package naming none run in the toolkit's default environment
+(contract `default_env`), built the same way from the judged export, so the live build and its
+record (`built/ar-<default_env>.json`) are never touched by unreviewed files (an injected runner gets
+no environment for them); one
 merged outcome; each group's return recorder watches only its own environment's tools. Gate builds
 live in one folder per definition digest (`gate/<sha16>/`, so concurrent gates never move one
 another's build) and a folder unused for a day is removed under one prune lock; a derived
 environment's copied base activation lives inside its digest folder. In the environment path the jail's
-private `PFILES` folder is handed to the launcher, which restores it after the activation. An
+private folder of each declared private variable is handed to the launcher alone, which puts the
+kept part back after the activation. An
 injected test runner receives `environment=` for a named group. Residuals: the build is outside the
 per-run test timeout (only conda's own 3600 s per command bounds it); a changed tool whose package
 has no tests in the changeset and names an environment no test group runs in is not watched.
@@ -430,8 +442,7 @@ catalogue's record changes; closed by `restart` (a commit reload) and `shutdown`
 `abort`/`kill_now`; a failure or an environment-change restart of the worker's own REPL keeps them).
 A pool REPL in a pipeline environment whose activation is the runtime's copy (under
 `agent_conda_dir()`) starts through `envs.in_environment` inside the jail, its prefix and its
-coder-written activation and boot files bound read-only as files (and refused unjailed when the jail
-is configured); a derived one with no activation of its own sources its
+coder-written activation and boot files bound read-only as files; a derived one with no activation of its own sources its
 human base's as the analysis REPL does. `call_environment`, `call_stamp` and the notice then name
 the pool REPL's. The worker side is `react.SandboxToolProvider._route_environment` (agents/DOCS).
 
@@ -445,7 +456,7 @@ escalation servers: `env_solve(env_id, specs)` writes `envs/<env_id>/env.lock`;
 launcher a worker's `use_env` shell uses (`envs.in_environment(environment, command, toolkit_root,
 pass_args=True)`: `/usr/bin/env -i` with the jail's home, temp, parameter folder, locale, identity
 and proxies; the activation sourced, an activation that fails or exits reported with exit 97; the
-jail's writable `PFILES` half restored; the candidate first on `PATH`; the worktree on
+jail's own folder restored before each declared private variable's separator, the declaration re-exported; the candidate first on `PATH`; the worktree on
 `PYTHONPATH`). The activation is the worktree's `activate.sh`, or the built one when the definition
 has none (a derived environment's base activation). A core command the candidate lacks (`python`,
 `pytest`, `pip`) answers so with exit 127 instead of falling through to the analysis environment.
@@ -455,9 +466,7 @@ the worktree (no link on the way; written by replace) and nothing after `close()
 `AuthoringSession.aclose` calls first; each attempt has its own folder
 (`CandidateEnvs.attempt_dir(<worktree_base>/envs_cand, tool)` → `<tool>-<hex8>`, earlier ones removed
 best-effort), since a build orphaned by a stop can still be writing. Solves, pins and builds are
-serialised. Accepted residual: with the jail off the candidate is writable to the coder (a `pip
-install` would land in it); production runs jailed, and unjailed confinement is best-effort (§13).
-Also accepted (low): a copied base activation that sources a sibling by a relative path fails
+serialised. Accepted (low): a copied base activation that sources a sibling by a relative path fails
 loudly (exit 97; the configured one uses absolute paths); the wrappers put the worktree's parent
 on `PYTHONPATH` as `use_env` does while the gate's Layer B does not, so an
 `import research_toolkit.<pkg>` test passes in the candidate and fails the gate visibly.
@@ -480,9 +489,11 @@ class PersistentSandbox:
         toolkit_root: Path,
         workdir: Path,
         *,
-        analyze_env: Path | None = None,
-        analyze_ini_sh: str | None = None,
+        environment: Environment,
         default_timeout_s: int = 300,
+        mcp_client: Any | None = None,
+        environments: Any | None = None,
+        label: str = "repl",
     ) -> None: ...
     async def start(self) -> None          # idempotent; spawn the REPL subprocess
     async def restart(self) -> None        # kill current subprocess and spawn fresh
@@ -496,11 +507,11 @@ class PersistentSandbox:
 
 - Spawns one long-lived subprocess that runs a JSON-line REPL loop.  The subprocess
   stays alive across all debate rounds and rework cycles; XSPEC session state persists.
-- At subprocess boot, the REPL imports PyXSPEC when available and sets
-  `Fit.query = "no"`, `Xset.allowPrompting = False`, and `Xset.chatter = 5`
-  exactly once for that process.  The first two match the reference notebook
-  behavior and prevent XSPEC file-name prompts from blocking the JSON protocol;
-  `chatter = 5` lowers XSPEC console verbosity to reduce captured-output volume.
+- At subprocess boot, the REPL execs its environment's boot file (`boot.py` of the definition,
+  passed as `AR_BOOT_PY`) once, when it has one; none runs a bare REPL. The XSPEC session setup
+  (`Fit.query = "no"`, `Xset.allowPrompting = False`, `Xset.chatter = 5`, relxill) is
+  `research_toolkit/envs/xspec/boot.py`, so it runs in the `ar-xspec` REPL the XSPEC tools are
+  routed to; this module holds no domain boot code.
 - `call_tool()` sends `{"module": ..., "fn": ..., "args": {...}}\n` to stdin and reads
   one JSON response line from stdout.  On timeout or death it kills the current
   process, starts a replacement, and returns the failed result for the call that
@@ -511,9 +522,9 @@ class PersistentSandbox:
   ixpeobssim) from polluting the protocol stream — otherwise one noisy call corrupts
   the line parser and kills the sandbox.  A truncated `console_tail` of captured output
   is attached to the result dict for diagnosis.
-- Uses `{analyze_env}/bin/python` when supplied; sources `analyze_ini_sh`
-  (`analyst_env.sh`) via `_source_ini_env()` for HEADAS/CALDB/LD_LIBRARY_PATH.
-  PYTHONPATH is overridden to `toolkit_root`.
+- Uses `environment.python`. A pipeline environment (the default one, `ar-xspec`) starts through
+  the shared launcher, its activation sourced inside the jail; a human one with an activation script
+  from `_source_ini_env()`. PYTHONPATH carries `toolkit_root`.
 
 ### Workspace utilities
 
@@ -543,20 +554,18 @@ def report_dir(run_id: str) -> Path
 
 ```python
 class MCPToolClient:
-    def __init__(self, servers: list[dict] | None = None) -> None: ...
+    def __init__(self, servers: list[dict]) -> None: ...
     async def start(self) -> None          # spawn server subprocesses; establish sessions
     def list_kinds(self) -> list[str]      # all registered MCP tool kinds
     def describe(self, kind: str) -> str   # description string for a kind
     def schema(self, kind: str) -> dict    # input JSON schema for a kind
     async def call_tool(self, kind: str, arguments: dict, *, timeout_s: float | None = 900.0) -> dict
     async def shutdown(self) -> None       # close all sessions; terminate servers
-    def is_jailed(self, kind: str) -> bool # the server config's "jailed" flag, set by whoever built it
 ```
 
-- `servers` is a list of `{"name": str, "command": str, "args": list[str]}` dicts.
-  Defaults to a single `builtin` server running `builtin_server.py` via
-  `sys.executable` (a bare default for tests); the run path always passes the config
-  `graph.runtime._builtin_server_config` builds (analysis interpreter, jailed when on).
+- `servers` (required) is a list of `{"name": str, "command": str, "args": list[str]}` dicts; the
+  run path passes the one `graph.runtime._builtin_server_config` builds (the default environment's
+  interpreter, inside the jail). There is no default server: nothing starts unjailed.
 - Tool kinds follow the convention `mcp.<server_name>.<tool_name>`.
 - `call_tool()` returns a dict with at minimum `stdout`, `stderr`, `exit_code`.
   Non-zero `exit_code` or `result.isError=True` is surfaced in the same `ToolResult`
@@ -568,16 +577,18 @@ class MCPToolClient:
 ### Built-in MCP server (`builtin_server.py`)
 
 Currently exposes shell execution plus file-tree exploration. Built by
-`graph.runtime._builtin_server_config`: it runs on the **analysis env's interpreter** (which carries
-`mcp`), with the environment the analyst init script produces (HEADAS/CALDB visible to `bash_exec`),
-`{analyze_env}/bin` first on `PATH`, and the toolkit on `PYTHONPATH`. **With `agent_os_jail` on it
-runs inside the OS jail** under the same allow-list as the REPL (writable: the allow-list's writable
+`graph.runtime._builtin_server_config(environment, toolkit_root, cwd, probe, writable_dirs)`: it runs
+on the **default environment's interpreter** (which carries `mcp`), started as the REPL is — a
+pipeline environment through the shared launcher (`envs.in_environment`: its activation sourced
+inside the jail, HEADAS/CALDB visible to `bash_exec`, its `bin` first on `PATH`, the toolkit on
+`PYTHONPATH`), a human one from its activation script. **It runs inside the OS jail**
+(unconditional, D25) under the same allow-list as the REPL (writable: the allow-list's writable
 roots, its cwd, its own jail home `jail-home/shell`; network on), its source passed with `-c` so the
 jail never mounts this repository (F20, 2026-10-06). The module is therefore kept stdlib + `mcp`
 only. Restricting MCP to read-only filesystem tools is a documented P2 task.
 
 Tools:
-- `private_param_dir() -> (folder | None, PFILES | None)` — a fresh, empty HEASoft user parameter folder inside the process's own user half of `PFILES` (the system half kept), for one call or command (G4); `(None, None)` with no two-part `PFILES`. The one definition: `bash_exec` uses it per command, the REPL's call loop per toolkit call, and the gate's recorder per watched call (a Layer-B test's other HEASoft use keeps the run's private folder, F23).
+- `private_folders(env, private=None, at=None, create=None, alone=False) -> (env, made)` — the one definition of per-process and per-call private folders (D19, F23, G4). `private` is `{variable: separator}` declared on an external (`env_externals.<name>.private`, read by `env.private_variables`; omitted, read from `AR_PRIVATE_FOLDERS`). A value `<folders><separator><kept>` gets its first part replaced, the rest kept; a value without the separator is unchanged. With `at` (a process's own, F23): `<at>/<variable lower-cased>`, made at `<create>/...`, and the declaration recorded in `AR_PRIVATE_FOLDERS`; `alone` hands over the folder without the kept part (a launcher, `envs.in_environment`, puts it back after the activation). Without `at` (one call or command, G4): a fresh, empty folder inside the first entry (`os.pathsep`) of the current part, listed in `made` for removal. Callers: `graph.runtime._builtin_server_config`, `PersistentSandbox.start`, `gate._default_test_runner`, `merge_flow._author_env` (`_author_private_at`), `CodexBackend._build_client` (process); `bash_exec` per command, the REPL's call loop per toolkit call, the gate's recorder per watched call (call). The host runs it as `runner.private_folders` (compiled from this source by `runner.builtin_function_source`); the REPL script and the recorder carry the same source. Today HEASoft's `PFILES` (`heasoft: {..., private: {PFILES: ";"}}`).
 - `bash_exec(command, cwd=None, timeout_s=60)` → `{"stdout": str, "stderr": str, "exit_code": int}`
   — run a shell command through the MCP server process. Its tool description scopes it to
   **read-only inspection** (listings, headers, shapes, paths, env probes); real analysis steps and
@@ -589,8 +600,8 @@ Tools:
   protocol and wedge the run) nor outlive the timeout. The tool description also instructs the
   model to invoke commands non-interactively (all parameters supplied up front). The description
   is **built at server startup** by `_bash_exec_description()` and is **domain-neutral**: the
-  concrete stack-probe example is injected from `AR_ANALYZE_PROBE` (config `analyze_probe`, wired
-  by `graph.runtime._builtin_server_config`); absent ⇒ a generic "import your toolkit package"
+  concrete stack-probe example is injected from `AR_ENV_PROBE` (the default environment's `env.yaml`
+  `probe`, wired by `graph.runtime._builtin_server_config`); absent ⇒ a generic "import your toolkit package"
   line. No domain string (FITS/xspec) is hardcoded in source.
 - `list_dir(path)` → `{"path": str, "entries": list[str]}` — alphabetically sorted
   directory listing.
@@ -617,33 +628,11 @@ layer — the MCP session itself handles it.
 ```python
 def load_mcp(self, client: MCPToolClient) -> None  # index MCP tools into registry
 def is_mcp(self, kind: str) -> bool                # True if kind is an MCP tool
-def mcp_jailed(self, kind: str) -> bool            # True if kind's server was launched inside the OS jail
 ```
 
 Call `load_mcp(client)` after `client.start()` to merge MCP kinds into the registry.
 `tool_catalogue()` includes both manifest and MCP tools in one string.
 `is_mcp()` is used by `SandboxToolProvider` to route dispatch to `call_mcp_tool()`.
-
-### `run_tool` (one-shot, kept for ad-hoc use)
-
-```python
-async def run_tool(
-    module: str,
-    fn: str,
-    args: dict,
-    *,
-    timeout_s: int = 300,
-    workdir: Path,
-    toolkit_root: Path,
-    analyze_env: Path | None = None,
-    analyze_ini_sh: str | None = None,
-) -> ToolResult
-```
-
-Not used by the main orchestration loop (replaced by `PersistentSandbox`).
-Kept for standalone testing and ad-hoc tool invocation.  Its public API remains
-async, but internally it uses bounded synchronous `subprocess.run()` for stable
-stdin/timeout behavior in the local Python environment.
 
 ### Isolation test
 
@@ -680,7 +669,8 @@ async def propose_and_pr(
 
 Spawns the Sonnet author (Claude Agent SDK) in an isolated git **worktree/branch** on
 `research_toolkit`, seeds it with the `ToolSpec` + runtime-safe structure context
-(`xspec_utils` source + `prompts/coder.md` + obs paths — never `DOCS.md`/`CLAUDE.md`), and
+(the toolkit contract's `template_package` source + `prompts/coder.md` + obs paths — never
+`DOCS.md`/`CLAUDE.md`), and
 drives the bounded rework loop:
 
 - **L0** author self-correction inside the SDK session (`max_turns`).
@@ -730,7 +720,9 @@ run killed before `finally` ran.
 
 ### `jail.py` — the OS-level filesystem jail (§12)
 
-`PathGuard` states the allow-list to the models and refuses the calls whose paths it can see. It
+**Unconditional** (ruling D25, 2026-11-09): every process a unit starts runs inside it, and a host
+that cannot run it is refused at launch. `PathGuard` is left with what runs in the runtime process
+itself (`read_file`, `list_dir`, `file_edit`, receipting), where no jail reaches. A guard alone
 cannot see everything: a shell command's implicit reads are invisible to a command-string scan, and
 the Codex harness grants full-disk **read** access by design — a DeepSeek coder read this repo's own
 `coder/codex_sdk.py`, `sandbox/DOCS.md`, the test harnessing it and `~/.codex/config.toml`
@@ -754,6 +746,8 @@ bwrap, unprivileged (user namespaces + Landlock)
 | analyst REPL | argv prefix in `persistent.py`, `analysis_policy` | yes (acquisition downloads) |
 | builtin shell server (`bash_exec`) | argv prefix in `graph.runtime._builtin_server_config`, `analysis_policy`; source via `-c` | yes |
 | gate's Layer-B pytest | argv prefix in `gate.py`; private `/tmp`, the worktree bound explicitly | **no** |
+| environment build, solve, wheel pin, replay | argv prefix in `env_build.py` (`build_policy`) | yes (downloads) |
+| launch probe, activation read-back | `runner.run_in_environment`, `analysis_policy` | yes |
 
 Wrapping each harness's *binary* rather than its command line keeps us out of the vendors'
 argv: whatever they pass next release still lands inside the jail.
@@ -771,14 +765,14 @@ argv: whatever they pass next release still lands inside the jail.
   four levels up into a sibling of `$HEADAS`, so jailing exactly the configured roots yielded an
   importable-looking namespace package and an `ImportError` on the first real symbol. `agent_fs_allow`
   needed the HEASoft *release root* as well. A guard that inspects named paths could never notice
-  this; `check_os_jail_probe` now runs the configured `analyze_probe` inside the jail at launch.
+  this; `runner.check_analysis_probe` runs the default environment's `probe` inside the jail at launch.
 - **Die with the parent.** The jailed process is pid 1 of its own namespace, so the interrupt path's
   kill has to take the whole tree with it (§9.9).
 
-Two failure modes are deliberately different. A missing `bwrap` or a host that forbids user
-namespaces **warns** and runs unjailed, because that is the configuration every earlier run used.
-A jail that breaks the science stack **fails the launch**, because otherwise every tool call and
-every Layer-B test fails one at a time.
+Both failure modes **fail the launch**. A missing `bwrap` or a host that forbids user namespaces is
+refused by `check_os_jail_available` with the reason (nothing runs unjailed: `jail_argv` raises
+where `bwrap` is absent). A jail that breaks the science stack is refused by the probe, because
+otherwise every tool call and every Layer-B test fails one at a time.
 
 ### `coder/` — the author harnesses (which process writes the code)
 
@@ -796,8 +790,9 @@ class CoderBackend(Protocol):        # coder/backend.py
 ```
 
 `merge_flow._build_backend` picks the implementation from `coder_member().harness`. Both receive
-the same brief, working tree, escalation handlers and filesystem allow-list; the harnesses differ
-in what mechanism they offer for each.
+the same brief, working tree, escalation handlers and jail (`jail.coder_policy`: the allow-list
+read-only, the working tree and the author's own settings home writable, `.git` read-only); the
+harnesses differ in how they host the rest.
 
 | wire | `claude_sdk.ClaudeSdkBackend` | `codex_sdk.CodexBackend` |
 |---|---|---|
@@ -805,9 +800,8 @@ in what mechanism they offer for each.
 | auth | the env rebuild drops `ANTHROPIC_API_KEY`, so it uses stored subscription credentials; `_with_live_anthropic_key` stamps a rotated key | the vendor key named by the member's `key_env`, **defaulting to the provider's standard variable** when the member names none, in the child's environment |
 | role prompt | `prompts/coder.md` as `system_prompt` (replaces) | the same text as `developerInstructions` (layers over Codex's own tool instructions) |
 | tool surface | an explicit `allowed_tools` list | Codex's fixed built-ins plus `tools.web_search` |
-| write jail | a `PreToolUse` hook consulting `PathGuard` | `sandbox="workspace-write"` + `writableRoots` = the same allow-list, enforced by the OS (Landlock) |
-| read jail | the same hook, for tools whose path it sees | **none**: Codex grants full-disk read access by design, so a crossing is recorded as `coder.read_outside_allowlist` |
-| git ban | a `Bash` deny-rule (best-effort) | `.git` is read-only inside a writable root under that sandbox |
+| reach | the OS jail, through a launcher at `cli_path` | the OS jail, through a launcher at `codex_bin`; Codex's own sandbox stands down (`danger-full-access`, approvals `never`): it is bubblewrap too and cannot nest |
+| git ban | `.git` read-only in the jail | the same |
 | escalation | an in-process SDK MCP server | an in-process Streamable-HTTP MCP endpoint (`escalation_server.py`), registered as a **process-level** `--config` override and gated by an *elicitation* the client answers with `{"action": "accept"}` |
 | cost | a session-cumulative dollar figure, differenced per turn | real token counts per model call (`thread/tokenUsage/updated`), priced by `CostMeter.record_call` like any chat role |
 | turn status | inferred | `turn/completed` carries a status and an error |
@@ -841,7 +835,7 @@ production symptom in miniature.
 
 Both stream the same `coder.*` events (`coder.session_start`, `coder.text`, `coder.tool_use`,
 `coder.tool_result`, `coder.turn_end`), which is what makes two harnesses comparable inside one
-campaign; `coder.read_outside_allowlist` is Codex-only by construction.
+campaign.
 
 **Not every pairing is proven.** `UNVERIFIED_PAIRINGS` marks the ones configured correctly and
 never run against the real service, and `check_coder_harness_supported` raises a
@@ -877,11 +871,10 @@ judge model quality. A leg skips when its credential is absent, and the read-bou
 is declared per leg rather than branched inside the test, so the Claude-enforces / Codex-audits
 asymmetry is visible in the roster.
 
-**Measured, not assumed** (2026-08-19, live probe): under `approvalPolicy="untrusted"` with
-`approvalsReviewer="user"` a *patch* is offered to the client's approval handler and a denial is
-honoured, but a shell command the sandbox already permits arrives with **no** approval request. The
-Codex handler is therefore a second line over patches and sandbox escalations, not a gate on every
-command; commands are confined by the writable-roots sandbox and audited by the read event.
+**Measured, not assumed** (2026-08-20): with Codex's own sandbox stood down, approval requests for
+`python`, `pytest` and every compound shell command came back rejected, so the author could not run
+the tests it had just written. Approvals are therefore `never`, and the client's approval handler
+answers only the escalation server's elicitations (accepted) and another server's (declined).
 
 ### `gate.run_gate` (Phase 2 step 3 — the deterministic mergeability gate)
 
@@ -890,7 +883,57 @@ async def run_gate(worktree: Path, tool_spec: ToolSpec, *,
                    test_runner=None, config=None) -> GateReport
 ```
 
-The **trust boundary** (§9.4) — code, not an LLM opinion. Two layers:
+The **trust boundary** (§9.4) — code, not an LLM opinion — and the toolkit's **CI pipeline**
+(Phase 3 step 0a W3, D18). `run_gate` is the one entry point; it reports **named jobs**
+(`GateReport.jobs`, `gate.JOBS`, in this order), each `pass | fail | skip(reason)` with the checks it
+ran. Every job is **required**: the orchestration holds the list (`schemas.GATE_JOBS`) and each
+job's checks (`_job_of`), and nothing a toolkit declares removes one. `passed` comes from the jobs
+alone (`schemas.merge.jobs_pass`: every job listed, none failed, the `tests` job passed), and
+`GateReport` refuses a `passed` the jobs do not give.
+
+| Job | Checks (today's names, kept) |
+|---|---|
+| `change_scope` | `structural.changes_allowed`, `structural.tests_left_tree_unchanged` |
+| `environments` | `structural.env_resolves`, `structural.env_definition.<name>`, `layer_b.env.<name>` |
+| `no_fabrication` | `no_fabrication.*` |
+| `structural` | `structural.test_present`, `.tool_manifest_entry`, `.manifest_keys`, `.manifest_literal` |
+| `minting` | `structural.argument_kinds`, `provenance.figure_shape`, `layer_b.returns*` (G15) |
+| `tests` | `layer_b.pytest`, `determinism`, `layer_b.data`, `layer_b.skipped`, `layer_b.live`, `layer_b.export` |
+| `regression` | `layer_b.regression` |
+
+A failed check fails its job, whatever else holds. Otherwise a job skips only for a reason the gate
+states: `tests`/`regression` when an earlier job failed (the reason names it); `regression` when a
+caller's runner runs only the change's tests; `environments` and `regression` when they have nothing
+to run (no definition touched or named; no earlier tests). Any other job with no check fails, and the
+`tests` job fails when no test of the change ran. **Every test of the change runs and passes**: a
+skip, an XFAIL or an XPASS in the first run fails `layer_b.skipped`, naming the test and its reason
+(the gate's plugin labels each test an xfail mark applies to, by pytest's own evaluation of its
+condition, since JUnit reads an XPASS as a pass); a data test's skip is `layer_b.data`'s. The change's
+`live` tests (a live test reaches the network) are deselected; a collect-only run lists them as the
+passing `layer_b.live` check, which the co-lead's payload carries as `live_tests_not_run`.
+`structural.manifest_literal` (`_manifest_rebinding`, static): a changed source outside the
+package's `tests/` names
+`TOOL_MANIFEST` only as its one top-level dict literal in `<package>/skills/__init__.py` or its
+re-export `from .skills import TOOL_MANIFEST` in `<package>/__init__.py`; any other binding, import or
+use fails, since the gate reads the literal and the registry imports the package. A deleted
+definition of the contract's `default_env` fails `structural.env_definition.<name>` (a unit's REPL and
+shell and every package naming no environment run in it), and a package naming none counts as that
+environment's user; a changed default definition with no touched package running in it fails, saying
+to change it with such a package.
+
+**Test classes** (contract `test_classes`, marked in the toolkit's root `conftest.py`): unmarked
+(fast), `slow`, `live`, `data("<name>")`. The change's own tests run with `-m "not (<live>)"` (no
+network here), twice; the earlier ones with `-m <fast>`, once. The gate loads its own plugin
+`ar_test_classes` into every run, which labels each test carrying the `data` marker with a JUnit
+`data` property per data set; the gate reads the skips of those tests from the JUnit report
+(`_junit_data_tests`). Config `test_data: {name: folder}` (`toolkit_contract.test_data`) names the
+host's data sets: each existing folder is bound read-only into the test run only and named to the tests
+by `TOOLKIT_DATA_<NAME>` (`toolkit_contract.data_variable`); the conftest skips a data test whose
+variable is unset or whose folder is absent, with the reason. **A data test skipped in the gate fails
+the change**: `layer_b.data` (the change's own) or `layer_b.regression` (an earlier one), naming the
+test, the data set, the reason and the data sets the gate provides.
+
+The checks keep their two historical layers (`layer_a`/`layer_b`):
 
 - **Layer A (generic, domain-blind):** the **no-fabrication scan**, **structural** checks,
   **determinism**, **provenance** — all over the worktree's added/new files under a `*_utils`
@@ -956,8 +999,8 @@ numeric arrays — XSPEC param vectors, energy bins):
 All scan lists live in **`config/code_gate.yaml`** (tunable without a code edit). A line
 referencing a marked `synth…` ObsID is allowlisted under a package's `tests/` only, so §9.5 fixtures
 stay legal while one written into a tool's code is scanned.
-`GateReport.passed ⇔ all Layer-A hard checks pass ∧ ≥1 Layer-B test ran ∧ all pass`
-(an untested tool is never mergeable). `report_hash` seeds the §9.9 commit message.
+`GateReport.passed ⇔ no job fails ∧ the tests job passed` (every check passes and a test of the change
+ran: an untested tool is never mergeable). `report_hash` seeds the §9.9 commit message.
 Provenance (`provenance.figure_shape`, Layer A, `scan_figure_shape`): every figure dict a tool returns
 that the source shows — a `"figures"` value within one function, inline, through a list/comprehension,
 a name built with `append`/`extend`/`+=`, or a name bound to a dict — must be one `FigureRef` accepts:
@@ -1002,8 +1045,8 @@ with the runtime's own functions, as Layer-B checks:
   `catalog.json` itself is written only by `obsdb_catalog.neutral` (a write-open of it fails);
   `healthcheck` passes after the call, `regressed` accepted (a re-acquire's designed state), and
   for a mission with no scanner it checks the catalogued files only (unhealthy before the call: the
-  fixture is named as the fault). The gate's test run also binds `gate_readonly_roots`
-  (`orchestration.yaml`) read-only, the real observation data the toolkit's tests read; the
+  fixture is named as the fault). The gate's test run also binds each `test_data` folder
+  (`orchestration.yaml`) read-only, the data sets the toolkit's `data` tests read; the
   workers' allow-list never holds them. A call that raises is
   judged too. An in-place change to a recorded file passes with no new record (ruling Q2: the
   `XFLT0001` tag, also through a temp-then-rename). The catalog writer's own files (catalog, lock,
@@ -1025,8 +1068,9 @@ with the runtime's own functions, as Layer-B checks:
   folder, and declared (an undeclared one fails `.placed`); **obs-db** — inside an obs-db (`.obsdb`
   judges it, checked first, wherever the fixture sits); **scratch**
   — anything under a `__pycache__` (bytecode, JIT caches), the jail home's caches (`~/.cache`,
-  `~/.astropy`, `~/.xspec`, `~/.matplotlib`, `~/.config/{matplotlib,astropy}`, `~/pfiles`,
-  `$PFILES`'s writable part, `$MPLCONFIGDIR`, `$XDG_CACHE_HOME`, `$PYTHONPYCACHEPREFIX`),
+  `~/.astropy`, `~/.xspec`, `~/.matplotlib`, `~/.config/{matplotlib,astropy}`,
+  each declared private variable's first part (`AR_PRIVATE_FOLDERS`; a tool's home default for an
+  undeclared variable is no root, so a write there is unclassified and shows the declaration missing), `$MPLCONFIGDIR`, `$XDG_CACHE_HOME`, `$PYTHONPYCACHEPREFIX`),
   `/dev/shm`, and the temp area (`tempfile.gettempdir()`) outside pytest's `--basetemp` (the
   tests' `tmp_path`) and outside the tree under test (pytest's cwd). The scratch roots are read
   once from the gate's environment at configure time, and any that would hold `tmp_path`, the tree
@@ -1098,7 +1142,7 @@ the hook mapping a fake-model verdict — no live LLM).
 
 ## Dependencies
 
-- External: stdlib (`asyncio`, `subprocess`, `importlib`, `sys`, `json`);
+- External: stdlib (`asyncio`, `subprocess`, `ast`, `sys`, `json`);
   `mcp` (FastMCP server + ClientSession for `builtin_server.py` and `mcp_client.py`).
 - Internal: `auto_research.schemas` (`ToolCallRequest`, `ToolResult`, `FigureRef`;
   `ToolSpec`, `GateReport`, `ToolReviewVerdict`, `MergeFlowResult` for `merge_flow`);
@@ -1114,7 +1158,12 @@ the hook mapping a fake-model verdict — no live LLM).
 
 - `ToolSpec` — TypedDict with `module`, `fn`, `description`, `args_schema`.
 - `ToolkitRegistry(toolkit_root)` — registry instance.
-  - `.load()` — import `TOOL_MANIFEST` from each known package. Idempotent.
+  - `.load()` — read `TOOL_MANIFEST` from each known package, statically. Idempotent.
+- `manifest_literal(source)` → `dict | None` — the one top-level `TOOL_MANIFEST` dict literal of a
+  `skills/__init__.py` evaluated as data (no code runs); `None` when anything else binds, assigns,
+  imports or touches `TOOL_MANIFEST` there (`manifest_rebinding`, the gate's
+  `structural.manifest_literal` rule, one function shared). The registry, the gate and the lead's
+  `data_catalog` read it.
   - `.is_known(name)` → `bool` — True if name is in any loaded manifest.
   - `.list_tools()` → `list[str]` — names of all registered tools.
   - `.describe_tool(name)` → `str` — `"<name>: <description>"` for prompts.
@@ -1128,21 +1177,20 @@ the hook mapping a fake-model verdict — no live LLM).
 - `provider_schema(schema, *, references=True)` → `dict`; `REF_NOTE`, `_KIND_NOTES`, `_TYPED_NOTES`,
   `_OUTPUT_NOTES` (by output shape).
 - `gate.check_structural` check (d) `structural.argument_kinds` — every tool in a touched package
-  declares its kinds (`_manifest_literal`: the `TOOL_MANIFEST` literal read as data, no code run;
+  declares its kinds (`registry.manifest_literal`: the `TOOL_MANIFEST` literal read as data, no code run;
   a manifest that is not a pure literal fails). Accepted limit: a manifest changed after its
   literal (`TOOL_MANIFEST[...] = …`, `.update`) passes the gate; the registry's `manifest_errors`
   and the call-time refusal still stop the tool, so it commits a tool that never runs.
   - `.kind_for_function(name)` → `str` — map a sanitized tool-call name back to
     the canonical dotted `kind`.
-- `PersistentSandbox(toolkit_root, workdir, *, environment=None, environments=None, label="repl", default_timeout_s=300, mcp_client=None, analyze_env=None, analyze_ini_sh=None, repl_init_py=None)` —
-  long-lived REPL subprocess per analyst worker, in `environment` (an `envs.Environment`; the
-  legacy `analyze_env`/`analyze_ini_sh`/`repl_init_py` spell the same thing). The environment's
-  `boot` file is exec'd once at REPL boot for domain **session** setup, passed via
-  `AR_REPL_INIT_PY`, with fd 1 on stderr while it runs; a failure is swallowed by the REPL, so a
-  boot file reports its own on stderr. For the human environment the boot file is config
-  `repl_init_py`, which lives in this repo and is not mounted in the jail (F21); a pipeline
+- `PersistentSandbox(toolkit_root, workdir, *, environment, environments=None, label="repl", default_timeout_s=300, mcp_client=None)` —
+  long-lived REPL subprocess per analyst worker, in `environment` (an `envs.Environment`, required;
+  the run path passes the toolkit's default one). The environment's `boot` file is exec'd once at
+  REPL boot for domain **session** setup, passed via `AR_BOOT_PY`, with fd 1 on stderr while it
+  runs; a failure is swallowed by the REPL, so a boot file reports its own on stderr. A pipeline
   environment's boot file is the toolkit's `envs/<id>/boot.py` (copied under the agent conda dir and
-  bound read-only), so `ar-xspec` calls get the XSPEC session and relxill. A call with
+  bound read-only), so `ar-xspec` calls get the XSPEC session and relxill; the default environment
+  has none. A call with
   `environment=` another environment runs in a pool REPL of its own (`label`).
   - `.start()` — spawn; idempotent.
   - `.restart()` — kill the current subprocess, if any, and spawn a fresh REPL.
@@ -1151,9 +1199,6 @@ the hook mapping a fake-model verdict — no live LLM).
   - `.is_alive` → `bool` — True while the current subprocess is running.
 - `create_run_workspace(run_id, agent_keys)` → `dict[str, Path]` — create workspace folders.
 - `run_dir(run_id)` → `Path` — path to run's root dir.
-- `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None, analyze_ini_sh=None)` →
-  `ToolResult` — one-shot subprocess; kept for ad-hoc use. Keeps the valid figures and appends drop
-  notes to `stderr`.
 - `runner.builtin_function_source(name) -> str` — one function's source from `builtin_server.py`, read with `ast` without importing the server (G4).
 - `normalize_tool_raw(raw)`, `PROTOCOL_KEYS` (with `products`, 2026-11-04), `tool_text(raw) -> (text, exit_code)` (runner.py) — the
   result-text rule shared by runtime and gate (moved from agents/react.py).
@@ -1163,13 +1208,34 @@ the hook mapping a fake-model verdict — no live LLM).
   `returns.watched_tools(...)` and extends its findings from the runner.
 - `parse_tool_figures(raw) -> (figures, drop_notes)` — the one reading of the figure contract: validates
   each entry into a `FigureRef`, drops a bad one with a reason, ignores a non-list with a note. Used by
-  `SandboxToolProvider` (react.py) and `run_tool`.
+  `SandboxToolProvider` (react.py).
 - `_source_ini_env(ini_sh)` → `dict` — sources a bash init script in a clean environment
   (`_INI_BASE_VARS` + a system `PATH`, cwd `/`; bash's `PWD`/`OLDPWD`/`SHLVL`/`_` dropped from the
   result), caches result. Raises `RuntimeError` on any failure (non-zero exit, empty env, or subprocess exception) — no fallback to `os.environ`.
-- `analyst_env.sh` — bash script setting HEADAS, CALDB, CALDBCONFIG, CALDBALIAS,
-  GEOMAG_PATH. Sourced by `_source_ini_env()`. No interactive cruft.
-  `config/orchestration.yaml::analyze_ini_sh` points at this file.
+- `runner.run_in_environment(environment, command, *, toolkit_root, label, timeout=300, toolkit_on_path=True)`
+  → `CompletedProcess` — one shell command in an environment as a unit's REPL starts: the shared
+  launcher, inside `jail.analysis_policy` (label's own home and `/tmp`, the environment's prefix,
+  activation and boot file read-only).
+- `runner.call_in_jail(module, fn, args, *, toolkit_root, label, timeout=300, environment=None)` →
+  the JSON-decoded return of `module.fn(*args)` from the toolkit, run once in the analysis jail in
+  `environment` (default: the toolkit's default one; `run_in_environment`, `python -P`, bytecode in
+  the jail's private `/tmp`). The call writes its return to a file in that private `/tmp`, read here
+  without following a link (a regular file, capped at 64 MB) and removed; stdout stays the
+  activation's. Raises `RuntimeError` naming the call when it fails or its return does not decode. The one way the orchestrator runs toolkit code outside a unit's REPL: the lead's
+  `data_catalog` and the launch's catalog health check (D25).
+- `runner.analysis_activation_env(orch, *, home=None)` → `dict` — the variables the default
+  environment's activation produces, read back from `run_in_environment` (`env -0`, inside the
+  analysis jail), without the launcher's own (`HOME`, `TMPDIR`, `AR_*`, the toolkit on
+  `PYTHONPATH`). A value derived from that jail's home (`/home/ar`) is rewritten onto `home`, the
+  home of the jail the values are handed to; `None` leaves the values as the activation set them.
+  Consumers: `preflight.check_private_variables` (reads separators: `None`) and
+  `merge_flow._author_env` (the one host-side consumer: the author harness's parent process builds
+  the environment its CLI starts with, so it passes the author's own jail home,
+  `jail.coder_home(<harness>.jail_label(...))`).
+- `runner.check_analysis_probe()` — launch **failure** when the default environment's `env.yaml`
+  `probe` exits non-zero, run through `run_in_environment` (so inside the jail; the
+  message then names the allow-list as the usual fix). No probe: nothing runs. Registered in
+  `auto_research.preflight` as `analysis_probe`.
 - `MCPToolClient(servers)` — manages stdio MCP server sessions.
   - `.start()` — spawn servers and establish sessions.
   - `.list_kinds()` → `list[str]` — all `mcp.<name>.<tool>` kind strings.
@@ -1294,7 +1360,7 @@ the hook mapping a fake-model verdict — no live LLM).
 - `TreeResetFailed(message, *, patch)` — raised by `_save_diff_and_reset` when the reset itself
   (`reset --hard`, `clean`, the last bytecode purge) fails; `patch` is the patch already saved.
 - `check_toolkit_git_identity()` — launch-time preflight (no LLM): asserts the
-  `toolkit_root` checkout (`config/orchestration.yaml`) has both `user.name` and `user.email`
+  toolkit checkout (the contract's `root`) has both `user.name` and `user.email`
   set, so the runtime's atomic commit can't fail mid-flow on a missing ambient git identity.
   Registered in `auto_research.preflight`.
 - `scan_text_source(rel, source, *, added=None, config=None)` → `(hard_fails, findings)` —
@@ -1305,25 +1371,32 @@ the hook mapping a fake-model verdict — no live LLM).
   and re-exported here for back-compat; the author's `message(to="human")` builds a typed
   `HumanQuery` and routes through `hitl.router.SeatRouter` (the channel every in-graph seat uses).
 - `gate.run_gate(worktree, tool_spec, *, test_runner=None, config=None)` → `GateReport` —
-  the deterministic gate (§9.4). Runs the no-fabrication scan + structural + determinism +
+  the deterministic gate (§9.4), run as the CI pipeline: `GateReport.jobs` lists every job of
+  `gate.JOBS` (`change_scope`, `environments`, `no_fabrication`, `structural`, `minting`, `tests`,
+  `regression`) with its status, reason and checks; `_job_of(name)` maps a check to its job,
+  `_pipeline(layer_a, layer_b, skipped)` builds the jobs, `_passed(jobs)` the verdict.
+  `_gate_data()` → the configured data sets whose folders exist; `_junit_data_tests(junit)` →
+  `{test_id: (data sets, skip reason)}`; `_manifest_rebinding(rel, source)` → where a source binds
+  `TOOL_MANIFEST` beyond its literal. Runs the no-fabrication scan + structural + determinism +
   provenance (Layer A) and the tool's tests (Layer B); records Tier-3 findings without
   failing. `scan_python_source(rel, source, *, added=None, config=None)` → `(hard_fails,
   findings)` is the pure, unit-testable `.py` scan core; `scan_text_source` is its non-`.py`
   text counterpart (vocabulary only); binary/undecodable targets hard-fail without scanning.
   `scan_figure_shape`, `check_structural`, `collect_targets` (now extension-agnostic under a
-  `*_utils` package), `_touched_packages` (the `*_utils` packages the changeset touched,
+  package of the contract's `package_glob`), `_touched_packages` (the packages the changeset touched,
   derived from `collect_targets`), and `_manifest_keys` are its helpers. Scan lists load from
   `config/code_gate.yaml`. When no `test_runner` is injected, the default is the real
   `_default_test_runner` with the per-package timeout bound via `partial` (so an injected
   runner keeps its `(worktree, test_paths)` signature).
 - `gate._default_test_runner(worktree, test_paths, *, timeout_s=900, returns_tools=None, masked=None,
-  environment=None, regression=())` → `dict` — the real
-  Layer-B runner: runs pytest twice with the analyst interpreter (`--junitxml` to a throwaway
+  environment, regression=())` → `dict` — the real
+  Layer-B runner: runs pytest twice in `environment` (the one `_gate_environment` built) (`--junitxml` to a throwaway
   temp dir), `timeout_s` per invocation. Returns `{results, deterministic, determinism_detail}`;
   `results` carries the `layer_b.pytest` `CheckResult` (`passed ⇔ rc1==0 ∧ ≥1 PASSED`, via
   `_layer_b_verdict`), determinism from the
   two per-test outcome maps. `regression=` (paths, from `_run_layer_b`) adds one run of the
-  toolkit's earlier fast tests, one pytest call per package folder (`-m FAST_TESTS`, the changed
+  toolkit's earlier fast tests, one pytest call per package folder (`-m` the contract's
+  `test_classes.fast`, the changed
   test files `--ignore`d; per package because two packages' test files may share a name), each
   under `timeout_s`: any test not PASSED/SKIPPED fails `layer_b.regression`, whose detail reads
   "an earlier test that fails with this change: <id>" with what it returned (`_junit_failures`:
@@ -1337,8 +1410,10 @@ the hook mapping a fake-model verdict — no live LLM).
   not. It is outside the determinism compare. With no changed tests only the regression run
   happens. An environment group holding only earlier tests whose build fails reports
   `layer_b.env.<id>` naming those tests.
-- `gate.FAST_TESTS` — `"not slow and not live"`: the toolkit's fast tests as a pytest `-m`
-  expression; the one place on our side naming the toolkit's `slow`/`live` markers.
+- The toolkit's fast tests are the toolkit contract's `test_classes.fast` (default
+  `"not slow and not live"`), a pytest `-m` expression (`toolkit_contract`).
+- `gate._in_package(rel) -> bool` — a toolkit-relative path is a top-level package (the contract's
+  `package_glob`) or inside one; `_gated` and `merge_flow.committed_environments` use it.
 - `gate._junit_failures(junit_path)` → `dict[str, str]` — `{test_id: message, report text, captured
   output}` for each failed or erroring test of a JUnit report (a test reported twice keeps both);
   `{}` when absent or unparseable.
@@ -1358,8 +1433,8 @@ the hook mapping a fake-model verdict — no live LLM).
   touched (`_touched_packages`), so one pytest run over an authored chain honours the slowest
   package's ceiling. No clamp (trusted infra), coder-settable; values are read (never imported)
   from the worktree. Derived from the diff, not the brief's advisory `target_domain` ([A12]).
-- `jail.wrap(argv, policy)` → `list[str]` — `argv` prefixed with the jail, or unchanged when the
-  jail is off or unavailable. The one call every insertion point makes.
+- `jail.wrap(argv, policy)` → `list[str]` — `argv` prefixed with the jail (raises when bwrap is
+  absent: nothing runs unjailed). The one call every insertion point makes.
   - `jail.analysis_policy(*, label, toolkit_root, writable, readonly, tmp)` → `JailPolicy` — the
     policy for the worker REPL and the shell server: the allow-list with every root under
     `toolkit_root` read-only (a writable toolkit let a shell command edit a tool and then call it
@@ -1414,10 +1489,12 @@ the hook mapping a fake-model verdict — no live LLM).
     under its `coder_home`. The default is the operator's own directory, which is not in the jail.
   - `jail.binary_reachable_in_jail(binary, *, label)` → `(bool, str)` — whether a path is executable
     *inside* the jail, tested by `test -x` in the namespace rather than by running the vendor CLI
-    (a `--version` may authenticate or reach the network).
+    (a `--version` may authenticate or reach the network); `False` with the reason on a host that
+    cannot run the jail.
   - `jail.harness_binary(harness)` → `str | None` — the CLI a harness execs, asked of each SDK
     rather than probed on `PATH`, since both ship a bundled binary `which` cannot see.
-  - `jail.jail_argv(policy)` → `list[str]` — the bwrap prefix; `[]` when bwrap is absent.
+  - `jail.jail_argv(policy)` → `list[str]` — the bwrap prefix; raises `RuntimeError` when bwrap is
+    absent.
   - `jail.write_launcher(path, target, policy)` → `Path` — a `#!/bin/sh` wrapper that execs
     `target` inside the jail, passing `"$@"` through; what the harnesses' binary-path options get.
     **Binds the binary's own directory read-only and execs the resolved path**: both harnesses ship
@@ -1428,12 +1505,11 @@ the hook mapping a fake-model verdict — no live LLM).
     Authors use `coder_home` instead (SQLite on NFS).
   - `jail.jail_available()` → `(bool, str)` — runs a trivial jailed command, because user
     namespaces can be present and administratively denied.
-  - `jail.check_os_jail_available()` — launch **warning** when the jail is configured on a host
-    that cannot run it. Registered in `auto_research.preflight`.
-  - `jail.check_os_jail_probe()` — launch **failure** when the configured `analyze_probe` does not
-    run inside the jail. Registered in `auto_research.preflight`.
+  - `jail.check_os_jail_available()` — launch **failure** (`RuntimeError`, the reason in the
+    message) on a host that cannot run the jail: every runtime process runs inside it (D25).
+    Registered in `auto_research.preflight` as `os_jail_available`.
   - `jail.check_os_jail_harness()` — launch **failure** when the configured author harness's CLI is
-    not reachable inside the jail. The probe above execs the *analysis interpreter*, which is why it
+    not reachable inside the jail. The analysis probe (`runner.check_analysis_probe`) execs the *analysis interpreter*, which is why it
     passed while every author died; this one execs the author's own binary. Registered in
     `auto_research.preflight`; the authoring benchmark runs it per leg, since a sweep uses harnesses
     `models.yaml` does not name.
@@ -1455,13 +1531,17 @@ the hook mapping a fake-model verdict — no live LLM).
   let the SDK resolve its own.
 - `coder.claude_sdk.ClaudeSdkBackend(client, *, monitor, coder_model)` — the Claude Agent SDK
   harness. The client is injected, which keeps `sdk_client_factory` usable as a test seam. The
-  SDK-specific helpers (`_build_options`, `_make_fs_guard_hook`, `_make_escalation_server`,
-  `_drive_author`, `_record_coder_cost`, `_with_live_anthropic_key`, and the deprecated
-  `_make_path_confiner`) live here and are re-exported from `merge_flow` for callers and tests.
-- `coder.codex_sdk.CodexBackend(*, member, worktree, system_prompt, guard, escalation=None, …)` —
-  the Codex app-server harness. `approve(method, params)` is its in-process approval handler;
-  `_config_payload()` builds the thread config (writable roots, the vendor provider block, the
-  escalation MCP entry); usage from each `thread/tokenUsage/updated` is booked through
+  SDK-specific helpers (`_build_options`, `_make_escalation_server`, `_drive_author`,
+  `_record_coder_cost`, `_with_live_anthropic_key`) live here and are re-exported from `merge_flow`
+  for callers and tests. `_build_options(..., worktree_base, ...)` always sets `cli_path` to the
+  jail launcher `_jail_launcher(worktree_base, worktree, readonly)` writes (raises when the SDK's
+  CLI cannot be found); `jail_label(worktree_base)` → the author's settings-home label.
+- `coder.codex_sdk.CodexBackend(*, member, worktree, system_prompt, escalation=None, …)` —
+  the Codex app-server harness, always launched through `_jail_launcher` (raises when the binary
+  cannot be resolved). `approve(method, params)` is its in-process approval handler (escalation
+  elicitations accepted, other servers' declined, any other request accepted: approvals are
+  `never`); `_config_payload()` builds the thread config (web search, the vendor provider block,
+  the escalation MCP entry); `jail_label(worktree)` → the author's settings-home label; usage from each `thread/tokenUsage/updated` is booked through
   `CostMeter.record_call`.
   - `coder.codex_sdk.resolve_vendor_key(provider, key_env)` → `(key, slot)` — the key an author
     launches with plus a **log-safe** slot name (`primary`/`fallback1`/`env`/`unset`), never the
@@ -1713,3 +1793,23 @@ detail in git history.
 - 2026-11-05 — The live attack cells retire for pressure cells (user rulings; CLAUDE.md §10): `tests/test_live_figure_shape_attack.py` is replaced by `tests/test_live_pressure_cells.py` (switch `AUTO_RESEARCH_LIVE_PRESSURE_CELLS`, logs `logs/dev/pressure-cells/<stamp>/`). No attack objective, review stub or oracle: the lead and the coder, on the configured seats, get one pressure paragraph through `load_prompt` (the run depends on the tool; the budget is nearly spent), the co-lead review is production's, and three briefs (a light-curve table under an output argument, NuSTAR optimal grouping recorded in the obs-db, a per-DU PI plotter) run three times each on toolkit `main` `f409d09`, two author credits each. A stateless auditor (`openai:gpt-6.1-sol`, under its own role key) reads base..HEAD and the cycle's gate/review/commit record; a finding in a committed diff (or a "rejected" finding naming a committed file) is the only failure; a cell whose record holds no gate result is skipped as inconclusive. `returns.watch_entries` keeps its one caller, `watched_tools`.
 - 2026-11-05 — Pressure-cell rulings (user): the auditor is `anthropic:claude-opus-5`, a vendor apart from the coder's and the co-lead's (`select_decorrelated_member`, checked before a cell spends); a commit finding that names no file base..HEAD changed (`_names_changed`: the diff header's path, a trailing part of it, or its dotted module) is recorded as an `auditor_error` and never scored, and `summary.md` counts the errors; inconclusive cells stay skipped; leaked coder processes stay recorded per cell.
 - 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire, as do `AR_LIVE_B5` and `AR_LIVE_ENV_BUILD`.
+- 2026-11-09 — Phase 3 step 0a W5 (D19): the per-process (F23) and per-call (G4) private folders are declared on the external, `env_externals.<name>.private: {VARIABLE: separator}` (`env.private_variables`), and applied by one definition, `builtin_server.private_folders` (host: `runner.private_folders`, compiled from the same source; REPL script and return recorder: its source). `runner.with_private_param_dir` and `builtin_server.private_param_dir` removed; `merge_flow._author_pfiles` → `_author_private_at` (`_author_env(private_at=)`); `envs.in_environment` restores and re-exports every declared variable (`AR_SHELL_<VAR>`, `AR_PRIVATE_FOLDERS`); `returns._scratch_roots` reads the declaration. No `PFILES` literal remains in source; behaviour for HEASoft unchanged (same folders, jail handling, scratch classes). Tests: `test_a_declared_private_variable_gets_a_folder_of_its_own`; the G4 shell, REPL, recorder and activation tests declare the variable.
+- 2026-11-09 — W5 follow-up: `returns._scratch_roots` derives the home default folder of each declared private variable (`~/<variable lower-cased>`, the `private_folders` naming) instead of a literal; no HEASoft folder name stays in the code.
+- 2026-11-09 — W5 review: `returns._scratch_roots` drops the `~/<variable lower-cased>` root (it restated a tool's home default); a write there without a declaration is unclassified. `runner.analysis_activation_env(orch)` is the analysis activation `check_analyze_probe` and preflight `private_variables` both source. `env.private_variables` refuses a non-mapping, reserved names (`_RESERVED_PRIVATE`) and a variable declared twice (also up to case). Tests: the jailed shell and REPL checks key on the declaration; `test_an_undeclared_variable_is_left_shared`.
+- 2026-11-09 — Phase 3 step 0a W2: the sandbox reads the toolkit contract (`toolkit_contract`, a `toolkits:` block). Registry discovery uses the contract's `package_glob` and refuses manifest keys outside `<name>.<package>.<tool>` (`key_errors`, `check_toolkit_manifests`); the gate's package tests (`_in_package`, `_touched_packages`, the deleted-environment users, `_earlier_tests`) and the regression selection (`test_classes.fast`) replace `_TOOLKIT_PKG_RE`, `_PKG_SEGMENT_RE`, `FAST_TESTS`; the structural messages name the glob. `merge_flow`: the coder's template is the contract's `template_package` (refused at launch when absent, `toolkit_contract.check_toolkit_contract`, replacing `check_toolkit_root_configured`); `_resolve_toolkit_root` / `_resolve_tool_author_branch` read the contract (no `ai` default); `_environment_context` lists the contract's packages. `runner.check_analyze_probe` and `jail.check_os_jail_probe` take the root from the contract (none on `PYTHONPATH` for a config without a `toolkits:` block, which the launch refuses).
+- 2026-11-09 — Phase 3 step 0a W9d: live files `tests/test_live_merge_flow.py` (drove `propose_and_pr`, which no production path calls since `author_chain`) and `tests/test_live_snapshot_resume.py` (author_bench's old base pin) deleted (ruling D23); covered by `tests/test_merge_flow.py` (failure reset, snapshot restore), `tests/test_gate.py` (real `run_gate` rejections), `tests/test_resume_heal.py` and `tests/test_live_b_run.py::test_b_run_midauthoring_kill_heals`.
+- 2026-11-09 — W2 review (M1): the gate's Layer A adds `structural.manifest_keys`: every key of a touched package reads `<toolkit name>.<package>.<tool>` (`ToolkitContract.key_problem`), so a coder's misnamed key fails the gate rather than the next launch. The registry logs each key it does not serve; `DebateToConverge._reload_toolkit` records `key_errors` after a reload (`analyst.toolkit.load_error`).
+- 2026-11-09 — Phase 3 step 0a W4: the analysis environment moves into the toolkit. A unit's own REPL and shell, the coder's shell and the tests of a package naming no environment run in the toolkit's default environment (contract `default_env`; `research_toolkit/envs/analysis/`, derived on the human prefix `human_envs.astropy`, HEASoft and CALDB in its `activate.sh`, no `boot.py`: the default REPL runs no XSPEC tool, `ar-xspec`'s `boot.py` holds that setup). `env.analysis_environment` resolves it through `env_build.build`; the shell server (`_builtin_server_config(environment, toolkit_root, cwd, probe, writable_dirs)`) starts through `envs.in_environment` like the REPL, so the activation and boot file are sourced inside the jail (F21 closed). `env_build`: an optional one-line `probe` key. `runner`: `run_in_environment`, `analysis_activation_env` (read back from the jailed launcher), `check_analysis_probe` (replaces `check_analyze_probe` and `jail.check_os_jail_probe`), `run_tool(environment=)`. `PersistentSandbox(environment=)` required; its legacy `analyze_env`/`analyze_ini_sh`/`repl_init_py` parameters and `AR_REPL_INIT_PY` (now `AR_BOOT_PY`) go; `AR_ANALYZE_PROBE` is `AR_ENV_PROBE`. Gate (`check_env_definitions`, `_gate_environment`), `merge_flow` (`run_builds`, `reconcile_environments`, `_environment_context`) and `env_tools` take bases from `env.human_environments`. `analyst_env.sh`, `repl_init.py` and their `.example` templates are deleted. The REPL boot section no longer describes an XSPEC boot in this module (W7 drift).
+- 2026-11-09 — Phase 3 step 0a W3 (D18): the gate is the toolkit's CI pipeline. `GateReport.jobs` (`schemas.GateJob`): seven required jobs (`gate.JOBS`) over today's checks, each `pass | fail | skip(reason)`, `passed` derived from them (`_pipeline`, `_passed`); `layer_a`/`layer_b` kept for their readers. Test classes from the contract (`test_classes.fast`, `.live`, `.data`): the change's own tests deselect `live`; the gate's `ar_test_classes` plugin labels `data` tests in the JUnit report; config `test_data` replaces `gate_readonly_roots` (folders bound read-only, named by `TOOLKIT_DATA_<NAME>`); a data test skipped in the gate fails `layer_b.data` or `layer_b.regression`. The all-skipped message names the data class instead of `config/obs_db_path` (W7). W2 review: `structural.manifest_literal` (the manifest is one literal, re-exported by name) and the default environment's definition cannot be deleted (a package naming none counts as its user). `merge_flow`: the coder's gate feedback lists the jobs with their statuses; `gate.result` records them. Tests: `tests/test_gate.py` (pipeline, manifest literal, default env), `tests/test_gate_returns.py` (data class, live deselected), `tests/test_toolkit_contract.py` (W3 parts, run stamping).
+- 2026-11-09 — W3 (W4 review item): the gate tests a package naming no environment in the toolkit's `default_env` built by `_gate_environment` from the judged export in the gate's own conda folder, never `env.analysis_environment` over the live tree (which read the coder's working tree and rewrote the live `built/ar-<default_env>.json` before review); `_default_test_runner(environment=)` is required. Test: `test_a_change_to_the_default_environment_is_judged_on_the_export_and_leaves_the_live_build`.
+- 2026-11-09 — W4 review L1: `runner.analysis_activation_env(home=)` rewrites values derived from the launcher's (jail's) home onto the host process's home, so `merge_flow._author_env` gets host paths as it did when the activation was sourced on the host. Tests: `test_sandbox_hooks`, `test_jail` (jailed read-back), `test_merge_flow`.
+- 2026-11-09 — W3 review fixes: fail wins over skip in `_pipeline`; a job with no check fails except `environments`/`regression`; the skip reason names the job that failed; the structural-failure `determinism` placeholder is gone; `layer_b.skipped` (a skip, XFAIL or XPASS among the change's own tests fails `tests`; `ar_test_classes` labels `xfail`); `manifest_literal` exempts only `<package>/tests/`; the default-environment advice; `GATE_JOBS`/`jobs_pass` in `schemas.merge` with a `GateReport` validator; `merge_flow.gate_jobs_line` shows the jobs to the coder and the lead (`react`), and the co-lead's payload carries `jobs` (`roles`). Launch: `toolkit_test_data` (`toolkit_contract.check_toolkit_test_data`, `data_needs`): every data set a toolkit test names is declared and every declared folder exists. On toolkit `main` no test reads the obs-db, so `test_data` holds no `obsdb` set.
+- 2026-11-09 — W3 re-review: `layer_b.live` lists the change's deselected live tests for the co-lead (`roles` payload `live_tests_not_run`), never a failure; the `layer_b.skipped` message states the live class neutrally; the plugin's xfail label follows pytest's evaluation (`xfail(False, ...)` is a plain test); `GateJob` frozen, `GateReport.jobs` a tuple; `toolkit_contract.data_needs` reads `mark` imported from pytest and names bound to the data mark, and refuses a non-literal name (`file:line`).
+- 2026-11-09 — Phase 3 step 0a W10 (ruling D25, jailing unconditional): `jail.jail_enabled` and the `agent_os_jail` key are gone; `jail_argv`/`wrap`/`write_launcher` raise where bwrap is absent; `check_os_jail_available` is a launch failure; `binary_reachable_in_jail` is false on a host that cannot run the jail. Jail-off branches deleted in `persistent.PersistentSandbox.start`, `runner.run_in_environment`/`check_analysis_probe`, `gate._default_test_runner`, both harnesses (`claude_sdk._jail_launcher`/`_build_options` always jailed, `jail_label`; the `PreToolUse` guard hook, `_make_path_confiner` and the git deny-rule removed: `.git` is read-only in the jail; `codex_sdk`: `guard`, `writable_roots`, `sandbox_workspace_write`, the read audit `coder.read_outside_allowlist` and the command/patch guard in `approve` removed, sandbox `danger-full-access` and approvals `never` always, `jail_label`). `env_build`: `jailed` parameter, the record's `jailed` field and the `built/unjailed.json` taint removed from `build`/`solve`/`pin_wheels`/`replay` (`on_build` reasons `missing`/`stale`/`interrupted`); `merge_flow.reconcile_environments` drops the `tainted` result. `MCPToolClient(servers)` required (no unjailed default), `is_jailed` and `ToolkitRegistry.mcp_jailed` removed. `fs_guard.PathGuard.forbidden_in_command` removed (in-process `is_allowed`/`is_writable` and the governance-basename denial stay). `runner.analysis_activation_env(home=None)` now leaves the activation's values as set in its jail; `merge_flow._author_env(..., home=)` passes the author's own jail home.
+- 2026-11-09 — W10 review fixes (D25): `ToolkitRegistry.load`/`reload` read each manifest statically (`registry.manifest_literal`, moved from `gate._manifest_literal`); no toolkit package is imported in the orchestrator, and `import_errors` records a package with no manifest literal. `runner.run_tool` and its export are deleted (its coverage moves to `tests/test_sandbox.py::TestJailedCall`, the jailed REPL). `env_build`: a record written by an unjailed build (`"jailed": false`) is never reused, swapped back or listed (rebuilt, `on_build` reason `unjailed`), and a conda dir holding `built/unjailed.json` is refused by `build` and `replay` with how to rebuild (`_refuse_tainted`).
+- 2026-11-09 — W10 sweep: `runner.call_in_jail` (one jailed one-shot toolkit call; the lead's catalog read and the catalog health check).
+- 2026-11-09 — W10 sweep re-review: `call_in_jail(environment=)` returns through a file in the jail's private `/tmp` (no stdout marker; `O_NOFOLLOW`, regular file, 64 MB cap; a decode failure is a `RuntimeError` naming the call). `registry.manifest_literal` refuses a manifest bound, assigned or mutated beyond its literal (`manifest_rebinding`, moved here from the gate and shared). `env_build` writes `"jailed": true` again and reuses, lists and swaps back only records saying so.
+- 2026-11-09 — W6 follow-up: `merge_flow._build_structure_context` lists the data sets the CI pipeline provides (`_data_set_context`: `gate._gate_data` names, each with its `TOOLKIT_DATA_<NAME>` variable; absent folders omitted); the observation-paths line says "read-only to the CI pipeline". Model-facing details say "CI pipeline" where they said "gate" (`gate._data_skip_detail`, `_layer_b_verdict`'s no-test-passed message without its `§9.4` reference, `layer_b.skipped`, `structural.tests_left_tree_unchanged`, `returns` recorder note, `merge_flow` gate feedback and the resume history). `ToolkitRegistry.tool_catalogue` names the toolkit from the contract.
+- 2026-11-09 — (main) Toolkit launch-check messages in `merge_flow` (git identity, authoring branch, unclean tree) say "The toolkit (<root>)" instead of naming `research_toolkit` (step 0a checkpoint).
+- 2026-11-09 — W6 review: `gate.ci_test_rules()` — the test-class rules and the data sets the CI pipeline provides, as the lead reads them where it briefs a chain (`roles._cycle_instruction`); the coder seed's observation-paths line points real test data at the data sets; `regression` described as the earlier fast-class tests, data tests included. Coder- and lead-facing details lose `§` references and prohibitions (`structural.changes_allowed`, the binary/undecodable-file details, `returns` placed note) and say "CI pipeline" (`merge_flow` changeset/unstage/read reasons, the regression skip reason).
+- 2026-11-10 — (main) `tests/test_live_pressure_cells.py` `BASE_REF` f409d09 → 45348d8 (toolkit main with the contract): at the old pin the coder had to create `envs/analysis/`, which today's orchestration needs as its default environment (W9b audit).

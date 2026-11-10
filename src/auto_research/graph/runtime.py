@@ -35,6 +35,7 @@ from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend
 from auto_research.sandbox.mcp_client import MCPToolClient
 from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
+from auto_research.toolkit_contract import toolkit
 from auto_research.agents.react import ReadOnlyToolProvider
 from auto_research.provenance import ReceiptStore
 from auto_research.agents.roles import LEAD_KEY, _model_label
@@ -106,20 +107,11 @@ def load_orchestration_config(path: str | Path | None = None) -> dict:
         return yaml.safe_load(stream) or {}
 
 
-def _env_spelling(environment: Any, analyze_env: Path | None, analyze_ini_sh: str | None):
-    """``(prefix, init script)`` for the shell server, from the analysis environment object when
-    there is one (env plan B1: every reader builds from it), else the configured keys."""
-    if environment is None:
-        return analyze_env, analyze_ini_sh
-    return environment.prefix, (str(environment.activate) if environment.activate else analyze_ini_sh)
-
-
 def _builtin_server_config(
-    analyze_env: Path | None,
-    analyze_ini_sh: str | None,
+    environment: Any,
     toolkit_root: Path,
     cwd: Path | None = None,
-    analyze_probe: str | None = None,
+    probe: str | None = None,
     writable_dirs: Sequence[Path] | None = None,
 ) -> dict:
     """Build the default builtin-MCP-server config dict.
@@ -128,58 +120,51 @@ def _builtin_server_config(
     each worker's own folder, so the shell cannot rename or replace a folder another process binds
     (a worker folder swapped for a symlink would be bound writable by the next REPL start).
 
-    When ``analyze_env`` is set, the server subprocess is spawned from that
-    env's Python interpreter so ``bash_exec`` commands can import astropy and
-    xspec_utils.  The subprocess environment is populated from the analyst init
-    script (HEADAS, CALDB, LD_LIBRARY_PATH) plus PYTHONPATH=toolkit_root so the
-    research_toolkit packages are importable without the REPL.
+    The server runs in ``environment`` (the toolkit's default one, ``env.analysis_environment``),
+    started as the REPL is: a pipeline environment through the shared launcher
+    (``envs.in_environment``: a clean start, its activation sourced inside the jail, its ``bin``
+    first on ``PATH`` so a bare ``python`` in ``bash_exec`` is the environment's, the toolkit on
+    ``PYTHONPATH``); a human environment from its activation script sourced clean
+    (``_source_ini_env``: no credential, conda activation or launching-shell state rides along).
+    ``probe`` (the environment's ``env.yaml`` probe) supplies the probe example in ``bash_exec``'s
+    description, so no domain string lives in this source.
 
-    **The server runs inside the OS jail** when ``agent_os_jail`` is on, with the same allow-list
-    the REPL gets (F20: it used to be launched unwrapped, so ``bash_exec`` reached the whole disk
-    while the command-string guard stood down as "superseded by the jail"). Its source is passed
+    **The server runs inside the OS jail** (unconditional, D25), with the same allow-list the REPL
+    gets (F20). Its source is passed
     with ``-c``, as the REPL's is, so the jail never needs to mount this repository to run it.
     """
+    import shlex
+
     from auto_research.sandbox.builtin_server import __file__ as _bs_file
+    from auto_research.sandbox.envs import in_environment
     from auto_research.sandbox.jail import analysis_policy, jail_home, private_tmp, wrap
-    from auto_research.sandbox.runner import _source_ini_env, with_private_param_dir
+    from auto_research.env import private_variables
+    from auto_research.sandbox.runner import _source_ini_env, private_folders
 
     builtin_source = Path(_bs_file).read_text(encoding="utf-8")
-    if analyze_env:
-        python = str(analyze_env / "bin" / "python")
+    python = str(environment.python)
+    # -P: no cwd on sys.path, so a module planted in the run folder cannot hijack the server.
+    # (3.11+ only; the analysis interpreter is 3.13. The REPL uses SAFE_PATH_PRELUDE instead.)
+    command = [python, "-P", "-c", builtin_source]
+    pipeline = environment.owner == "pipeline"
+    if pipeline:
+        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
+        script = in_environment(environment, f'{shlex.quote(python)} "$@"', toolkit_root, pass_args=True,
+                                keep=("AR_ENV_PROBE", "PYTHONPYCACHEPREFIX"), quiet=True)
+        command = ["/bin/bash", "--noprofile", "--norc", "-c", script, "_", *command[1:]]
     else:
-        import sys
-        python = sys.executable
-
-    # Build env from the analyst ini script — same pattern as PersistentSandbox.
-    # os.environ is NOT inherited: `_source_ini_env` sources the script in a clean
-    # environment, so no credential, conda activation or launching-shell state rides
-    # along.  analyze_ini_sh is the authoritative source; it captures the HEASoft env
-    # (headas-init.sh sets PATH with HEASoft's Python first, LD_LIBRARY_PATH,
-    # etc.).  PYTHONPATH covers toolkit_root (import xspec_utils) and its parent
-    # (from research_toolkit import xspec_utils).
-    if not analyze_ini_sh:
-        raise ValueError("analyze_ini_sh must be configured — no env fallback")
-    base_env = _source_ini_env(analyze_ini_sh)
-    existing = base_env.get("PYTHONPATH", "")
-    pythonpath = str(toolkit_root) + os.pathsep + str(toolkit_root.parent)
-    if existing:
-        pythonpath += os.pathsep + existing
-    env = {**base_env, "PYTHONPATH": pythonpath}
-
-    # bash_exec runs a bare `python` through the shell, which resolves against PATH — not
-    # the server's own interpreter. Pin {analyze_env}/bin to the FRONT of PATH so that a
-    # bare `python`/`python3`/`pip` inside bash_exec is the SAME interpreter the toolkit
-    # tools invoke directly ({analyze_env}/bin/python). Without this, bash_exec's
-    # `import astropy` / `import xspec_utils` resolves to whatever conda env happened to
-    # leak onto the launching shell's PATH (the analyst's astropy env is never on it),
-    # so inline inspection breaks the moment the orchestrator env lacks the science stack.
-    if analyze_env:
-        env["PATH"] = str(analyze_env / "bin") + os.pathsep + env.get("PATH", "")
-
-    # The configured stack smoke-test (config: analyze_probe) supplies the concrete probe
-    # example in the bash_exec description the worker reads — no domain string in source.
-    if analyze_probe:
-        env["AR_ANALYZE_PROBE"] = analyze_probe
+        if environment.activate is None:
+            raise ValueError(f"{environment.name} has no activation script: a human environment runs "
+                             "the shell only with one (no fallback to this process's)")
+        base_env = _source_ini_env(str(environment.activate))
+        existing = base_env.get("PYTHONPATH", "")
+        pythonpath = str(toolkit_root) + os.pathsep + str(toolkit_root.parent)
+        if existing:
+            pythonpath += os.pathsep + existing
+        env = {**base_env, "PYTHONPATH": pythonpath}
+        env["PATH"] = str(environment.prefix / "bin") + os.pathsep + env.get("PATH", "")
+    if probe:
+        env["AR_ENV_PROBE"] = probe
 
     # A user site-packages under the (persistent) jail home would run code at the next start.
     env["PYTHONNOUSERSITE"] = "1"
@@ -201,33 +186,29 @@ def _builtin_server_config(
     built = [agent_conda_dir() / "envs", agent_conda_dir() / "activation"]
     for folder in built:
         folder.mkdir(parents=True, exist_ok=True)
+    # The environment's prefix, activation and boot file, read-only (a built prefix and the
+    # runtime's activation copies lie under the folders above already).
+    own = tuple(str(f) for f in (environment.prefix, environment.activate, environment.boot) if f is not None)
     argv = wrap(
-        # -P: no cwd on sys.path, so a module planted in the run folder cannot hijack the server.
-        # (3.11+ only; the analysis interpreter is 3.13. The REPL uses SAFE_PATH_PRELUDE instead.)
-        [python, "-P", "-c", builtin_source],
+        command,
         analysis_policy(
             label="shell", toolkit_root=toolkit_root,
             writable=tuple(str(folder) for folder in writable),
-            readonly=(str(authoring), *(str(folder) for folder in built)),
+            readonly=(str(authoring), *(str(folder) for folder in built), *own),
             tmp=tmp, home=private_tmp("shell-home", scratch),  # this run's own, outside its folder
         ),
     )
-
-    # Its own HEASoft parameter folder (F23): /tmp is private when jailed.
-    env = with_private_param_dir(
-        env, "/tmp/pfiles" if argv[0] != python else tmp / "pfiles", create=tmp / "pfiles",
-    )
+    # Its own folder for each declared private variable (F23), in the jail's private /tmp. In a
+    # pipeline environment the launcher puts the kept part back after the activation.
+    env, _ = private_folders(env, private_variables(), at="/tmp", create=tmp, alone=pipeline)
     # In-tree `__pycache__` is never read (git ignores it, so nothing judges it): bytecode goes to
-    # the server's private folder, never the shared host /tmp.
-    env["PYTHONPYCACHEPREFIX"] = "/tmp/ar-pycache" if argv[0] != python else str(tmp / "ar-pycache")
+    # the server's private /tmp.
+    env["PYTHONPYCACHEPREFIX"] = "/tmp/ar-pycache"
 
     return {
         "name": "builtin",
         "command": argv[0],
         "args": argv[1:],
-        # What the launch actually produced, not what config asked for: `wrap` leaves the argv
-        # unchanged when the jail is off or bwrap is absent, and the shell guard reads this flag.
-        "jailed": argv[0] != python,
         # Removed by `MCPToolClient.shutdown`, so the server's private /tmp dies with it.
         "private_tmp": str(tmp),
         "env": env,
@@ -328,42 +309,68 @@ def readonly_roots_for(run_id: str, toolkit_root: Path) -> list[Path]:
 
 @dataclass(frozen=True)
 class SandboxSettings:
-    """Where a worker's REPL comes from: the analysis environment and its boot scripts.
+    """Where a worker's REPL and shell come from: the toolkit's default environment.
 
-    One definition, because these are read from configuration rather than chosen: a caller that
-    omits them does not get a slightly different sandbox, it gets a sandbox that refuses to start
-    (``analyze_ini_sh must be configured — no env fallback``). That is the right failure, and this
-    is how a caller outside a full run gets the same answer the run path gets.
+    One definition, because it is resolved from the toolkit contract rather than chosen: a caller
+    outside a full run gets the same environment, catalogue and probe the run path gets.
     """
 
-    analyze_env: Path | None
-    analyze_ini_sh: str | None
-    repl_init_py: str | None
-    analyze_probe: str | None
-    environment: Any = None
-    """The same analysis environment as one object (``auto_research.env.analysis_environment``)."""
+    environment: Any
+    """The toolkit's default environment as one object (``auto_research.env.analysis_environment``)."""
     catalogue: Any = None
     """``() -> list[Environment]``: every environment a unit may list and use (``env_catalogue``);
     called when asked, so an environment the pipeline builds mid-run appears."""
+    probe: str | None = None
+    """The default environment's ``env.yaml`` probe: the example in ``bash_exec``'s description."""
 
     @classmethod
     def from_config(cls, orch: dict[str, Any] | None = None) -> "SandboxSettings":
-        from auto_research.env import analysis_environment
-
         from functools import partial
 
-        from auto_research.env import env_catalogue
+        from auto_research.env import analysis_environment, default_definition, env_catalogue
 
         settings = orch if orch is not None else load_orchestration_config()
-        env = settings.get("analyze_env")
         return cls(
-            analyze_env=Path(env) if env else None,
-            analyze_ini_sh=settings.get("analyze_ini_sh") or None,
-            repl_init_py=settings.get("repl_init_py") or None,
-            analyze_probe=settings.get("analyze_probe") or None,
             environment=analysis_environment(settings),
             catalogue=partial(env_catalogue, settings),
+            probe=default_definition().probe or None,
         )
+
+
+#: The runs of this process that hold the bound toolkit contract (``bind_run_contract``), by run id.
+_CONTRACT_RUNS: set[str] = set()
+
+
+def bind_run_contract(orch: dict[str, Any], run_id: str) -> None:
+    """Bind the process to the toolkit contract of the configuration a run was launched with
+    (``toolkit_contract.bind``), before its preflight, and hold it for ``run_id`` until
+    :func:`release_run_contract`: every reader then takes the contract from ``toolkit()``, never
+    from a later read of the file. A later run binds its own configuration's contract once no run of
+    this process holds one; while one does, a run whose configuration declares another contract (or
+    an invalid block) is refused, since the running one would see its contract change under it. With
+    no run holding it, an invalid ``toolkits:`` block binds nothing: the preflight's contract check
+    refuses it, recorded."""
+    from auto_research import toolkit_contract
+
+    try:
+        declared = toolkit_contract.toolkits(orch)
+    except ValueError as exc:
+        if _CONTRACT_RUNS:
+            raise RuntimeError(f"run {run_id}: the configuration's toolkit contract is invalid ({exc}) while "
+                               f"run(s) {sorted(_CONTRACT_RUNS)} in this process run on the bound one") from exc
+        toolkit_contract.reset()
+        return
+    if _CONTRACT_RUNS and declared != toolkit_contract.toolkits():
+        raise RuntimeError(f"run {run_id}: the configuration declares another toolkit contract than run(s) "
+                           f"{sorted(_CONTRACT_RUNS)} in this process run on; start it when they finish, "
+                           "or in a process of its own")
+    toolkit_contract.bind(orch)
+    _CONTRACT_RUNS.add(run_id)
+
+
+def release_run_contract(run_id: str) -> None:
+    """``run_id`` no longer holds the bound contract (its run ended, however it ended)."""
+    _CONTRACT_RUNS.discard(run_id)
 
 
 def attach_reviewer_runtime(
@@ -372,23 +379,36 @@ def attach_reviewer_runtime(
     run_id: str,
     toolkit_root: Path,
     run_monitor: Any | None = None,
+    run_control: RunControl | None = None,
     retrieval: Any | None = None,
     web_source: Any | None = None,
-    human_handler: Any | None = None,
 ) -> None:
-    """Give the reviewer the tools, report folder, receipt store and monitor production gives it.
+    """Give the reviewer the identity, stop channel, tools, report folder, receipt store and
+    monitor production gives it.
 
     The same seam as :func:`attach_lead_runtime`, for the same reason: a live cell driving a real
-    reviewer outside the graph gets exactly production's wiring rather than a copy of it. Leaves a
-    pre-wired ``tools`` alone and is best-effort for duck-typed fakes.
+    reviewer outside the graph gets exactly production's wiring rather than a copy of it. Its key
+    is ``reviewer`` (its address on the quick channel); ``retrieval`` defaults to the knowledge
+    base (``SqliteRetrievalBackend()``) and ``web_source`` to ``WebSource()``, as ``run_research``
+    passes them. Leaves a pre-wired key and ``tools`` alone and is best-effort for duck-typed fakes.
+    The human reaches the reviewer through the quick channel (:func:`attach_channel`).
     """
+    try:
+        if getattr(reviewer, "agent_key", None) is None:
+            reviewer.agent_key = "reviewer"
+        if run_control is not None:
+            reviewer.run_control = run_control
+    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
+        pass
     if getattr(reviewer, "tools", None) is None:
         try:
+            from auto_research.sources import WebSource
+
             reviewer.tools = readonly_tools_for(
                 "reviewer",
                 roots=readonly_roots_for(run_id, toolkit_root),
-                retrieval=retrieval,
-                web_source=web_source,
+                retrieval=retrieval if retrieval is not None else SqliteRetrievalBackend(),
+                web_source=web_source if web_source is not None else WebSource(),
             )
         except Exception:  # noqa: BLE001 — tools are optional; never block the run
             pass
@@ -508,9 +528,6 @@ def attach_worker_runtime(
         sandbox = PersistentSandbox(
             toolkit_root=toolkit_root,
             workdir=worker.report_dir,
-            analyze_env=settings.analyze_env,
-            analyze_ini_sh=settings.analyze_ini_sh,
-            repl_init_py=settings.repl_init_py,
             mcp_client=mcp_client,
             environment=settings.environment,
             environments=settings.catalogue,
@@ -521,6 +538,53 @@ def attach_worker_runtime(
         if run_control is not None:
             run_control.register_aborter(key, sandbox.abort)
     return sandboxes
+
+
+def stamp_run_environments(run_id: str, *, analysis: Any = None) -> str:
+    """Stamp the run's receipt store with the environment its in-process tools run in (the
+    orchestrator's, ``host_environment``) and write that state's lock; with ``analysis`` (an
+    ``Environment``), write its lock too, which the worker stamps on its receipts. Returns the
+    store's default fingerprint. Raises when an environment cannot be read; ``run_research``
+    records that as ``env.fingerprint.error`` and runs on with receipts unstamped.
+    """
+    from auto_research.env import env_lock_dir, host_environment
+    from auto_research.sandbox.envs import fingerprint_and_lock
+
+    store = ReceiptStore.for_run(run_dir(run_id))
+    store.default_env = fingerprint_and_lock(host_environment(), env_lock_dir())
+    if analysis is not None:
+        fingerprint_and_lock(analysis, env_lock_dir())
+    return store.default_env
+
+
+def worker_mcp_client(
+    workers: Sequence[WorkerLike],
+    *,
+    run_id: str,
+    toolkit_root: Path,
+    sandbox_settings: SandboxSettings | None = None,
+) -> MCPToolClient:
+    """The MCP client the workers' shell (``bash_exec``) runs on, unstarted; the caller starts it,
+    loads it into the registry (``registry.load_mcp``) and shuts it down.
+
+    The builtin server, inside the jail: the toolkit's default environment, the run folder as its
+    working directory, and each worker's own folder writable (the shell runs each command in its
+    caller's). ``run_research`` builds its client here, so a cell driving
+    workers outside a full run gets the same shell rather than none or a copy.
+    """
+    settings = sandbox_settings or SandboxSettings.from_config()
+    server = _builtin_server_config(
+        settings.environment,
+        toolkit_root,
+        cwd=run_dir(run_id), probe=settings.probe,
+        # The workers' own folders only (the shell runs each command in the caller's).
+        writable_dirs=[
+            agent_dir(run_id, f"analyst_worker_{index}")
+            for index, worker in enumerate(workers)
+            if isinstance(worker, AnalystWorkerAgent)
+        ],
+    )
+    return MCPToolClient(servers=[server])
 
 
 def _default_graph():
@@ -535,7 +599,7 @@ def _default_graph():
     max_iterations = int(orch.get("max_iterations", 3))
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
     tool_retry_cap = int(orch.get("tool_retry_cap", 3))
-    toolkit_root = Path(orch["toolkit_root"])  # required; validated by the launch preflight
+    toolkit_root = toolkit().root  # the process's bound toolkit contract, validated by the launch preflight
     disabled_tools: list[str] = orch.get("disabled_tools") or []
 
     storage = Storage()
@@ -613,8 +677,7 @@ def _normalize_report_formats(
 _BUILT_BECAUSE = {
     "missing": "it had no build record",
     "stale": "its build record named another definition",
-    "unjailed": "its build ran unjailed and the jail is on",
-    "tainted": "an unjailed build ran in this conda dir",
+    "unjailed": "its record says it was built outside the jail",
     "interrupted": "its prefix was gone",
 }
 
@@ -653,8 +716,6 @@ async def _reconcile_environments(toolkit_root: Path, monitor: Any) -> None:
                                else "rebuilt from the definition") if r.get("rebuilt") else
                             f"ar-{r['env']} drifted from its definition; the rebuild failed "
                             f"({r.get('error')}), so the drifted prefix stays in use"),
-        "tainted": lambda r: (f"an unjailed build ran in this conda dir: every jailed build is fresh "
-                              f"(nothing reused) until a human checks and removes {r['marker']}"),
         "external_changed": lambda r: f"ar-{r['env']}: declared externals changed: {', '.join(r['externals'])}",
         "failed": lambda r: f"ar-{r['env']}: {r.get('error')}" + (PREVIOUS_IN_USE if r.get("previous_in_use") else ""),
     }
@@ -662,7 +723,7 @@ async def _reconcile_environments(toolkit_root: Path, monitor: Any) -> None:
         if result["status"] in summaries:
             event = {"built": "env.build", "restored": "env.restored", "drift": "env.drift",
                      "external_changed": "env.external_changed",
-                     "failed": "env.build.error", "tainted": "env.tainted"}[result["status"]]
+                     "failed": "env.build.error"}[result["status"]]
             await monitor.record("run", event, level=3 if result["status"] in ("built", "restored") else 2,
                                  summary=summaries[result["status"]](result), data=result)
 
@@ -774,10 +835,15 @@ async def run_research(
             },
         )
 
-    # Run the full launch checklist — which pings the channel — before any LLM (§9.8).
+    # Run the full launch checklist — which pings the channel — before any LLM (§9.8). The run reads
+    # its configuration once, here, and binds its toolkit contract first, so the preflight, the
+    # registry, the gate, the evidence predicate and the environments all read one contract.
     try:
+        orch = load_orchestration_config()
+        bind_run_contract(orch, run_id)
         await run_preflight(human_handler=human_handler, monitor=run_monitor)
     except BaseException:
+        release_run_contract(run_id)
         # A failed launch closes the channel the ping opened (D1c): it is all that runs yet.
         await _close_connector(human_handler, run_monitor)
         raise
@@ -794,35 +860,20 @@ async def run_research(
     held = contextlib.AsyncExitStack()  # the checkpointer, open until the run returns
     started = False  # `run.start` recorded: a failure from here on is the run's `run.error` (D1e)
     try:
-        orch = load_orchestration_config()
-
         if max_iterations is None:
             max_iterations = int(orch.get("max_iterations", 3))
         debate_max_rounds = int(orch.get("debate_max_rounds", 3))
         tool_retry_cap = int(orch.get("tool_retry_cap", 3))
-        toolkit_root = Path(orch["toolkit_root"])  # required; validated by the launch preflight
+        toolkit_root = toolkit().root  # the process's bound toolkit contract, validated by the launch preflight
         await _reconcile_environments(toolkit_root, run_monitor)
         sandbox_settings = SandboxSettings.from_config(orch)
-        # Every receipt names the environment it was produced in (env plan B1): in-process tools run
-        # in the orchestrator's; the analysis environment's lock is written now, the worker stamps it.
+        # Every receipt names the environment it was produced in (env plan B1).
         try:
-            from auto_research.env import env_lock_dir, host_environment
-            from auto_research.provenance.store import ReceiptStore as _Store
-            from auto_research.sandbox.envs import fingerprint_and_lock
-
-            _Store.for_run(run_dir(run_id)).default_env = fingerprint_and_lock(
-                host_environment(), env_lock_dir()
-            )
-            analysis = sandbox_settings.environment  # the same object the REPL and the shell run in
-            if analysis is not None:
-                fingerprint_and_lock(analysis, env_lock_dir())
+            # The analysis environment: the same object the REPL and the shell run in.
+            stamp_run_environments(run_id, analysis=sandbox_settings.environment)
             env_error: Exception | None = None
         except Exception as exc:  # noqa: BLE001 — an unreadable env leaves receipts unstamped, never the run dead
             env_error = exc  # recorded after run.start, which opens the ledger
-        analyze_env = sandbox_settings.analyze_env
-        analyze_ini_sh = sandbox_settings.analyze_ini_sh
-        repl_init_py = sandbox_settings.repl_init_py
-        analyze_probe = sandbox_settings.analyze_probe
         disabled_tools: list[str] = orch.get("disabled_tools") or []
         default_formats: list[str] = orch.get("report_formats") or ["jsonl", "tex"]
         resolved_formats = _normalize_report_formats(report_formats, default_formats)
@@ -888,9 +939,9 @@ async def run_research(
             reviewer,
             run_id=run_id,
             toolkit_root=toolkit_root,
+            run_control=run_control,
             retrieval=retrieval,
             web_source=web_source,
-            human_handler=human_handler,
         )
 
         # V-4: a stable key + report folder for the lead's per-round adjudicated report JSONLs, its
@@ -912,14 +963,8 @@ async def run_research(
         for worker in workers:
             _attach_monitor(worker, run_monitor)
 
-        # HITL /steer, /stop: give every role a stable steer key (workers/lead already keyed above)
-        # and the shared RunControl its ReAct loop consults. Best-effort so duck-typed fakes are fine.
-        try:
-            if getattr(reviewer, "agent_key", None) is None:
-                reviewer.agent_key = "reviewer"
-            reviewer.run_control = run_control
-        except Exception:  # noqa: BLE001
-            pass
+        # HITL /steer, /stop: the workers' stop channel (the reviewer, lead and librarian got theirs
+        # from their seams above). Best-effort so duck-typed fakes are fine.
         for worker in workers:
             try:
                 worker.run_control = run_control
@@ -969,25 +1014,11 @@ async def run_research(
 
         registry = ToolkitRegistry(toolkit_root, disabled_tools=disabled_tools)
 
-        # Start MCP client and index its tools into the registry.
-        # When mcp_servers is empty/unset, build the default builtin-server config
-        # using the analysis env python so bash_exec can import astropy/xspec_utils.
-        mcp_server_configs: list[dict] | None = orch.get("mcp_servers") or None
-        if not mcp_server_configs:
-            mcp_server_configs = [
-                _builtin_server_config(
-                    *_env_spelling(sandbox_settings.environment, analyze_env, analyze_ini_sh),
-                    toolkit_root,
-                    cwd=run_dir(run_id), analyze_probe=analyze_probe,
-                    # The workers' own folders only (the shell runs each command in the caller's).
-                    writable_dirs=[
-                        agent_dir(run_id, f"analyst_worker_{index}")
-                        for index, worker in enumerate(workers)
-                        if isinstance(worker, AnalystWorkerAgent)
-                    ],
-                )
-            ]
-        mcp_client = MCPToolClient(servers=mcp_server_configs)
+        # Start MCP client and index its tools into the registry (the builtin server in the
+        # toolkit's default environment, so bash_exec can import the science stack).
+        mcp_client = worker_mcp_client(
+            workers, run_id=run_id, toolkit_root=toolkit_root, sandbox_settings=sandbox_settings,
+        )
         setup.push_async_callback(_closed, "mcp", mcp_client.shutdown, run_monitor)  # a half-started one too
         await mcp_client.start()
         registry.load_mcp(mcp_client)
@@ -999,11 +1030,11 @@ async def run_research(
                 registry=registry,
                 tool_retry_cap=tool_retry_cap,
                 # Phase-2 step-7 authoring/resume: the lead authors missing capability into
-                # research_toolkit on the ambient `ai` branch, then workers rerun (§9.10).
+                # the toolkit on its authoring branch, then workers rerun (§9.10).
                 tool_author_cap=int(orch.get("tool_author_cap", 3)),
                 toolkit_root=toolkit_root,
                 worktree_base=run_dir(run_id) / "authoring",
-                direct_branch=str(orch.get("tool_author_branch", "ai")),
+                direct_branch=toolkit().authoring_branch,
                 human_handler=human_handler,
                 run_control=run_control,
             )
@@ -1270,6 +1301,7 @@ async def run_research(
                 # The channel last, as a stop's cleanup closes it (leaf to root, D8/D1c).
                 await _close_connector(human_handler, run_monitor)
     finally:
+        release_run_contract(run_id)
         await _closed("checkpointer", held.aclose, run_monitor)  # as the run returns
 
     verdict = final_state["verdict"]

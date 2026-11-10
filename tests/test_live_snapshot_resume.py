@@ -244,7 +244,7 @@ def test_live_kill_mid_review_then_resume_restores_and_continues():
         assert _git(clone, "status", "--porcelain").strip(), "restore must dirty the tree"
         # (b) previous memory from the same session rides the seed
         assert "Restored prior work" in session.initial_message
-        assert "passed the deterministic gate" in session.initial_message
+        assert "passed the CI pipeline" in session.initial_message
         await session.connect()
         try:
             gate = await _drive_to_gate_pass(session, session.initial_message, log)

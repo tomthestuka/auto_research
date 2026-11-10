@@ -195,9 +195,9 @@ class ToolSpec(MessageModel):
 
     target_domain: NonEmptyStr = Field(
         description=(
-            "Which <domain>_utils package the work lands in — an existing one when extending "
-            "(e.g. 'xspec_utils'), or the name you propose for a new one. Yours to decide: read "
-            "the relevant lib/ first."
+            "Which toolkit package the work lands in — an existing one when extending, or the "
+            "name you propose for a new one, named like the existing packages. Yours to decide: "
+            "read the relevant lib/ first."
         )
     )
     disposition: Disposition = Field(
@@ -214,15 +214,16 @@ class ToolSpec(MessageModel):
         description=(
             "At least one REAL input the tool's checks run against — this is what makes the tool "
             "verifiable rather than merely tested; a marked synthetic ObsID the tests build is added "
-            "beside it."
+            "beside it. Real data reaches a test through a data set the CI pipeline provides "
+            "(a test marked data(\"<name>\"))."
         ),
     )
 
     proposed_checks: list[ProposedCheck] = Field(
         default_factory=list,
         description=(
-            "The must-have tests, which you own: the implementer must not be the sole author of "
-            "its own grader. At minimum a capability test that fails if the tool produced only "
+            "The must-have tests, which you own, so the grader has an author besides the "
+            "implementer. At minimum a capability test that fails if the tool produced only "
             "well-shaped metadata without doing its job, and an independent differential against "
             "already-trusted code rather than the tool's own new helper."
         ),

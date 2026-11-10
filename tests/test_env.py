@@ -240,18 +240,11 @@ def test_the_coder_harness_derives_the_same_variable_as_the_launch_check():
     from auto_research.models.types import RoleModelConfig
     from auto_research.sandbox.coder.codex_sdk import CodexBackend
 
-    class _AllowAll:
-        def is_allowed(self, path: str) -> bool:
-            return True
-
-        def forbidden_in_command(self, command: str):
-            return None
-
     member = RoleModelConfig(
         name="m", provider="deepseek", model="deepseek-v4-flash",
         harness="codex", base_url="https://api.deepseek.com/",
     )
     backend = CodexBackend(
-        member=member, worktree=Path("/tmp/wt"), system_prompt="p", guard=_AllowAll(),
+        member=member, worktree=Path("/tmp/wt"), system_prompt="p",
     )
     assert backend._key_env == provider_key_aliases("deepseek")[0]

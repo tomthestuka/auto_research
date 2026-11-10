@@ -58,9 +58,10 @@ def _workspace(stamp: str) -> tuple[Path, Path]:
     for name in ("orchestration", "models", "observations", "code_gate"):
         shutil.copy(REPO / "config" / f"{name}.yaml", config / f"{name}.yaml")
     text = (config / "orchestration.yaml").read_text()
-    real = {k: re.search(rf"^{k}:\s*(\S+)", text, re.M).group(1) for k in ("runtime_dir", "toolkit_root")}
+    real = {k: re.search(rf"^{k}:\s*(\S+)", text, re.M).group(1) for k in ("runtime_dir",)}
+    real["toolkit_root"] = re.search(r"^    root:\s*(\S+)", text, re.M).group(1)  # the toolkits: entry
     text = re.sub(r"^runtime_dir:\s*\S+", f"runtime_dir: {runtime}", text, flags=re.M)
-    text = re.sub(r"^toolkit_root:\s*\S+", f"toolkit_root: {toolkit}", text, flags=re.M)
+    text = re.sub(r"^(    root:\s*)\S+", rf"\g<1>{toolkit}", text, count=1, flags=re.M)
     text = text.replace(f"  - {real['toolkit_root']} ", f"  - {toolkit} ")
     text = text.replace(f"  - {real['runtime_dir']}/runs", f"  - {runtime}/runs")
     text = re.sub(r"^agent_fs_allow:\n", f"agent_fs_allow:\n  - {SHERPANA}\n", text, flags=re.M)

@@ -83,7 +83,7 @@ def test_the_field_that_was_required_and_never_mentioned_is_described():
     """`target_domain` is required by ToolSpec and appeared in no channel the lead could read —
     not the payload, not the system prompt, not the schema. It is the sharpest single instance."""
     described = ToolSpec.model_json_schema()["properties"]["target_domain"]["description"]
-    assert "domain" in described.lower() and len(described) > 40
+    assert "toolkit package" in described.lower() and len(described) > 40  # W6: no package named
 
 
 def test_the_disposition_field_states_both_branches():

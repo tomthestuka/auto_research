@@ -22,7 +22,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from auto_research.provenance.store import TOOLKIT_PRODUCER_PREFIX, ReceiptStore
+from auto_research.provenance.store import ReceiptStore
+from auto_research.toolkit_contract import is_toolkit_producer
 from auto_research.schemas.artifacts import InputFile, Receipt
 from auto_research.schemas.figures import FigureRef
 
@@ -300,7 +301,7 @@ def receipt_call(
         source=source, produced_by=produced_by, call_id=call_id, toolkit_commit=commit,
         # The root names where a toolkit tool lives; a harness call (the shell, a read) has none.
         toolkit_root=(Path(toolkit_root).resolve()
-                      if commit is not None and produced_by.startswith(TOOLKIT_PRODUCER_PREFIX) else None),
+                      if commit is not None and is_toolkit_producer(produced_by) else None),
         args=dict(args), inputs=state.inputs, failed=failed, env=env, env_default=env_default,
         parents=list(parents),
         **({"env_untested": True} if env_untested else {}),
@@ -431,17 +432,17 @@ def _product_problem(path: Path, folder: Path | None, workdir: Path | None,
 def _allow_listed(path: Path) -> bool:
     """Whether ``path`` may be receipted: not itself a symlink, and resolving inside the allow-list.
 
-    The host ``/tmp`` is excluded while the OS jail is on: a jailed process sees a private ``/tmp``,
-    so a host ``/tmp`` path in its output can only be a planted reference to someone else's file
-    (an author home's credential lives there). With no allow-list configured, everything is in.
+    The host ``/tmp`` is excluded: a jailed process sees a private ``/tmp``, so a host ``/tmp`` path
+    in its output can only be a planted reference to someone else's file (an author home's
+    credential lives there). With no allow-list configured, everything is in.
     """
     from auto_research.sandbox.fs_guard import PathGuard, load_fs_allowlist
-    from auto_research.sandbox.jail import jail_enabled
 
     if Path(path).is_symlink():
         return False
-    roots = load_fs_allowlist()
-    if jail_enabled():
-        host_tmp = Path("/tmp").resolve()
-        roots = [root for root in roots if root != host_tmp]
+    host_tmp = Path("/tmp").resolve()
+    configured = load_fs_allowlist()
+    roots = [root for root in configured if root != host_tmp]
+    if configured and not roots:  # only the host /tmp was listed: nothing is in
+        return False
     return PathGuard(roots=roots).is_allowed(path)

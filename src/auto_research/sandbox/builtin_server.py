@@ -37,12 +37,13 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
 
 
 def _bash_exec_description() -> str:
-    """Build the LLM-facing bash_exec description, injecting the configured stack probe.
+    """Build the LLM-facing bash_exec description, injecting the environment's probe.
 
-    The concrete probe example comes from AR_ANALYZE_PROBE (config: analyze_probe) so no
-    domain-specific string lives in this orchestration source; absent ⇒ a neutral probe line.
+    The concrete probe example comes from AR_ENV_PROBE (the shell's environment's ``env.yaml``
+    probe) so no domain-specific string lives in this orchestration source; absent ⇒ a neutral
+    probe line.
     """
-    probe = os.environ.get("AR_ANALYZE_PROBE", "").strip()
+    probe = os.environ.get("AR_ENV_PROBE", "").strip()
     probe_line = (
         f'Probe the analysis env with `python -c "{probe}; print(\'OK\')"`.'
         if probe
@@ -68,24 +69,46 @@ def _bash_exec_description() -> str:
     )
 
 
-def private_param_dir():
-    """A fresh, empty HEASoft parameter folder for one call or command: ``(folder, PFILES value)``
-    with the system half of ``PFILES`` kept, or ``(None, None)`` when ``PFILES`` names no user half.
+def private_folders(env, private=None, at=None, create=None, alone=False):
+    """``(env, made)``: ``env`` with a folder of its own as the first part of each private variable.
 
-    ``headas-init`` puts the user's ``$HOME/pfiles`` first and tasks write their learned values
-    back there, so a folder shared by calls lets one call's parameters reach the next (and HEASARC
-    warns that concurrent tasks sharing one corrupt it; G4, 2026-11-04). The one statement, also run
-    by the REPL's call loop and the gate's return recorder (``runner.builtin_function_source``).
-    Standard library only."""
-    import os, tempfile
-    value = os.environ.get("PFILES", "")
-    if ";" not in value:
-        return None, None
-    # Inside the process's own user half (private to it since F23), never a shared /tmp folder.
-    base = value.split(";", 1)[0].split(":")[0]
-    os.makedirs(base, exist_ok=True)
-    folder = tempfile.mkdtemp(prefix="call-", dir=base)
-    return folder, folder + ";" + value.split(";", 1)[1]
+    ``private`` is ``{variable: separator}``, the externals' declaration (``env_externals.<name>.
+    private``, D19); omitted, it is read from ``AR_PRIVATE_FOLDERS``. A variable's value is
+    ``<folders><separator><kept>``: the part before the separator is replaced, the rest kept, and a
+    value without the separator stays as it is. Tools write their learned values into that first
+    folder, so a shared one let one process's or call's values reach the next (F23, G4).
+
+    With ``at`` (a process's own folder, F23): ``<at>/<variable in lower case>``, made at
+    ``<create>/...`` (the same folder as the host sees it; ``at`` by default), and the declaration
+    recorded in ``AR_PRIVATE_FOLDERS`` for the process's calls. ``alone``: the folder without the
+    kept part, for a launcher that puts the kept part back after the activation. Without ``at`` (one
+    call or command, G4): a fresh, empty folder inside the first entry of the current part, listed
+    in ``made`` for the caller to remove. The one definition, run by the host and, as source, by the
+    REPL's call loop and the gate's return recorder (``runner.builtin_function_source``). Standard
+    library only."""
+    import json, os, tempfile
+    env = dict(env)
+    if private is None:
+        private = json.loads(env.get("AR_PRIVATE_FOLDERS") or "{}")
+    made = []
+    for name, sep in private.items():
+        value = env.get(name, "")
+        if sep not in value and not (at is not None and alone):
+            continue
+        head, _, kept = value.partition(sep)
+        if at is None:
+            # Inside the process's own first folder (private to it since F23), never a shared /tmp.
+            base = head.split(os.pathsep)[0]
+            os.makedirs(base, exist_ok=True)
+            folder = tempfile.mkdtemp(prefix="call-", dir=base)
+            made.append(folder)
+        else:
+            folder = os.path.join(str(at), name.lower())
+            os.makedirs(os.path.join(str(at if create is None else create), name.lower()), exist_ok=True)
+        env[name] = folder if alone else folder + sep + kept
+    if at is not None and private:
+        env["AR_PRIVATE_FOLDERS"] = json.dumps(private)
+    return env, made
 
 
 @mcp.tool(description=_bash_exec_description())
@@ -94,9 +117,9 @@ def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict
     import shutil
 
     proc: subprocess.Popen | None = None
-    params = pfiles = None
+    made: list[str] = []
     try:
-        params, pfiles = private_param_dir()  # this command's own, empty parameter folder
+        env, made = private_folders(os.environ)  # this command's own, empty private folders
         # start_new_session isolates the command (and any children it forks) into
         # its own process group, so a timeout can kill the whole group; stdin is
         # DEVNULL so a prompting tool gets EOF and cannot read this server's MCP
@@ -110,7 +133,7 @@ def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict
             text=True,
             cwd=cwd,
             start_new_session=True,
-            env={**os.environ, "PFILES": pfiles} if pfiles else None,
+            env=env if made else None,
         )
         _RUNNING.add(proc)
         try:
@@ -133,8 +156,8 @@ def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict
     finally:
         if proc is not None:
             _RUNNING.discard(proc)
-        if params:
-            shutil.rmtree(params, ignore_errors=True)
+        for folder in made:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 @mcp.tool()

@@ -5,12 +5,18 @@
 # ── Paths (outside both repos; not committed) ──
 runtime_dir: /path/to/ar_runtime            # SQLite DB, figures, run logs, cost ledger, reports
 papers_dir: /path/to/ar_runtime/papers      # downloaded paper PDFs (default: <runtime_dir>/papers)
-toolkit_root: /path/to/research_toolkit     # research_toolkit checkout (the coder's worktree)
-analyze_env: /path/to/conda/envs/analyze    # conda prefix with the analysis stack
-analyze_ini_sh: /path/to/analyst_env.sh     # headless env sourced per tool subprocess (copy analyst_env.sh.example)
-repl_init_py: /path/to/repl_init.py         # python exec'd at REPL-subprocess boot (domain session setup; copy repl_init.py.example); empty/absent ⇒ no-op
-analyze_probe: ""                           # one-line python smoke-test run under analyze_env (installer + preflight); empty ⇒ skip
-env_externals: {}   # {name: {root: <path>, stamps: [<file under root>, ...]}}: software outside conda the analysis env uses; stamped on every receipt
+toolkits:                                   # the toolkit contract: a list of one toolkit (until Phase 3 step 2)
+  - name: research_toolkit                  # declared name: first segment of every manifest key and toolkit producer
+    root: /path/to/research_toolkit         # toolkit checkout (the coder's worktree)
+    package_glob: "*_utils"                 # top-level folders that are tool packages
+    template_package: xspec_utils           # the package the coder is shown as the layout to mirror
+    authoring_branch: ai                    # branch the runtime commits onto directly; never merged to master; preflight asserts it's checked out + clean
+    default_env: analysis                   # the environment (envs/<name>/) a unit's own REPL and shell run in, and where a package naming none runs
+    test_classes: {fast: "not slow and not live"}  # pytest -m expression for the fast tests the gate reruns
+human_envs: {}      # {name: <conda prefix>}: the human's conda environments a toolkit env definition may name as its base; used read-only
+env_externals: {}   # {name: {root: <path>, stamps: [<file under root>, ...], private: {VAR: <sep>}}}: software outside conda the analysis env uses; stamped on every receipt; VAR's part before <sep> is a fresh folder per process and call
+# env_externals:   # e.g. HEASoft; undeclared, PFILES gets no private folder
+#   heasoft: {root: /path/to/heasoft/<platform>, stamps: [BUILD_DIR/build.txt], private: {PFILES: ";"}}
 
 # ── Feedback-loop caps (hard backstops against pathology, not workflow budgets) ──
 max_iterations: 3            # reviewer→work send-backs per feedback edge (literature / analysis)
@@ -55,21 +61,19 @@ gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run
 # (§2/§4 trust boundary). The installer derives this from the paths above; edit when moving machines.
 # empty/unset ⇒ guard off. Governance basenames (CLAUDE.md/DOCS.md/AGENTS.md) are denied even inside an allowed root.
 agent_fs_allow:
-  - /path/to/research_toolkit     # toolkit_root
+  - /path/to/research_toolkit     # the toolkit root
   - /path/to/obs_db_root          # obs_db_root (observations.yaml)
-  - /path/to/conda/envs/analyze   # analyze_env
+  - /path/to/conda/envs/analyze   # a human_envs prefix
   - /tmp
 
-# ── OS-level filesystem jail (§12) ──
-agent_os_jail: false          # wrap runtime subprocesses in bwrap, confined to the lists below
+# ── OS-level filesystem jail (§12; always on) ──
 agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-only
-  - /path/to/conda/envs/analysis     # analyze_env
+  - /path/to/conda/envs/analysis     # a human_envs prefix
   - /path/to/heasoft/x86_64-...      # HEADAS
   - /path/to/CALDB                   # CALDB
-gate_readonly_roots: []       # read-only to the gate's Layer-B test run only, never on the workers' allow-list
+test_data: {}                 # {name: folder} the toolkit's data("<name>") tests read; bound read-only into the gate's test run only
 
 # ── Tool discovery ──
-mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)
 disabled_tools: []   # tool names to hide from the catalogue regardless of what the toolkit exposes
 
 # ── Report (rendered inside the reviewer's turn_end; compose_report publishes it) ──
@@ -81,7 +85,6 @@ tool_author_submit_cap: 5             # lead's submit_for_review calls (each = g
 tool_author_debate_cap: 5             # lead↔co-lead respond_to_review turns per tool
 tool_author_gate_rework_cap: 5        # legacy propose_and_pr auto-loop (unused on the lead-driven path)
 tool_author_review_rework_cap: 5      # legacy propose_and_pr auto-loop (unused on the lead-driven path)
-tool_author_branch: ai                # branch the runtime commits onto directly; never merged to master; preflight asserts it's checked out + clean
 tool_author_cap: 12                   # authoring attempts per analysis (bounds the acquire→reduce→analyse chain)
 
 # ── Raise-to-human channel (§9.8) ──

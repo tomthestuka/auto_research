@@ -457,7 +457,9 @@ def _toolkit_root_from_config() -> Path:
     cfg = yaml.safe_load(
         (Path(__file__).resolve().parents[1] / "config" / "orchestration.yaml").read_text()
     )
-    return Path(cfg["toolkit_root"])
+    from auto_research.toolkit_contract import toolkit
+
+    return toolkit(cfg).root
 
 
 def _copy_real_toolkit(tmp_path: Path) -> Path:

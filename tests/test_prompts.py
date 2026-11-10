@@ -204,3 +204,149 @@ def test_the_roles_around_the_coder_read_the_same_classes(role: str) -> None:
     assert "output argument" in content or "`output` argument" in content, role
     if role != "analyst_worker":
         assert "obsdb_catalog" in content and "products" in content, role
+
+
+# ------------------------------------------------- the toolkit's domain reaches roles from its READMEs
+
+#: Data sources, missions and domain software the prompts used to enumerate (W6, Phase 3 step 0a):
+#: domain text comes from the toolkit's own `README.md` files, which every role reads like any file.
+_DOMAIN_NAMES = ("HEASARC", "MAST", "Chandra", "IXPE", "NICER", "NuSTAR", "Swift", "XMM", "HXMT",
+                 "TESS", "XSPEC", "HEASoft", "PyXspec", "FITS", "CALDB")
+#: Tool names the prompts used as examples (the template's plotters, the acquisition module). The
+#: obs-db passages' "acquire" (the archive download, an English verb too) stays until step 0b.
+_TOOL_NAMES = ("plot_fit", "plot_iqu", "heasarc_help")
+
+
+@pytest.mark.parametrize("role", PROMPT_FILENAMES)
+def test_a_prompt_names_no_toolkit_package_and_no_data_source(role: str) -> None:
+    """A prompt is the role's job; the toolkit's name, its packages and its domain are the toolkit's
+    to state (the coder's context names the checkout and the template package). The obs-db passages
+    name the catalog writer, ``obsdb_catalog``, until step 0b rewrites them; it is not a tool package."""
+    import re
+
+    from auto_research.toolkit_contract import toolkit
+
+    contract = toolkit()
+    names = {contract.name, contract.template_package, *_TOOL_NAMES}
+    if contract.root.is_dir():
+        names.update(contract.packages())
+    else:  # a host without the configured toolkit: the fixture toolkit's names stand in
+        from tests.fixtures import toolkit as fixture
+
+        names.update({fixture.TOOLKIT_NAME, fixture.PKG_NAME, fixture.OTHER_PKG})
+    content = load_prompt(role)  # type: ignore[arg-type]
+    for name in sorted(names):
+        assert not re.search(rf"\b{re.escape(name)}\b", content), f"{role} names the toolkit's {name!r}"
+    for word in _DOMAIN_NAMES:
+        assert not re.search(rf"\b{re.escape(word)}\b", content), f"{role} names the data source {word!r}"
+    assert "polariz" not in content.lower(), f"{role} carries the live scenario's polarization example"
+
+
+@pytest.mark.parametrize("role", ["reviewer", "analyst_worker", "analyst_lead", "coder"])
+def test_the_roles_that_plan_or_build_data_work_are_pointed_to_the_toolkit_readmes(role: str) -> None:
+    content = " ".join(load_prompt(role).split())  # type: ignore[arg-type]
+    assert "toolkit's `README.md` files" in content, role
+
+
+#: The one prohibition model-facing text keeps (CLAUDE.md §3): the no-fabrication ban and its banned
+#: vocabulary, each line as it stands. Any other "do not / never / avoid / must not" is a positive
+#: action to write instead.
+_NO_FABRICATION_BAN = ("never fabricate", "never write data-fabricating code",
+                       "do not leave placeholder/marketing language", "never invent a result",
+                       "never invent an entry for data", "never approve fabrication")
+_PROHIBITION = r"\b(do not|don't|never|avoid|must not)\b"
+#: The gate's retired names, in every text a model reads: it is the CI pipeline with named jobs.
+_RETIRED = ("Layer A", "Layer B", "Layer-A", "Layer-B", "deterministic gate", "the gate", "mechanical gate")
+
+
+def model_text_problems(text: str) -> list[str]:
+    """What a model-facing text says that W6 retired: a prohibition outside the no-fabrication ban,
+    a retired name of the CI pipeline, or a reference into build-time governance (``§``)."""
+    import re
+
+    flat = " ".join(text.split())
+    problems = [f"prohibition: {flat[m.start():][:100]!r}" for m in re.finditer(_PROHIBITION, flat, re.IGNORECASE)
+                if not flat[m.start():].lower().startswith(_NO_FABRICATION_BAN)]
+    problems += [f"retired term {term!r}" for term in _RETIRED if term.lower() in flat.lower()]
+    problems += ["a § reference"] if "§" in flat else []
+    return problems
+
+
+@pytest.mark.parametrize("role", PROMPT_FILENAMES)
+def test_a_prompt_states_positive_actions_and_names_the_ci_pipeline(role: str) -> None:
+    assert model_text_problems(load_prompt(role)) == [], role  # type: ignore[arg-type]
+
+
+def test_the_tool_definitions_the_roles_get_state_positive_actions_and_the_ci_pipeline(tmp_path) -> None:
+    """The model-facing strings in code, collected through the module API: every no-argument tool
+    definition builder, and the read-only tool loops the reviewer and the lead (with authoring on) are
+    given, and the lead's authoring instruction."""
+    import json
+
+    from auto_research.agents import react
+    from auto_research.agents.react import LeadCycle, ReadOnlyToolProvider
+    from auto_research.agents.roles import _cycle_instruction
+
+    surfaces: dict[str, str] = {}
+    for name in dir(react):
+        if name.endswith("_tool_def"):
+            try:
+                surfaces[name] = json.dumps(getattr(react, name)(), ensure_ascii=False)
+            except TypeError:
+                continue
+    for label, provider in (("reviewer", ReadOnlyToolProvider(roots=[tmp_path])),
+                            ("lead", ReadOnlyToolProvider(roots=[tmp_path], include_text_search=False,
+                                                          cycle=LeadCycle(authoring_enabled=True)))):
+        surfaces[label] = json.dumps(provider.tool_definitions(), ensure_ascii=False)
+    surfaces["lead instruction"] = _cycle_instruction(LeadCycle(authoring_enabled=True), [], 1)
+    assert len(surfaces) > 10
+    problems = {where: found for where, text in surfaces.items() if (found := model_text_problems(text))}
+    assert problems == {}, problems
+
+
+def test_the_coder_is_taught_the_ci_pipeline_and_the_test_classes() -> None:
+    """What the CI pipeline runs (``sandbox.gate.JOBS``) and the toolkit's test classes (the data
+    class's variable from the contract) are what the coder reads (W6; D18/D26)."""
+    from auto_research.sandbox.gate import JOBS
+    from auto_research.toolkit_contract import data_variable
+
+    coder = " ".join(load_prompt("coder").split())
+    for job in JOBS:
+        assert f"`{job}`" in coder, f"coder.md does not name the CI job {job!r}"
+    for taught in ("CI pipeline", "`slow`", "`live`", '`data("<name>")`', data_variable("<name>"),
+                   "fails the `tests` job", "lists your change's live tests for the co-lead",
+                   "template package your context names"):
+        assert taught in coder, f"coder.md no longer teaches {taught!r}"
+    for retired in ("Layer-B", "Layer B", "layer_b", "the gate"):
+        assert retired not in coder, f"coder.md still says {retired!r}"
+
+
+def test_the_colead_reads_the_ci_jobs_and_the_live_tests_its_payload_lists() -> None:
+    """The co-lead's prompt names every job and the payload key the review hands it the change's
+    live tests under, driven through ``AnalystColeadAgent.review_tool``."""
+    import asyncio
+    import json
+
+    from auto_research.agents.roles import AnalystColeadAgent
+    from auto_research.models import ModelResponse
+    from auto_research.schemas import GATE_JOBS, CheckResult, GateJob, GateReport, ToolSpec, ValidationDataset
+
+    class _Model:
+        messages = None
+
+        async def call(self, messages, **_):
+            _Model.messages = messages
+            return ModelResponse(parsed={"approved": True, "rationale": "ok", "commit_summary": "Add x"})
+
+    spec = ToolSpec(science_context="ctx", expected_behavior="beh", proposed_tool_name="my_tool",
+                    target_domain="demo_utils", disposition="extend_existing",
+                    validation_data=[ValidationDataset(mission="M", obsid="0001")])
+    live = CheckResult(name="layer_b.live", layer="B", passed=True, detail="tests/test_x.py::test_fetch")
+    gate = GateReport(passed=True, jobs=[GateJob(name=job, status="pass") for job in GATE_JOBS],
+                      layer_b=[live])
+    asyncio.run(AnalystColeadAgent(model=_Model()).review_tool(spec, diff="", gate=gate))
+    system, payload = _Model.messages[0].content, json.loads(_Model.messages[1].content)
+    listed = [key for key, value in payload["gate_report"].items() if value == live.detail]
+    assert listed and all(f"`{key}`" in system for key in listed)
+    for job in GATE_JOBS:
+        assert f"`{job}`" in system, f"analyst_colead.md does not name the CI job {job!r}"

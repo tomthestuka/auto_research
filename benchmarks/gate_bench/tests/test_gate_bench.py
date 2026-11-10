@@ -108,6 +108,38 @@ def _built(entry, dest):
     return repo
 
 
+_BASE_FILES = {
+    ".gitignore": "04a4da835e44ec1b160c18a418091f83b4f7470bb1019758b6bc9fc8ac83bff8",
+    "README.md": "03d22d61668ddd7cd55715a86589f179ca0fe472ad2e330e511ca70d1d83ee5d",
+    "demo_utils/__init__.py": "fb482a43c9cab192ee9d4bc3c8126748ff352600471355c4212c813c2f65ff46",
+    "demo_utils/lib/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "demo_utils/lib/demo_help.py": "970558e09c62a541670e05fd44e9df1335ac0e35d5cc52648b278a59cff5da00",
+    "demo_utils/skills/__init__.py": "80175e927ab4118a0b81cbf592957552f5ec6c95fdcd3b6b84c0066059a400e7",
+    "demo_utils/tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "demo_utils/tests/test_demo_summary.py": "99ac27d8bf1be27c2c49364dcf8a6546114834277d40510adf8d6824f0685c10",
+}
+_WITHOUT_TEST = {k: v for k, v in _BASE_FILES.items() if k != "demo_utils/tests/test_demo_summary.py"}
+_RENAMED = {**_BASE_FILES,
+            "demo_utils/skills/__init__.py": "d61245ced1ce0d5565a9bbada013f78a8f68e798573c6a6c0533e5f0eb70be9f"}
+
+
+@pytest.mark.parametrize("kw,expected", [({}, _BASE_FILES), ({"with_test": False}, _WITHOUT_TEST),
+                                         ({"tool_name": "band_summary_v2"}, _RENAMED)],
+                         ids=["base", "without_test", "renamed"])
+def test_the_synthetic_base_is_the_published_corpus_base_byte_for_byte(tmp_path, kw, expected):
+    """The base is written by the test suite's shared fixture-toolkit builder (tests/fixtures/
+    toolkit.py); an edit there changes the corpus base only when this pin is changed with it. The
+    hashes are those of the base before the builder moved (2026-11-09), for the clean base and the
+    two structural mutants' arguments; `.git` is left out (its HEAD follows the host's git default)."""
+    import hashlib
+
+    repo = basepkg.make_synthetic_repo(tmp_path / "repo")
+    basepkg.write_base_package(repo, **kw)
+    written = {str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest()
+               for p in sorted(repo.rglob("*")) if p.is_file() and ".git" not in p.relative_to(repo).parts}
+    assert written == expected
+
+
 def test_patch_refuses_a_missed_anchor(tmp_path):
     """A real-base anchor that no longer matches must fail loudly, never plant nothing."""
     path = tmp_path / "x.py"
@@ -121,7 +153,9 @@ def _pinned_toolkit_config():
     config = harness.REPO_ROOT / "config" / "orchestration.yaml"
     if not config.is_file():
         pytest.skip("no machine-local orchestration config")
-    toolkit_root = (yaml.safe_load(config.read_text(encoding="utf-8")) or {}).get("toolkit_root")
+    from auto_research.toolkit_contract import toolkit
+
+    toolkit_root = toolkit(yaml.safe_load(config.read_text(encoding="utf-8")) or {}).root
     if not toolkit_root or not (harness.Path(toolkit_root) / ".git").exists():
         pytest.skip("toolkit checkout unavailable")
     ref = harness.DEFAULT_TOOLKIT_REF
@@ -1074,18 +1108,29 @@ def test_the_nondeterminism_marker_is_named_in_fiction():
 # gate's own default Layer-B runner loads, so here the gate runs whole: `harness.run_mutant` →
 # `run_gate` with its default runner (two pytest subprocesses with the recorder). Two things are
 # swapped, as in `tests/test_gate_returns.py`: the analysis interpreter is this one (the scaffolds are
-# pure standard library plus the toolkit's catalog writer, committed in the base), and the OS jail
-# is off.
+# pure standard library plus the toolkit's catalog writer, committed in the base), and the jail's
+# allow-list is empty (the gate binds what its run needs); the tests run in the real jail.
 
 
 @pytest.fixture
 def analysis_env(monkeypatch):
-    """This interpreter as the analysis env, the jail off; the gate otherwise untouched."""
-    from auto_research.sandbox import gate
+    """This interpreter as the default environment, the jail's allow-list empty; the gate otherwise untouched."""
+    from auto_research.sandbox import gate, jail
+    from auto_research.sandbox.envs import Environment
 
-    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"analyze_env": sys.prefix})
-    monkeypatch.setattr(gate, "_jailed_pytest",
-                        lambda argv, *, junit_path, worktree=None, masked=None, extra_ro=(): argv)
+    from auto_research.toolkit_contract import toolkit
+
+    built = gate._gate_environment
+    host = Environment(name="host", prefix=Path(sys.prefix), owner="human")
+
+    async def default_is_host(export, env_id):  # the default environment the gate builds: this interpreter
+        return (host, "") if env_id == toolkit().default_env else await built(export, env_id)
+
+    monkeypatch.setattr(gate, "_gate_environment", default_is_host)
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {})
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
+    monkeypatch.setattr(jail, "_config", lambda: {})
     monkeypatch.setattr(gate, "_gate_test_timeout", lambda worktree, targets: 120)
 
 

@@ -102,16 +102,53 @@ def test_a_lock_rebuilds_the_conda_set_and_pins_pip_and_is_written_once(tmp_path
     assert written.stat().st_mtime_ns == mtime  # once per state
 
 
-def test_the_configured_analysis_environment_is_one_object():
-    env = analysis_environment({
-        "analyze_env": "/opt/envs/analysis", "analyze_ini_sh": "/opt/envs/init.sh",
-        "repl_init_py": "/opt/envs/boot.py",
-        "env_externals": {"tool": {"root": "/opt/tool", "stamps": ["build.txt"]}},
-    })
-    assert env.prefix == Path("/opt/envs/analysis") and env.python == Path("/opt/envs/analysis/bin/python")
-    assert env.activate == Path("/opt/envs/init.sh") and env.boot == Path("/opt/envs/boot.py")
+def test_the_default_environment_is_the_toolkits_definition_as_one_object(tmp_path, monkeypatch):
+    """The toolkit's default environment (contract ``default_env``), resolved from its definition:
+    a derived one layers the declared human prefix with the runtime's own copy of its activation,
+    and names the externals it declares; the catalogue then lists it."""
+    import sys
+
+    import yaml
+
+    from auto_research import toolkit_contract
+    from auto_research.config_paths import CONFIG_DIR_ENV
+    from auto_research.env import agent_conda_dir, env_catalogue
+    from tests.fixtures import toolkit as fixture
+
+    root = fixture.build_toolkit(tmp_path / "toolkit", env_base=Path(sys.prefix).name)
+    with (root / "envs" / fixture.ENV_ID / "env.yaml").open("a", encoding="utf-8") as handle:
+        handle.write("externals: [tool]\n")
+    folder = fixture.write_config(tmp_path / "config", root, analysis_prefix=Path(sys.prefix),
+                                  env_externals={"tool": {"root": "/opt/tool", "stamps": ["build.txt"]}})
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(folder))
+    toolkit_contract.reset()
+    config = yaml.safe_load((folder / "orchestration.yaml").read_text(encoding="utf-8"))
+    env = analysis_environment(config)
+    toolkit_contract.reset()
+    assert env.name == f"ar-{fixture.ENV_ID}" and env.owner == "pipeline"
+    assert env.prefix == Path(sys.prefix) and env.python == Path(sys.prefix) / "bin" / "python"
+    assert env.activate.resolve().is_relative_to(agent_conda_dir().resolve())  # the runtime's copy
+    assert env.activate.read_text() == fixture.ENV_ACTIVATE and env.boot is None
     assert env.externals == (External("tool", Path("/opt/tool"), ("build.txt",)),)
-    assert analysis_environment({}) is None
+    assert [e.name for e in env_catalogue(config)] == [env.name]
+
+
+def test_the_default_environment_refuses_an_undeclared_base(tmp_path, monkeypatch):
+    import sys
+
+    import yaml
+
+    from tests.fixtures import toolkit as fixture
+
+    from auto_research import toolkit_contract
+    from auto_research.config_paths import CONFIG_DIR_ENV
+
+    root = fixture.build_toolkit(tmp_path / "toolkit", env_base="not-declared")
+    folder = fixture.write_config(tmp_path / "config", root, analysis_prefix=Path(sys.prefix))
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(folder))
+    toolkit_contract.reset()
+    with pytest.raises(ValueError, match="'not-declared' is not a human environment"):
+        analysis_environment(yaml.safe_load((folder / "orchestration.yaml").read_text(encoding="utf-8")))
 
 
 def test_a_worker_call_receipt_names_its_sandboxes_environment(tmp_path, monkeypatch):
@@ -414,7 +451,10 @@ def test_a_repl_restarts_before_a_call_when_its_environment_changed(tmp_path, mo
 
     from auto_research import env as app_env
 
-    monkeypatch.setattr(jail, "_config", lambda: {"agent_os_jail": False})
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
+    # This interpreter stands in for a human environment, which the allow-list names read-only.
+    monkeypatch.setattr(jail, "_config", lambda: {"agent_fs_allow": [sys.prefix], "agent_fs_readonly": [sys.prefix]})
     monkeypatch.setattr(app_env, "env_lock_dir", lambda: tmp_path / "locks")
     ini = tmp_path / "activate.sh"
     ini.write_text("export AR_STATE=1\n")
@@ -423,11 +463,12 @@ def test_a_repl_restarts_before_a_call_when_its_environment_changed(tmp_path, mo
 
     async def go():
         try:
-            first = await sandbox.call_tool("os", "getpid", {})
-            same = await sandbox.call_tool("os", "getpid", {})
+            # What the REPL started with (its pid is the same in every jail: its own pid namespace).
+            first = await sandbox.call_tool("os", "getenv", {"key": "AR_STATE"})
+            same = await sandbox.call_tool("os", "getenv", {"key": "AR_STATE"})
             ini.write_text("export AR_STATE=2\n")
             _bump(ini)
-            after = await sandbox.call_tool("os", "getpid", {})
+            after = await sandbox.call_tool("os", "getenv", {"key": "AR_STATE"})
             assert "REPL was restarted" in (sandbox.take_notice() or ""), after
             assert sandbox.take_notice() is None  # handed over once
             return first["stdout"], same["stdout"], after["stdout"]
@@ -449,7 +490,10 @@ def test_a_restart_that_fails_is_the_calls_error_not_a_crash(tmp_path, monkeypat
     from auto_research.sandbox import jail
     from auto_research.sandbox.persistent import PersistentSandbox
 
-    monkeypatch.setattr(jail, "_config", lambda: {"agent_os_jail": False})
+    if not jail.jail_available()[0]:
+        pytest.skip("the OS jail is required and bwrap cannot run here")
+    # This interpreter stands in for a human environment, which the allow-list names read-only.
+    monkeypatch.setattr(jail, "_config", lambda: {"agent_fs_allow": [sys.prefix], "agent_fs_readonly": [sys.prefix]})
     monkeypatch.setattr(app_env, "env_lock_dir", lambda: tmp_path / "locks")
     ini = tmp_path / "activate.sh"
     ini.write_text("export AR_STATE=1\n")
@@ -589,8 +633,9 @@ def _built_look_env(tmp_path, monkeypatch):
 
     from auto_research import env as app_env
     from auto_research.sandbox import env_build
+    from tests.test_env_build import _conda
 
-    config = {"analyze_env": str(_prefix(tmp_path / "astropy")), "runtime_dir": str(tmp_path / "rt"),
+    config = {"human_envs": {"astropy": str(_prefix(tmp_path / "astropy"))}, "runtime_dir": str(tmp_path / "rt"),
               "env_externals": {}}
     monkeypatch.setattr(app_env, "_orch_config", lambda: config)
     folder = tmp_path / "defs" / "look"
@@ -615,16 +660,16 @@ def _built_look_env(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 0)
 
     built = env_build.build(env_build.read_definition(folder), conda_dir=app_env.agent_conda_dir(),
-                            conda_exe="conda", base_envs={}, externals={}, jailed=False, runner=conda)
+                            conda_exe=_conda(tmp_path), base_envs={}, externals={}, runner=conda)
     return config, built
 
 
-def test_the_catalogue_lists_the_human_env_and_every_built_one(tmp_path, monkeypatch):
-    from auto_research.env import env_catalogue
+def test_the_catalogue_lists_every_built_environment_and_no_bare_human_one(tmp_path, monkeypatch):
+    from auto_research.env import env_catalogue, human_environments
 
     config, built = _built_look_env(tmp_path, monkeypatch)
-    human, look = env_catalogue(config)
-    assert human.name == "astropy" and human.owner == "human"
+    (look,) = env_catalogue(config)  # a human environment is reached through a derived definition only
+    assert set(human_environments(config)) == {"astropy"}
     assert look.name == "ar-look" and look.owner == "pipeline" and look.prefix == built.prefix
     assert look.activate == built.activate and look.activate.read_text() == "export LOOK_ACTIVE=yes\n"
 
@@ -649,7 +694,7 @@ def test_use_env_points_only_the_shell_at_another_environment(tmp_path, monkeypa
         is_alive = True
 
         def __init__(self):
-            self.environment = env_catalogue(config)[0]
+            self.environment = Environment(name="astropy", prefix=Path(config["human_envs"]["astropy"]))
             self.environments = partial(env_catalogue, config)
             self.shell_environment = None
 
@@ -660,7 +705,6 @@ def test_use_env_points_only_the_shell_at_another_environment(tmp_path, monkeypa
     registry = ToolkitRegistry(tmp_path / "toolkit")
     registry._loaded = True
     registry._mcp_tools = {"mcp.builtin.bash_exec": "run a command"}
-    registry._mcp_jailed = {"mcp.builtin.bash_exec": False}
     sandbox = _Sandbox()
     provider = SandboxToolProvider(registry, sandbox, cwd=tmp_path, receipts=ReceiptStore(tmp_path / "r"),
                                    receipt_source="w0")
@@ -668,9 +712,6 @@ def test_use_env_points_only_the_shell_at_another_environment(tmp_path, monkeypa
 
     spoofed = asyncio.run(provider.execute("mcp_builtin_bash_exec", {"command": "true", "shell_env": "ar-look"}))
     assert "[shell in" not in spoofed.text and sent.pop() == {"command": "true", "cwd": str(tmp_path)}
-    unjailed = asyncio.run(provider.execute("use_env", {"env": "ar-look"}))
-    assert unjailed.is_error and "OS jail" in unjailed.text and sandbox.shell_environment is None
-    registry._mcp_jailed["mcp.builtin.bash_exec"] = True  # a pipeline env is the shell's only when jailed
     switched = asyncio.run(provider.execute("use_env", {"env": "ar-look"}))
     assert not switched.is_error and sandbox.shell_environment == "ar-look"
     listing = json.loads(asyncio.run(provider.execute("list_env", {})).text.split("\n", 1)[1])
@@ -725,7 +766,7 @@ def test_a_pipeline_activation_never_runs_in_the_runtime(tmp_path, monkeypatch):
         is_alive = True
 
         def __init__(self):
-            self.environment = env_catalogue(config)[0]
+            self.environment = Environment(name="astropy", prefix=Path(config["human_envs"]["astropy"]))
             self.environments = partial(env_catalogue, config)
             self.shell_environment = None
 
@@ -738,7 +779,7 @@ def test_a_pipeline_activation_never_runs_in_the_runtime(tmp_path, monkeypatch):
     assert not plain.is_error and not detail.is_error
     assert not marker.exists(), "a pipeline activation ran in the runtime"
     assert "LEAK_" not in plain.text + detail.text and "activation_sets" not in detail.text
-    look = env_catalogue(config)[1]
+    (look,) = env_catalogue(config)
     fingerprint(look)
     assert not marker.exists()
     with pytest.raises(RuntimeError, match="inside its jail"):
@@ -750,7 +791,8 @@ def test_an_activation_that_exits_or_sets_options_is_reported_not_silent(tmp_pat
 
     from auto_research.agents.react import _in_environment
 
-    _config, built = _built_look_env(tmp_path, monkeypatch)
+    config, built = _built_look_env(tmp_path, monkeypatch)
+    config["env_externals"] = {"tool": {"root": str(tmp_path), "private": {"PFILES": ";"}}}  # D19
     built.activate.chmod(0o644)
     cases = (
         ("exit 0\n", "activation of ar-look did not finish"),
