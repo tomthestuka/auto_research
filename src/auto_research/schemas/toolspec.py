@@ -33,29 +33,15 @@ RequestKind = Literal["new_capability", "fix_existing"]
 
 
 class ValidationDataset(MessageModel):
-    """A real (or marked-synthetic) input the tool's checks run against.
+    """A record in a data store the tool's checks run against: one object version, named as a
+    ``record`` argument names it (``{store, bucket, key, version_id}``; step 0b). The catalog query
+    lists a product's objects in this form. A record in one of the store's synthetic buckets marks
+    every result computed on it synthetic (the store's ``synthetic_buckets``)."""
 
-    ``synthetic=True`` flags a marked ``synth<YYMMDD>-<hex>`` ObsID the coding session's tests build
-    in their fixture obs-db and record through ``obsdb_catalog`` (user ruling 2026-11-04: an obs-db
-    item, never the tool's code); provenance then flags any science result computed on it.
-    """
-
-    mission: NonEmptyStr = Field(
-        description='The mission this input belongs to, e.g. "IXPE", "NICER", "NuSTAR" — or a '
-                    "source name for a literature tool."
-    )
-    obsid: NonEmptyStr = Field(
-        description=("The observation identifier, exactly as it appears in the archive, or the marked "
-                     "synthetic ObsID the tests build.")
-    )
-    synthetic: bool = Field(
-        default=False,
-        description=(
-            "True for a marked synthetic ObsID (synth<YYMMDD>-<hex>, lowercase hex) the coder's tests build in "
-            "their fixture obs-db and record through obsdb_catalog; the tool's own code fabricates "
-            "nothing, which is banned outright."
-        ),
-    )
+    store: NonEmptyStr = Field(description="The store holding the object (a name from the catalog query).")
+    bucket: NonEmptyStr = Field(description="The object's bucket, as the catalog query lists it.")
+    key: NonEmptyStr = Field(description="The object's key, as the catalog query lists it.")
+    version_id: NonEmptyStr = Field(description="The object version the checks read, as the catalog query lists it.")
 
 
 class ProposedCheck(MessageModel):
@@ -89,7 +75,7 @@ class AnalystToolRequest(MessageModel):
 
     This is what an analyst **worker** emits on its ``AnalystReport.tool_request`` — only
     what the worker is qualified to state: the science context, the behaviour it expects, a
-    *suggested* tool name, and the real ObsID that exposed the gap. The architectural calls —
+    *suggested* tool name, and the record that exposed the gap. The architectural calls —
     ``disposition`` (extend vs. new package), the target ``<domain>_utils`` package, and the
     verification ``proposed_checks`` — are **not** here: §9.3 makes them the lead's call, and
     the worker is not the domain expert. The analyst **lead** reads these requests in
@@ -128,8 +114,8 @@ class AnalystToolRequest(MessageModel):
     validation_data: list[ValidationDataset] = Field(
         min_length=1,
         description=(
-            "At least one real ObsID the tool's checks run against — the input that exposed the "
-            "gap becomes the regression input."
+            "At least one record in a store the tool's checks run against — the input that exposed "
+            "the gap becomes the regression input."
         ),
     )
 
@@ -188,7 +174,7 @@ class ToolSpec(MessageModel):
         default=None,
         description=(
             "For 'fix_existing': the wrong or surprising behaviour observed — the symptom only. "
-            "The ObsID that exposed it goes in validation_data, where it becomes the regression "
+            "The record that exposed it goes in validation_data, where it becomes the regression "
             "input."
         ),
     )
@@ -212,10 +198,10 @@ class ToolSpec(MessageModel):
     validation_data: list[ValidationDataset] = Field(
         min_length=1,
         description=(
-            "At least one REAL input the tool's checks run against — this is what makes the tool "
-            "verifiable rather than merely tested; a marked synthetic ObsID the tests build is added "
-            "beside it. Real data reaches a test through a data set the CI pipeline provides "
-            "(a test marked data(\"<name>\"))."
+            "At least one REAL input the tool's checks run against, as a record in a store (from "
+            "the catalog query) — this is what makes the tool verifiable rather than merely tested. "
+            "Real data reaches a test through a data set the CI pipeline provides (a test marked "
+            "data(\"<name>\"))."
         ),
     )
 

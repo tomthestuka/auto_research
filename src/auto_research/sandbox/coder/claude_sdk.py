@@ -153,12 +153,26 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
         # so the kernel refuses every write spelling; reads (`git diff`, `git status`) keep working.
         max_turns=max_turns,
     )
-    env = _with_live_anthropic_key(env)
-    if env:  # full sourced env (analyst conda + HEASoft); omit when unset so the SDK inherits.
+    env = _without_store_secrets(_with_live_anthropic_key(env))
+    if env:  # full sourced env (analyst conda + HEASoft) and the blanked store secrets
         kwargs["env"] = env
     # The OS jail (unconditional, D25): the kernel confines every read and write of the author.
     kwargs["cli_path"] = _jail_launcher(worktree_base, worktree, jail_readonly)
     return ClaudeAgentOptions(**kwargs)
+
+
+def _without_store_secrets(env: dict[str, str] | None) -> dict[str, str] | None:
+    """The author's env with every store admin secret blank (``store.config.admin_env_names``), held
+    now or loaded later. The SDK starts its CLI from this process's ``os.environ`` overlaid with
+    ``options.env``, so a secret is only kept out by naming it here with an empty value (the jail
+    launcher also unsets each, ``jail.write_launcher``); ``None`` stays ``None`` with no store."""
+
+    from auto_research.store.config import admin_env_names
+
+    names = admin_env_names()
+    if not names:
+        return env
+    return {**(dict(env) if env else {}), **{name: "" for name in names}}
 
 
 def _with_live_anthropic_key(env: dict[str, str] | None) -> dict[str, str] | None:

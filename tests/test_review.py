@@ -59,7 +59,7 @@ def _spec(**kw):
         proposed_tool_name="my_tool",
         target_domain="demo_utils",
         disposition="extend_existing",
-        validation_data=[ValidationDataset(mission="IXPE", obsid="0001")],
+        validation_data=[ValidationDataset(store="db", bucket="data", key="k/s/a.dat", version_id="v1")],
     )
     base.update(kw)
     return ToolSpec(**base)

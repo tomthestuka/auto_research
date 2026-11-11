@@ -15,8 +15,10 @@ The fixture follows the toolkit's own contract (research_toolkit ``CLAUDE.md`` Â
 declaring its kind, a ``tool_config.yaml`` naming the package's environment, an ``envs/<id>/``
 definition, a root ``conftest.py`` with the ``slow`` and ``live`` test classes, a ``README.md`` per
 package, and a git repository whose authoring branch is checked out and clean. Pure standard
-library, so it loads in the orchestration environment and runs in any Python with pytest.
-Store (obs-db) parts are step 0b's.
+library, so it loads in the orchestration environment and runs in any Python with pytest. Its
+store tools (``other_utils``: ``count_lines`` reads a ``record``, ``copy_record`` stores a product,
+``writes: ["db"]``) import ``boto3``/``psycopg`` only when they run; their committed tests reach no
+store.
 """
 
 from __future__ import annotations
@@ -634,7 +636,158 @@ TOOL_MANIFEST: dict = {
             "required": ["tables"],
         },
     },
+    "%(toolkit)s.other_utils.count_lines": {
+        "module": "other_utils.lib.other_store",
+        "fn": "count_lines",
+        "description": "How many lines an object in the data store holds.",
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "src": {
+                    "kind": "record",
+                    "description": "The object to count, as the store names it.",
+                },
+            },
+            "required": ["src"],
+        },
+    },
+    "%(toolkit)s.other_utils.copy_record": {
+        "module": "other_utils.lib.other_store",
+        "fn": "copy_record",
+        "writes": ["db"],
+        "algorithm_version": "1",
+        "description": "Store a copy of an object as a product of kind copy, once per object version.",
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "src": {
+                    "kind": "record",
+                    "description": "The object to copy, as the store names it.",
+                },
+                "subject": {
+                    "kind": "setting",
+                    "type": "string",
+                    "description": "The subject the copy is filed under.",
+                },
+            },
+            "required": ["src", "subject"],
+        },
+    },
 }
+'''
+
+STORE_LIB_SOURCE = '''\
+"""Read an object from the data store and store a copy of it as a product.
+
+The store is reached with the keys the process is given (``AWS_*`` for S3, ``PG*`` for the catalog);
+``boto3`` and ``psycopg`` are imported when a tool runs, so the module imports in any Python. A copy is a
+product: claimed in the catalog by its recipe, written create-only under
+``copy/<subject>/<short hash>[.<generation>]/`` with the five metadata entries, its ``recipe.json``
+written last, then committed.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+
+TOOL = "%(toolkit)s.other_utils.copy_record"
+RECORD_KEYS = ("store", "bucket", "key", "version_id")
+
+
+def pinned(src):
+    """``src`` as a whole record naming its version; raises ``ValueError`` otherwise."""
+    if not isinstance(src, dict) or sorted(src) != sorted(RECORD_KEYS) or not all(
+            isinstance(src[k], str) and src[k] for k in RECORD_KEYS):
+        raise ValueError(f"a record is {{store, bucket, key, version_id}}, each non-empty text; got {src!r}")
+    return {k: src[k] for k in RECORD_KEYS}
+
+
+def recipe(src, subject):
+    """The recipe of a copy of ``src`` filed under ``subject``."""
+    return {"kind": "copy", "subject": subject, "tool": TOOL, "algorithm_version": "1", "settings": {},
+            "inputs": [pinned(src)]}
+
+
+def _s3():
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client("s3", region_name=os.environ.get("AWS_REGION") or "us-east-1",
+                        config=Config(s3={"addressing_style": "path"}))
+
+
+def _read(s3, src):
+    src = pinned(src)
+    return s3.get_object(Bucket=src["bucket"], Key=src["key"], VersionId=src["version_id"])["Body"].read()
+
+
+def count_lines(src):
+    """How many lines the object ``src`` names holds."""
+    src = pinned(src)
+    n = len(_read(_s3(), src).splitlines())
+    return {"stdout": f"{n} lines", "lines": n}
+
+
+def copy_record(src, subject):
+    """Store the bytes of ``src`` as the product ``copy/<subject>/...`` and return its record."""
+    plan = recipe(src, subject)
+    import psycopg
+
+    s3 = _s3()
+    with psycopg.connect("", autocommit=True) as conn:
+        claim = conn.execute("SELECT catalog.claim(%%s::jsonb)", (json.dumps(plan),)).fetchone()[0]
+        if claim["status"] == "reuse":
+            marker = next(o for o in claim["objects"] if o["key"].endswith("/recipe.json"))
+            return {"stdout": "already stored", "record": {k: marker[k] for k in RECORD_KEYS}}
+        if claim["status"] != "claimed":
+            raise RuntimeError(f"the catalog answers {claim['status']}: {claim.get('reason') or claim.get('owner')}")
+        h, generation = claim["recipe_hash"], claim["generation"]
+        folder = f"copy/{subject}/{h[:8]}" + (f".{generation}" if generation > 1 else "")
+        meta = {"recipe-hash": h, "producer": claim["owner"], "toolkit-commit": os.environ["AR_TOOLKIT_COMMIT"],
+                "env-fingerprint": os.environ["AR_ENV_FINGERPRINT"]}
+
+        def put(key, data):
+            digest = hashlib.sha256(data)
+            answer = s3.put_object(Bucket=src["bucket"], Key=key, Body=data, IfNoneMatch="*",
+                                   Metadata={**meta, "sha256": digest.hexdigest()}, ChecksumAlgorithm="SHA256",
+                                   ChecksumSHA256=base64.b64encode(digest.digest()).decode())
+            return {"key": key, "version_id": answer["VersionId"], "sha256": digest.hexdigest(), "size": len(data)}
+
+        try:
+            stored = [put(f"{folder}/data", _read(s3, src))]
+            body = {"recipe_hash": h, "generation": generation, "recipe": plan, "objects": stored}
+            stored.append(put(f"{folder}/recipe.json", json.dumps(body, sort_keys=True).encode()))
+            objects = [{"store": src["store"], "bucket": src["bucket"], **o} for o in stored]
+            conn.execute("SELECT catalog.commit(%%s, %%s::jsonb, %%s, %%s)", (h, json.dumps(objects),
+                         meta["toolkit-commit"], meta["env-fingerprint"]))
+        except BaseException as exc:
+            conn.execute("SELECT catalog.fail(%%s, %%s)", (h, f"{type(exc).__name__}: {exc}"))
+            raise
+    return {"stdout": f"stored {folder}/data", "record": {k: objects[-1][k] for k in RECORD_KEYS}}
+'''
+
+STORE_TEST_SOURCE = '''\
+"""Checks for the store tools that need no store: what a record and a recipe hold."""
+
+import pytest
+
+from other_utils.lib.other_store import copy_record, count_lines, recipe
+
+SRC = {"store": "db", "bucket": "demo", "key": "rows/a.csv", "version_id": "v1"}
+
+
+def test_the_recipe_of_a_copy_names_its_input_and_subject():
+    assert recipe(SRC, "s1") == {"kind": "copy", "subject": "s1", "tool": recipe(SRC, "s1")["tool"],
+                                 "algorithm_version": "1", "settings": {}, "inputs": [SRC]}
+
+
+@pytest.mark.parametrize("tool", [count_lines, lambda src: copy_record(src, "s1")])
+def test_a_record_without_its_version_is_refused_before_the_store_is_reached(tool):
+    with pytest.raises(ValueError, match="a record is"):
+        tool({k: v for k, v in SRC.items() if k != "version_id"})
 '''
 
 OTHER_TEST_SOURCE = '''\
@@ -821,8 +974,12 @@ def build_toolkit(
     (other / "lib" / "other_help.py").write_text(OTHER_LIB_SOURCE, encoding="utf-8")
     (other / "skills" / "__init__.py").write_text(OTHER_MANIFEST_SOURCE % {"toolkit": toolkit}, encoding="utf-8")
     (other / "tests" / "test_merge_tables.py").write_text(OTHER_TEST_SOURCE, encoding="utf-8")
+    (other / "lib" / "other_store.py").write_text(STORE_LIB_SOURCE % {"toolkit": toolkit}, encoding="utf-8")
+    (other / "tests" / "test_store_tools.py").write_text(STORE_TEST_SOURCE, encoding="utf-8")
     (other / "README.md").write_text(_package_readme(
-        OTHER_PKG, "Merge band tables that share one header.", "- `merge_tables` (`lib/other_help.py`)."),
+        OTHER_PKG, "Merge band tables that share one header; count the lines of a stored object and store a "
+        "copy of one as a product.",
+        "- `merge_tables` (`lib/other_help.py`); `count_lines`, `copy_record` (`lib/other_store.py`)."),
         encoding="utf-8")
     for pkg in (demo, other):
         (pkg / "tool_config.yaml").write_text(f"env: {ENV_ID}\ndefault_call_timeout_s: 60\n", encoding="utf-8")

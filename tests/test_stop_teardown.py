@@ -121,6 +121,7 @@ def test_stop_tears_down_leaf_to_root_in_the_run_task(tmp_path, monkeypatch):
         ("run.interrupt.step_skipped", "kill_sandboxes"),
         ("run.interrupt.step_skipped", "authoring_reset"),
         ("run.interrupt.step", "mcp_shutdown"),
+        ("run.interrupt.step_skipped", "revoke_store_keys"),
         ("run.interrupt.step", "stop_checklist"),
         ("run.interrupt.step", "hitl_shutdown"),
     ]
@@ -135,7 +136,8 @@ def test_stop_tears_down_leaf_to_root_in_the_run_task(tmp_path, monkeypatch):
     order = ["agents interrupted and closed ✓",
              "sandboxes killed – skipped (this run started no sandbox)",
              "authoring branch reset – skipped (no tool was being authored)",
-             "MCP closed ✓", "cleanup complete"]
+             "MCP closed ✓", "store keys revoked – skipped (this run holds no store keys)",
+             "cleanup complete"]
     positions = [checklist.index(item) for item in order]
     assert positions == sorted(positions)
     assert "✗" not in checklist  # a justified skip is not a failure

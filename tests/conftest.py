@@ -158,6 +158,22 @@ def _toolkit_contract_unbound():
 
 
 @pytest.fixture(autouse=True)
+def _stores_unbound():
+    """Each test starts and ends with the stores unbound (``store.config.reset``), as the toolkit
+    contract: the process binds the ``stores:`` block on first use or a run binds its own."""
+    import sys
+
+    from auto_research.store import config as store_config
+
+    store_config.reset()
+    yield
+    store_config.reset()
+    runtime = sys.modules.get("auto_research.graph.runtime")
+    if runtime is not None:  # a run that ended without releasing them would refuse the next test's
+        runtime._STORE_RUNS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _private_parse_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Each test parses documents into its own cache, never the configured runtime dir (A2: every
     member without a native document channel is sent the local parse)."""

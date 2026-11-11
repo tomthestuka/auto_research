@@ -179,7 +179,7 @@ def test_the_next_cycle_opens_with_the_exchange_and_the_earlier_chain(tmp_path, 
     )
     worker = AnalystReport(summary="w0", tool_request=AnalystToolRequest(
         science_context="c", expected_behavior="b", proposed_tool_name="t",
-        validation_data=[{"mission": "IXPE", "obsid": "01002901"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
     ))
     for _ in range(2):
         asyncio.run(lead.run_cycle(
@@ -367,7 +367,7 @@ def test_a_cleanup_failure_never_replaces_the_cycles_own_failure(tmp_path, monke
 
     worker = AnalystReport(summary="w0", tool_request=AnalystToolRequest(
         science_context="c", expected_behavior="b", proposed_tool_name="t",
-        validation_data=[{"mission": "IXPE", "obsid": "01002901"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
     ))
     with pytest.raises(ModelCallFailed) as raised:
         asyncio.run(lead.run_cycle(

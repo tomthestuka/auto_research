@@ -104,6 +104,9 @@ def _live_cell(tmp_path, *, wait_for_answer: bool):
         return await original_send(text, **kwargs)
 
     handler._send_md = _recording_send
+    from tests.live_store import require_store
+
+    require_store()  # a store that is not ready skips the run with its own refusal
     ledger = tmp_path / "monitor.jsonl"
     before = {p.pid for p in psutil.Process().children(recursive=True)}
     marks: dict = {}

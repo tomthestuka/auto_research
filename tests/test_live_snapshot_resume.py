@@ -51,7 +51,10 @@ from auto_research.sandbox.merge_flow import (
     heal_toolkit_branch_if_dirty,
 )
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, pytest.mark.skip(
+    reason="parked with author_bench (human ruling 2026-11-10): its input is author_bench's frozen "
+    "ToolSpec, whose validation data still name the retired {mission, obsid} form; it moves to store "
+    "records when the human next reruns author_bench")]
 
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "live-snapshot-resume"
 GATE_REWORK_CAP = 3   # per phase, mirroring the production default
@@ -117,9 +120,10 @@ def _clone_at_brief_base() -> Path:
     """
     import tempfile
 
+    from auto_research.toolkit_contract import toolkit
     from benchmarks.author_bench.brief import BASE_SHA
 
-    root = Path(load_orchestration_config().get("toolkit_root", "")).expanduser()
+    root = toolkit(load_orchestration_config()).root
     if not (root / ".git").exists():
         pytest.skip(f"toolkit_root {root} is not a git checkout")
     clone = Path(tempfile.mkdtemp(prefix="ar_livesnap_")) / "toolkit_clone"

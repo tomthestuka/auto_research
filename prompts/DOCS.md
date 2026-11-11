@@ -28,8 +28,12 @@ Runtime prompt files:
   evidence versus where to look, the four ways to write a number (a value reference
   `{{h#/key}}`, a printed value cited and copied, a paper attribution, a derived number from a
   tool), derivations in sympy inside toolkit tools carrying their conventions, writing prose (a
-  scientist's paper register; terms coined during the run are described in plain words), the team
-  channel, and honest outcomes. Each role file then holds its job and the scope it owns.
+  scientist's paper register; terms coined during the run are described in plain words), working
+  with the data store (tools are the one way in; a record `{store, bucket, key, version_id}` names a
+  store file; reads pinned to a version; products written once under recipe-built names, reused for
+  a repeated recipe; a refused write is read and reconsidered; a peer's claim is waited for; the
+  catalog's runtime-kept current product is the default and a cited record stays fixed; flags pass
+  to results; scratch stays in the call's folder), the team channel, and honest outcomes. Each role file then holds its job and the scope it owns.
 - `reviewer.md` — the sole I/O: scopes each request (science case, distinguishing observables,
   staged plan with feasibility checks, every named resource confirmed), assigns each step with
   `assign_to` (librarian as often as needed, analysts, or the human), follows up results that
@@ -70,8 +74,10 @@ Runtime prompt files:
   `live` tests it lists under `live_tests_not_run`, judged by the co-lead), brief-match +
   check-adequacy judgment, the
   independent no-fabrication second pass, subtle-bug hunting, and read-only worktree/web
-  investigation, and the three output classes (a science artifact written into the obs-db or
-  recorded in its catalog is a reject). On approval it also drafts `commit_summary` — the one-line commit subject
+  investigation, and the three output classes (a science artifact stored as a store product is a
+  reject; only the function a manifest entry names stores, library code writes locally and calls no
+  other manifest tool; a changed writer bumps its `algorithm_version`; synthetic data is a product
+  the tests seed). On approval it also drafts `commit_summary` — the one-line commit subject
   `merge_flow.approve_edit` uses for the working-branch commit (step 6). The role name
   `analyst_colead` mirrors `config/models.yaml`.
 - `status_monitor.md` — the light role that answers the HITL `/status` command over the run's own
@@ -82,8 +88,10 @@ Runtime prompt files:
   to the Claude Agent SDK; the toolkit's checkout and its template package are named in the
   seeded context, `merge_flow._build_structure_context`, so the prompt names neither): the three
   output classes and how the `minting` job checks each (an artifact
-  under an `output` argument with its `shape`, returned under `products`/`figures`; an obs-db item
-  recorded through `obsdb_catalog`, tested on a fixture obs-db under `tmp_path/<MISSION>/`; scratch),
+  under an `output` argument with its `shape`, returned under `products`/`figures`; a store product
+  stored once per recipe through the toolkit's store helper by the manifest tool that declares
+  `writes` + `algorithm_version`, its record returned, tested on the CI pipeline's throwaway store with
+  inputs staged through the `seed` fixture; scratch), the `record` argument kind and `reads`,
   the real package layout (`lib/` + `skills/` + wrapped-asset subdirs
   + `tests/` + `README.md`), the two-halves split and design-for-extension principle, the
   **build-the-general-capability principle** (parameterize the variable axis with sensible
@@ -91,7 +99,8 @@ Runtime prompt files:
   the class of question, not the one-off), a **slow-tool call-timeout** note (declare
   `call_timeout_s` in the package `tool_config.yaml` so the sandbox doesn't SIGTERM a legitimately
   long tool at ~300s), the
-  README↔`TOOL_MANIFEST` audience split, `obsdb_catalog` as the sole catalog writer,
+  README↔`TOOL_MANIFEST` audience split, the store helper as a library the coder calls and leaves
+  unchanged,
   no-fabrication rules, the web → `message` to `lead` → `message` to `human` escalation ladder, the
   committed-tests requirement, the test classes (fast, `slow`, `data("<name>")` on a data set the
   pipeline binds, `live` listed for the co-lead; every test of the change runs and passes), and the
@@ -228,3 +237,36 @@ Compacted 2026-09-01, again 2026-09-24, 2026-10-07 and 2026-10-19 (every entry);
   `test_prompts.py` guards no package or data-source name, the README pointer, positive wording, the
   CI jobs and test classes (coder), and the jobs and live-test key (co-lead, through `review_tool`).
 - 2026-11-09 — W6 review: `coder.md` describes `regression` as the earlier fast-class tests (data tests included; a skipped earlier data test fails) and restores "small, already-local" data; `analyst_colead.md` keeps the debate to the blockers already raised and concedes the rest; `analyst_lead.md` requests and authors each capability once per pass; `compactor.md` and `status_monitor.md` name the CI pipeline (the monitor's events stay `gate.*`). Guards in `test_prompts.py`: `model_text_problems` (a prohibition outside the listed no-fabrication ban lines, incl. "must not"; the retired gate names; `§`) over every prompt and over the tool definitions and lead instruction built through the module API; package names from the fixture toolkit when the configured root is absent. `test_toolkit_contract` applies it to the CI pipeline's messages for two failing fixture changes.
+- 2026-11-10 — Phase 3 step 0b S10, the data store in the runtime prompts. `conventions.md` gains
+  "Working with the data store" (domain-neutral, positive wording): tools are the one way in; a
+  record names a store file; reads are pinned and receipts name the version; products are written
+  once under recipe-built names, a repeated recipe reuses its product, other settings make a new one
+  beside it; a refused write is read and reconsidered; a peer's product in progress is waited for;
+  the catalog's current product is the runtime-kept default and a cited record stays fixed; flags
+  pass to results; scratch stays in the call's folder. `analyst_lead.md` reads the store through
+  `catalog_query`, names validation records, and briefs store products and seeded synthetic
+  inputs; `analyst_worker.md` passes a stored product's record to a record argument (no path
+  auto-fill) and reads the toolkit's catalog tool; `reviewer.md` "local first" means the store's
+  catalog; proprietary data is described without the old catalog mark. `coder.md`: the `record`
+  kind, manifest keys `writes`/`reads`/`algorithm_version`, the store-product class through the
+  toolkit's store helper (`produce`: claim, make in a temporary folder, create-once keys,
+  `recipe.json` last, commit; reuse), "only a manifest tool writes the store", "a toolkit tool calls
+  library code only", the `minting` store checks, and store tests on the CI pipeline's throwaway
+  store with inputs staged through the `seed` fixture (`TOOLKIT_STORE`, `TOOLKIT_STORE_SEED`,
+  `TOOLKIT_STORE_VALIDATION`). `analyst_colead.md` judges the same classes. Removed everywhere: the
+  in-process data catalog, obs-db paths and auto-fill, the marked synthetic folder names, the
+  catalog file, ObsID and mission wording. "Mission team's defaults" becomes "the standard settings
+  the data's providers recommend". Tests (`test_prompts.py`): the coder's classes and store
+  variables from the module constants, the roles around the coder, the store conventions for every
+  unit, the lead's `catalog_query`, the retired store vocabulary, ObsID/mission/store-helper names.
+- 2026-11-10 — S10 stateless review (18 findings; fixed): the CI pipeline reaches a throwaway store,
+  never the real one; synthetic input is a seeded product for a store tool and a file under
+  `tmp_path` otherwise (coder, lead and co-lead agree); scratch lives in a tool's own temporary
+  folder; a product's record is its `recipe.json` record; flags reach a result's receipt; "current"
+  moves at the start of a run; a peer's product is awaited by reading the catalog again; members
+  without catalog tools (reviewer, librarian) ask the analysts; the bucket stands outside the recipe;
+  `TOOLKIT_STORE_VALIDATION` belongs to one change (a later `regression` run skips a test whose record
+  is absent); the CI pipeline checks the manifest keys' form; the lead learns of encrypted data from
+  a worker's report. Kept: `coder.md` names the store helper's `produce` and the toolkit's `store` and
+  `seed` fixtures (the authoring guide's interface). Test: `catalog_query` named only where
+  `graph.runtime.readonly_tools_for` declares it.

@@ -18,15 +18,20 @@ arrive on their own clock, and a real lead choosing what to do with the time.
 **Cells.** Every behaviour in the design, each asserted on our side of the boundary:
 
 * mechanism cells — a REAL `AuthoringSession` (configured coder member, real harness process,
-  throwaway toolkit clone at `BASE_REF`, the `DU_COUNTS` brief) driven through the PRODUCTION executors (`execute_drive_coder`,
+  throwaway toolkit clone at `live_store.STORE_BASE_REF`, the `DU_COUNTS` brief) driven through the PRODUCTION executors (`execute_drive_coder`,
   `execute_wait_coder`, `execute_submit`) with the test standing in for the lead:
   turn end wakes the wait · a coder question wakes it and the answer goes mid-turn · a short
   timeout is raised to the floor and times out while the coder works · a plain message is queued
   and becomes the next turn while `mid_turn` steers the running one · a submit waits for the coder
   to stop before the gate runs;
-* lead cells — a REAL analyst lead (`attach_lead_runtime` + `run_cycle`, model from the config
+* lead cells — a REAL analyst lead (`wire_lead` + `run_cycle`, model from the config
   pointer) authoring a real link: it waits instead of polling, and a human `/steer` wakes its wait;
   and a `/stop` landing while the lead is parked in the wait cancels it and leaves a clean tree.
+
+**The store** (step 0b): every cell takes the run's store launch step (`tests/live_store.run_stores`,
+as `run_research` takes it) and names a real validation record, the raw product of IXPE 01002901 read
+from the real store (migration item S11), which the gate's CI pipeline copies into its throwaway
+store; the lead holds its own catalog login, as production gives it.
 
 **Discipline** (the live-test rules): production seams only, models from config (`--seats` /
 `AUTO_RESEARCH_SEATS`), the cost meter installed inside the task, a ledger and a git bundle of the
@@ -58,26 +63,26 @@ LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "coder-wait" / 
 CYCLE_TIMEOUT_S = float(os.getenv("AUTO_RESEARCH_CYCLE_TIMEOUT_S", "5400"))
 # A wake is "prompt" when the wait returns within this many seconds of the event that caused it.
 WAKE_SLACK_S = float(os.getenv("AUTO_RESEARCH_WAKE_SLACK_S", "5"))
-#: This test's own pinned toolkit base: toolkit `main` at f409d09 (2026-11-05), the pressure cells'
-#: base, after the argument-kind and output-kind migrations — the cells build an authoring session
-#: (the coder's structure context reads the toolkit), run the real gate on a submit, and run a real
-#: lead over the toolkit, so the base must carry today's manifests. Checked 2026-11-09 with
-#: `git grep` at f409d09: no per-DU event-count or live-time tool exists; the brief names only the
-#: obs-db's `event_l2/ixpe<obs>_det<n>_evt2_v<NN>[_rej].fits` layout (01002901 holds the plain v01
-#: files, each EVENTS header carrying LIVETIME).
-BASE_REF = "f409d09"
+#: The toolkit base is the one the coding-pipeline cells share (`tests/live_store.STORE_BASE_REF`,
+#: the commit carrying the data store): the cells build an authoring session (the coder's structure
+#: context reads the toolkit), run the real gate on a submit, and run a real lead over the toolkit,
+#: so the base must carry today's manifests. At f409d09 (checked 2026-11-09 with `git grep`) no
+#: per-DU event-count or live-time tool existed; recheck at the store commit when it is pinned. The
+#: brief names the raw product's `event_l2/ixpe<obs>_det<n>_evt2_v<NN>[_rej].fits` layout (01002901
+#: holds the plain v01 files, each EVENTS header carrying LIVETIME).
 
-#: The one capability both kinds of cell brief: absent at `BASE_REF`, built only on what exists there.
+#: The one capability both kinds of cell brief: absent at the base, built only on what exists there.
 DU_COUNTS = {
     "science_context": (
         "We need per-DU event counts for an IXPE observation to sanity-check exposure before any "
         "polarization fit; the toolkit exposes no such summary."
     ),
     "expected_behavior": (
-        "ixpe_du_event_counts(ixpe_path, obsid) -> {'du1': int, 'du2': int, 'du3': int} plus each "
-        "DU's live time: find the observation's three Level-2 event files in its obs-db folder "
-        "(event_l2/ixpe<obsid>_det<n>_evt2_v<NN>.fits, the _rej variant where one exists), count the "
-        "rows of each file's EVENTS extension, and read its LIVETIME header keyword."
+        "ixpe_du_event_counts(ixpe) -> {'du1': int, 'du2': int, 'du3': int} plus each DU's live "
+        "time, where ixpe is the record of the observation's raw product as the data catalog lists "
+        "it: find its three Level-2 event files (event_l2/ixpe<obsid>_det<n>_evt2_v<NN>.fits, the "
+        "_rej variant where one exists), count the rows of each file's EVENTS extension, and read "
+        "its LIVETIME header keyword."
     ),
     "proposed_tool_name": "ixpe_du_event_counts",
 }
@@ -95,16 +100,18 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _clone() -> tuple[Path, str]:
-    """A throwaway clone at ``BASE_REF``, outside pytest's rotating basetemp.
+    """A throwaway clone at the store base (``live_store.store_base_ref``), outside pytest's rotating basetemp.
 
     The base lacks the capability the lead cells' request asks for, so a lead briefed with it
     genuinely has something to author (the stop drill's measured lesson).
     """
     from auto_research.env import toolkit_root as configured_toolkit_root
     from benchmarks.science_bench.environment import clone_toolkit
+    from tests.live_store import store_base_ref
 
+    base_ref = store_base_ref()
     clone = Path(tempfile.mkdtemp(prefix="ar_livewait_")) / "toolkit"
-    base = clone_toolkit(clone, configured_toolkit_root(), BASE_REF, "ai")
+    base = clone_toolkit(clone, configured_toolkit_root(), base_ref, "ai")
     return clone, base
 
 
@@ -202,8 +209,13 @@ async def execute_drive_coder(session, arguments):
     )
 
 
-def _build_session(clone: Path, monitor):
-    """The production session builder, configured coder member, the `DU_COUNTS` brief."""
+#: The brief's validation input: the raw product of this IXPE observation in the real store.
+VALIDATION = ("ixpe", "01002901", "raw")
+
+
+def _build_session(clone: Path, monitor, record: dict):
+    """The production session builder, configured coder member, the `DU_COUNTS` brief validated on
+    ``record``."""
     from auto_research.sandbox.merge_flow import build_authoring_session
     from auto_research.schemas import ToolSpec
     from auto_research.schemas.toolspec import ValidationDataset
@@ -212,7 +224,7 @@ def _build_session(clone: Path, monitor):
     session = build_authoring_session(
         ToolSpec(request_kind="new_capability", target_domain="xspec_utils",
                  disposition="extend_existing",
-                 validation_data=[ValidationDataset(mission="IXPE", obsid="01002901")], **DU_COUNTS),
+                 validation_data=[ValidationDataset(**record)], **DU_COUNTS),
         lead=lead,
         toolkit_root=clone,
         worktree_base=clone.parent / "authoring",
@@ -227,6 +239,7 @@ def _build_session(clone: Path, monitor):
 def _mechanism(cell: str, scenario) -> dict:
     """Run one mechanism cell: real session, cost meter inside the task, record then return."""
     from auto_research.observability.costs import install_cost_meter
+    from tests.live_store import product_record, run_stores
 
     clone, base = _clone()
     monitor = _monitor(cell)
@@ -236,17 +249,18 @@ def _mechanism(cell: str, scenario) -> dict:
         # Attached to the monitor as `run_research` does (runtime.py), so every ledger line
         # carries the accumulated spend.
         monitor.cost_meter = install_cost_meter(run_id=monitor.run_id, monitor=monitor)
-        session = _build_session(clone, monitor)
-        await session.connect()
-        try:
-            await scenario(session, monitor, observed)
-        finally:
-            # Bounded: a cell that kills the coder must still get its tree reset, and a hang
-            # here is itself a finding, recorded rather than wedging the suite.
+        async with run_stores(monitor.run_id, monitor):
+            session = _build_session(clone, monitor, await product_record(*VALIDATION))
+            await session.connect()
             try:
-                await asyncio.wait_for(session.aclose(), timeout=120)
-            except TimeoutError:
-                observed["aclose_timed_out"] = True
+                await scenario(session, monitor, observed)
+            finally:
+                # Bounded: a cell that kills the coder must still get its tree reset, and a hang
+                # here is itself a finding, recorded rather than wedging the suite.
+                try:
+                    await asyncio.wait_for(session.aclose(), timeout=120)
+                except TimeoutError:
+                    observed["aclose_timed_out"] = True
 
     try:
         asyncio.run(run())
@@ -567,11 +581,11 @@ def test_mechanism_a_stop_during_a_submit_wait_cancels_it():
 # ─────────────────────────────────────────────────────────────── lead cells
 
 
-def _lead_request_reports():
+def _lead_request_reports(record: dict):
     """Two worker reports, one carrying a real `tool_request` — what opens the authoring branch."""
     from auto_research.schemas import AnalystReport, AnalystToolRequest
 
-    request = AnalystToolRequest(**DU_COUNTS, validation_data=[{"mission": "IXPE", "obsid": "01002901"}])
+    request = AnalystToolRequest(**DU_COUNTS, validation_data=[record])
     return [
         AnalystReport(
             summary=(
@@ -611,18 +625,16 @@ def _lead_run(cell: str, on_parked):
     """A real lead cycle; ``on_parked(control, lead, observed)`` fires once the lead has been
     parked in wait_coder for PARKED_FOR_S with its coder working. Returns (observed, clone, base)."""
     from auto_research.agents.roles import AnalystLeadAgent
-    from auto_research.graph.runtime import _interrupt_cleanup, attach_lead_runtime
+    from auto_research.graph.runtime import _interrupt_cleanup, wire_lead
     from auto_research.observability.costs import install_cost_meter
     from auto_research.run_control import RunControl
     from auto_research.schemas import AnalysisTask
+    from tests.live_store import product_record, run_stores
+
     clone, base = _clone()
     monitor = _monitor(cell)
     control = RunControl()
     lead = AnalystLeadAgent(monitor=monitor)
-    attach_lead_runtime(
-        lead, run_id=monitor.run_id, toolkit_root=clone, run_monitor=monitor, run_control=control,
-    )
-    assert lead.tools is not None, "the seam gave the lead no tools; it would run blind"
     observed: dict = {"cell": cell, "base_ref": base, "lead_model": getattr(lead, "model", None)}
 
     class _NoMCP:
@@ -633,12 +645,19 @@ def _lead_run(cell: str, on_parked):
         # Attached to the monitor as `run_research` does (runtime.py), so every ledger line
         # carries the accumulated spend.
         monitor.cost_meter = install_cost_meter(run_id=monitor.run_id, monitor=monitor)
+        async with run_stores(monitor.run_id, monitor, control) as keys:
+            await wire_lead(lead, run_id=monitor.run_id, toolkit_root=clone, keys=keys,
+                            run_monitor=monitor, run_control=control)
+            assert lead.tools is not None, "the seam gave the lead no tools; it would run blind"
+            await _cycle(_lead_request_reports(await product_record(*VALIDATION)))
+
+    async def _cycle(reports):
         task = asyncio.create_task(lead.run_cycle(
             AnalysisTask(
                 question="Check the per-DU exposure for the IXPE observation of Cyg X-1.",
                 instructions="A worker reports a missing capability. Settle it.",
             ),
-            _lead_request_reports(),
+            reports,
             sources=["analyst_worker_0", "analyst_worker_1"],
             rounds_left=1,
             author_budget=1,

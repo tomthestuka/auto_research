@@ -15,7 +15,7 @@ from auto_research.provenance.bindings import (
     render_bindings,
 )
 from auto_research.schemas.artifacts import PaperAttribution
-from auto_research.provenance.store import ReceiptStore, RunView, ScopedLookup, is_synthetic_path, sha256_file
+from auto_research.provenance.store import ReceiptStore, RunView, ScopedLookup, sha256_file
 
 __all__ = [
     "ATTRIBUTION_KINDS",
@@ -31,7 +31,6 @@ __all__ = [
     "bounded_find",
     "check_bindings",
     "check_report_fields",
-    "is_synthetic_path",
     "normalise",
     "parse_bindings",
     "render_bindings",

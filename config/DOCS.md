@@ -18,16 +18,15 @@ a Pydantic schema, and hands the resolved object to whoever needs it. Adding a n
 role or swapping a provider is a YAML edit; no Python change.
 
 **Machine-local config vs. tracked templates.** `models.yaml` and `code_gate.yaml` are
-machine-independent and tracked. The machine-specific files — `orchestration.yaml`,
-`observations.yaml` — are **gitignored**; the repo tracks a `*.example` template for each. A fresh clone runs
+machine-independent and tracked. The machine-specific file — `orchestration.yaml` — is **gitignored**; the repo tracks a `*.example`
+template for it. A fresh clone runs
 `bash install.sh` (writes the live copies) or copies each `*.example` by hand. The launch
-config loaders (`graph.runtime.load_orchestration_config`, `observations.load_observations_config`)
-raise a "copy the `.example` / run install.sh" message when a live file is absent.
+config loader (`graph.runtime.load_orchestration_config`) raises a "copy the `.example` / run install.sh" message when a live file is absent.
 
 **This directory is the default, not the only one.** Every reader resolves the four files through
 `auto_research.config_paths`, which answers with this directory unless `AUTO_RESEARCH_CONFIG_DIR`
 names another. That exists so a process can be run against a whole different configuration — a
-different set of model seats, a different toolkit checkout, a different runtime and observation
+different set of model seats, a different toolkit checkout, a different runtime and data
 root — without editing anything here, which is what a repeated-trial experiment over the seats
 needs. It is an environment variable rather than a parameter because the readers include
 subprocesses (the sandbox REPL, the author harness, the gate's test runner) that inherit the
@@ -58,16 +57,6 @@ uninstalled configuration rather than silently falling back here.
   `analyst_colead` — the tool reviewer, which **must stay decorrelated from the author's
   provider** (the §6/§9.3 invariant, non-Anthropic while the author is Claude), backed by
   GPT-5.5 reasoning xhigh.
-- `observations.yaml` — a single `obs_db_root`: the **one folder** the obs database lives
-  in. Machine-local (gitignored; tracked as `observations.yaml.example`).
-  Loaded by `auto_research.observations`, which discovers missions from disk — a subdir
-  `<obs_db_root>/<MISSION>` is a mission iff it holds a `catalog.json` (the marker that
-  separates real mission folders from unrelated working dirs sharing the root). The subdir
-  basename lowercases to the mission name (`research_toolkit` derives it the same way); a
-  single mission's path is resolved by `mission(name)` (case-insensitive subdir match, so it
-  works before the catalog exists). Mission names are data, not special cases in code.
-  `research_toolkit` tools (`xspec_utils.load_data`, `heasarc_utils.acquire`) already take a
-  per-mission directory and are unchanged.
 - `orchestration.yaml` — runtime data dir, graph iteration caps, debate round cap,
   ReAct/structured retry caps, toolkit root, analyst sandbox environment (env script +
   REPL-init hook + env probe), report settings, Phase-2 authoring caps, the raise-to-human
@@ -75,8 +64,7 @@ uninstalled configuration rather than silently falling back here.
   tracked as `orchestration.yaml.example`).
 - `code_gate.yaml` — the no-fabrication scan lists for the Phase-2 deterministic gate
   (`sandbox/gate.py`, §9.4/§9.5): `hard_fail_vocabulary`, `hard_fail_code_patterns` (RNG),
-  `finding_vocabulary` + `finding_code_patterns` (soft flags → co-lead review, not fail),
-  `allowlist_obsid_tokens`.
+  `finding_vocabulary` + `finding_code_patterns` (soft flags → co-lead review, not fail).
   The single place a human tunes what the gate rejects vs. flags — no scan constant lives
   in source. Loaded by `gate._code_gate_config()`.
 
@@ -119,13 +107,6 @@ uninstalled configuration rather than silently falling back here.
 - `models.yaml.roles.<role>.members[].priceMTk` — optional USD rates per
   million tokens with `input` and `output` keys, consumed by
   `auto_research.observability`.
-- `observations.yaml.obs_db_root` — the single root folder; each mission is a subdirectory
-  `<obs_db_root>/<MISSION>` discovered from disk (marked by its `catalog.json`). It starts empty
-  (H2, 2026-11-04: `/xray02/fzhou_obsdb`, a fresh root the runtime acquires into; the human's
-  `/data/fzhou/XSPEC/Cyg_X-1` stays an archive the runtime does not write): `acquire` creates a
-  mission's folder on its first observation, laid out as HEASARC's archive tree
-  (`ixpe/data/obs/<prefix>/<obsid>/`). An empty root that exists and is writable is healthy. It is
-  also in `orchestration.yaml: agent_fs_allow`. The `.example` files keep the `/path/to/` placeholder.
 - `orchestration.yaml.env_externals` — software outside conda the analysis environment uses,
   `{name: {root, stamps, private}}`: `stamps` are files under `root` hashed into every receipt's
   environment fingerprint; `private: {VARIABLE: separator}` (optional, D19) names a variable whose
@@ -234,8 +215,6 @@ uninstalled configuration rather than silently falling back here.
   in honest §9.5 disclosures (`synthetic`, `synthesized`, `illustrative`) (C1).
 - `code_gate.yaml.finding_code_patterns` — AST shapes recorded as **non-failing** findings
   for the co-lead to judge (`literal_array_return`/`_plot`/`_dataframe`).
-- `code_gate.yaml.allowlist_obsid_tokens` — regexes (default `synth\d{6}`) that exempt a
-  line from the vocabulary scan, so §9.5 synthetic-ObsID fixtures stay legal.
 - `orchestration.yaml.toolkits` — the toolkit contract (`auto_research.toolkit_contract`), a list
   of exactly one toolkit until Phase 3 step 2 gives units their own (§9.5). It replaces
   `toolkit_root` and `tool_author_branch` (Phase 3 step 0a; no alias, ruling D16). Every fact the
@@ -264,6 +243,25 @@ uninstalled configuration rather than silently falling back here.
     toolkit's root `conftest.py` declares). `test_classes.live` (default `live`): the expression the
     gate deselects from a change's own tests (no network there). `test_classes.data` (default
     `data`): the marker of a test reading a named data set, `data("<name>")`.
+- `orchestration.yaml.stores` — the data stores (`auto_research.store.config`, Phase 3 step 0b): a
+  list of at least one, names unique, no two sharing a folder or a port; `db` is the default store
+  (ruling 2026-11-10). Each entry:
+  - `name` (identifier), `kind` (`local` | `remote`), `buckets` (3–63 of `[a-z0-9-]`; each must exist
+    with versioning Enabled, preflight `store_buckets`), `admin_env` (`s3_access_key`, `s3_secret_key`,
+    `catalog_password`: the NAMES of the `.env` variables holding the admin secrets, never a secret).
+  - `local`: `root` (the objects folder served as S3, each top folder a bucket), `state_dir`
+    (`postgres/`, `versions/`, `iam/`, `logs/`; made when absent, its parent must exist), `socket_dir`
+    (a short absolute folder on local disk outside the temp root, mode 0700, for the IAM and Postgres
+    Unix sockets; their paths ≤ 107 bytes), `ports` (`s3`, `iam`, `catalog` on 127.0.0.1, distinct, ≥ 1024), `catalog` (`database` default
+    `db`, `admin_user` default `ar_admin`). `root` and `state_dir` must take `user.` xattrs; none of
+    the three may meet a folder a jail may bind (`agent_fs_allow`, `agent_fs_readonly`, `test_data`,
+    toolkit roots, `human_envs`, `env_externals` roots, the runtime dir; preflight `store_config`). A run's launch step starts the servers before its preflight (`graph.runtime.start_run_stores`; `store_servers` only checks) and leaves them running; `python -m auto_research.store status|stop` shows and stops them.
+  - `roles` (optional; `{producer: [patterns]}`, default `[analyst_worker_*]`): units whose name matches a pattern hold the store's producer role (write any key of its buckets, create-only by the toolkit helper), every other unit the reader role (pinned reads); each unit is its own S3 user and Postgres login for the run (`store.keys`). Until unit definitions name the role (Phase 3 step 3).
+  - `remote`: `endpoint` (http(s) URL), `region` (default `us-east-1`), `catalog_dsn` (libpq conninfo
+    naming host, dbname and user, no password).
+  Live: `db`, local, root `/xray02/fzhou_db`, state `/xray02/fzhou_db.d` (both made at migration, S11;
+  until then `store_config` and `store_servers` fail the live launch), sockets `/scratch/fzhou_db.run`,
+  ports 18070/18076/18432, buckets `ixpe`, `nicer`, `nustar` (default D-names, to confirm).
 - `orchestration.yaml.test_data` — `{name: folder}`: the host's data sets the toolkit's
   `data("<name>")` tests read (the toolkit names a need, the host satisfies it by name). The gate binds
   each existing folder read-only into its test run only (never on `agent_fs_allow`) and names it by
@@ -421,3 +419,9 @@ Compacted 2026-09-01, 2026-09-24, 2026-10-07 and 2026-10-19 (every entry); detai
 - 2026-11-09 — W3 review: preflight `toolkit_test_data`. An `obsdb` data set was added for the ai-xspec branch's obs-db tests and removed when the toolkit moved to `main`, whose tests read no obs-db.
 - 2026-11-09 — Phase 3 step 0a W10 (ruling D25): `agent_os_jail` retires; the jail is unconditional and a host that cannot run `bwrap` is refused at launch. `mcp_servers` retires too: a configured server ran outside the jail; the workers' shell is the jailed builtin server.
 - 2026-11-09 — W10 review: the launch refuses a retired key (`preflight.check_config_keys`: `agent_os_jail`, `mcp_servers`, `toolkit_root`, `tool_author_branch`, `analyze_env`, `analyze_ini_sh`, `repl_init_py`, `analyze_probe`, `gate_readonly_roots`, each named with its replacement) and an empty `agent_fs_allow`.
+- 2026-11-10 — Phase 3 step 0b S1: `stores:` (the data stores: `name`, `kind`, `buckets`, `admin_env`; local `root`, `state_dir`, `socket_dir`, `ports`, `catalog`; remote `endpoint`, `region`, `catalog_dsn`) in the live config (`db`, local) and `.example` (a local entry, a remote one commented).
+- 2026-11-10 — Phase 3 step 0b S4: `stores[].roles` (`producer` patterns) in both files; the obs-db root leaves `agent_fs_allow` (live and `.example`): no jail mounts a store's folders, tools reach it through S3 with their unit's own keys.
+- 2026-11-10 — Phase 3 step 0b S9: `observations.yaml` and `observations.yaml.example` are deleted with `auto_research.observations` (not backwards compatible): data lives in the `stores:` block's stores, read through a unit's own keys (S4) and, for the lead, the catalog query. The live file's last content (`obs_db_root: /xray02/fzhou_obsdb`) is kept in `tmp_phase3/0b/work/S9/observations.yaml.removed`.
+- 2026-11-10 — S9 follow-up (main ruling 5): `stores[].roles.producer` is `[analyst_worker_*]` in both files and the default; the lead holds the reader role (it only queries the catalog). The `stores:` block must declare the default store `db` (`store_config`, ruling 6).
+- 2026-11-10 — S7 follow-up: `code_gate.yaml` `allowlist_obsid_tokens` removed (the gate scans every added line since step 0b; synthetic data lives in a store's `synthetic_buckets`).
+- 2026-11-11 — (main) store `db` admin secret names renamed to the human's choice: `AR_DB_S3_KEY_ID`, `AR_DB_S3_KEY_SECRET`, `AR_DB_S3_CATALOG_SECRET` (`stores[].admin_env`; also `.env.example`, README).

@@ -98,7 +98,7 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   reaches zero, naming the cap and pointing at `submit_adjudication`. So a lead at the cap files a
   report rather than asking for a round it cannot have.
 - Live consensus verification is opt-in (`--live`): a full run drives `DebateToConverge`
-  (`tests/test_live_b_run.py`, `tests/test_live_sandbox.py::test_xspec_local`).
+  (`tests/test_live_b_run.py`).
 
 ## Dependencies
 - Internal: `auto_research.agents`, `auto_research.schemas`, `auto_research.storage`.
@@ -177,3 +177,5 @@ git history.
 - 2026-11-05 — Live tests are opt-in by the `live` marker and `--live` (`tests/conftest.py`, user ruling); the per-file `AUTO_RESEARCH_LIVE_*` switches retire.
 - 2026-11-09 — Phase 3 step 0a W9d: `tests/test_live_consensus.py` deleted (ruling D23): it read the removed `LeadCycleOutcome.verdict` and drove tool-less workers; a full run (`test_live_b_run.py`, `test_live_sandbox.py::test_xspec_local`) and `tests/test_consensus.py` cover the debate.
 - 2026-11-09 — Phase 3 step 0a W2 review (M1): `_reload_toolkit` also records the registry's `key_errors` (manifest keys outside `<toolkit name>.<package>.<tool>`, not served) as `analyst.toolkit.load_error`.
+- 2026-11-11 — S13a: the live debate coverage names `tests/test_full_suite.py`; `tests/test_live_sandbox.py::test_xspec_local` was deleted (the same full-run fit as `test_full_suite.py`, on a self-selected epoch).
+- 2026-11-11 — (main) `tests/test_full_suite.py` (the Phase 1 fixture) deprecated and deleted (human ruling): the per-role live cells and end-to-end live runs cover it.

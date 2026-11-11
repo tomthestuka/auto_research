@@ -441,17 +441,17 @@ generalised and corrected.
   absent is dropped. Every tool call's output text is itself a receipt, and so is every product
   the call declares (a file it returns under `products`, inside the call's own folder
   `<unit workdir>/products/<fn>/<call id>/`; user ruling 2026-11-04: only opt-in output is minted,
-  an obs-db write is recorded by `obsdb_catalog`, a scratch file by nothing; figures and outputs
+  a store write is named by the store's own records (below), a scratch file by nothing; figures and outputs
   land in the call's own folder, so a file name never collides across calls), every page fetched, every paper opened (the receipt is the PDF itself;
   a paper value is *attributed* with a locator, never text-matched, §13), every file a human sends,
   and every task a unit is handed (source `input`). A human's text is a nudge and mints nothing.
 - **Evidence vs record** (human ruling 2026-09-25): a receipt is evidence only when
-  `is_evidence` says so — its producer is a toolkit tool (`research_toolkit.<pkg>.<tool>`, also
-  for a toolkit tool the lead runs in-process), it is a `commit` (minted by the runtime when a
+  `is_evidence` says so — its producer is a toolkit tool (`<toolkit>.<pkg>.<tool>` of a declared
+  toolkit), it is a `commit` (minted by the runtime when a
   `submit_for_review` commits: tool, SHA, branch, submissions used), a paper, or the request. Every
   other receipt is the record of where a role looked: citing one is refused and names what it is
   ("a file you read", "a web page", "shell output", "a task brief", "a tool brief" — a locked
-  `ToolSpec`, produced by `toolspec`), and in scope it grounds
+  `ToolSpec`, produced by `toolspec`; "a catalog listing" — the lead's `catalog_query`), and in scope it grounds
   nothing. Briefs (`follow_up`, `what_to_probe`, `tool_request`) are exempt from grounding and,
   dispatched, ground nothing downstream.
 - **Inputs and ancestry.** The files a call's arguments name are hashed before it runs (once per
@@ -470,6 +470,15 @@ generalised and corrected.
   reference or typed with its reason (recorded with the call, reachable as `<handle>#/$args/<name>`),
   paths and settings typed. Nothing compares a typed number's digits (the copy refusal was
   removed); a chosen value carries who chose it and why.
+- **Store objects** (step 0b, 2026-11-10; `store/DOCS.md`). An input or product that lives in a data
+  store is named by (store, bucket, key, version_id) plus the runtime's SHA-256, minted from the
+  store's own records — the call's version listing before and after (the bracket) and the gateway's
+  access log by the unit's keys — never from the tool. A `record` argument names an object; one
+  without a version is pinned to the latest before the call, and no agent's policy allows an unpinned
+  read. A read whose version an in-run call wrote links that receipt as a parent. A call's own flags
+  (`failed`, `undeclared_write`, `unverified`, `synthetic`) are stamped on the catalog product it
+  made, and every later read, in any run, derives them through the recipe's ancestry; only the
+  human's own login (`ar_human`) clears one.
 - **One store per run** (`ReceiptStore.for_run`), append-only, replayed on resume, so a handle
   means the same artifact everywhere. It lives beside the run's ledger, outside every role's
   allow-list, so no role can read another's evidence and re-mint it as its own. Each unit cites through a scoped view: its own receipts, the
@@ -560,16 +569,44 @@ listed for the co-lead; a `data("<name>")` test skipped in CI fails) and earlier
 (regression) → the provider-decorrelated co-lead review → `approve_edit`, one commit per tool on
 the branch. **Commit ⇔ gate ∧ review** ("gate" = the CI pipeline). Per-attempt base refs, gate-entry reset of a coder's own commit,
 failure reset with a saved patch, submission snapshots for resume. A committed tool reloads the
-registry and reruns the workers.
+registry and reruns the workers. **The CI pipeline's store** (step 0b, `store/ci.py`): a tree with a
+store tool gets a fresh throwaway store per test run (versitygw + Postgres in temporary folders,
+reached from the network-denied jail through a socket folder; producer and reader keys; nothing
+carried between runs); the brief's validation records are copied in from the real store first
+(`layer_b.validation_data`); a test stages inputs only through its seed channel (a data set's
+files, or synthetic products stamped `synthetic`). Each store tool's call is bracketed and judged
+from the store's records (`layer_b.returns.store`: a store the manifest names in `writes`,
+create-once keys, the helper's five metadata entries, one complete `recipe.json` per recipe, recipe
+inputs covering the call's pinned reads); a final sweep fails any version written outside a call.
+A fault outside the change (a throwaway store that did not start, the real store not answering) is
+`infrastructure` (`GateReport.infrastructure`); one likely to pass consumes no submission (up to
+three per session).
 
 **Sandbox and reach.** One allow-list (`agent_fs_allow`, `agent_fs_readonly`) and a `bwrap` jail
 that is **on unconditionally** (ruling 2026-11-09: a launch without a working jail is refused): the
-analyst REPL, the shell, both author harnesses, environment builds, the CI pipeline's network-denied
-test run and every jailed one-shot toolkit call (`runner.call_in_jail`); `.git` bound read-only for
-the coder. The orchestrator process runs no toolkit code: manifests are read as data.
+analyst REPL, the shell, both author harnesses, environment builds and probes, and the CI pipeline's
+network-denied test run; `.git` bound read-only for the coder. The orchestrator process runs no
+toolkit code: manifests are read as data. No jail mounts a store's folders.
 The worker REPL and the builtin shell server run under one analysis jail policy (`jail.analysis_policy`;
 F20 closed 2026-10-06): toolkit read-only, a private `/tmp`, the init script sourced in a clean
-environment without credentials.
+environment without API credentials; a unit's own store keys reach its REPL only (a mode-0600 file in
+its private `/tmp`), never the shell server, and no store admin secret reaches any process acting for
+a model.
+
+**Data store** (step 0b, built 2026-11-10; `store/DOCS.md`; the live store is not yet migrated,
+S11). A store is S3 bytes plus a Postgres catalog, declared in `stores:`. The run's launch step,
+before the preflight, starts a local store (versitygw with its IAM, Postgres; they outlive the run),
+requires it ready, revokes the keys of this host's dead runs and reconciles it; the `store_*`
+preflight items only check. Each unit gets its own S3 user and Postgres login for the run
+(`store.keys`; the store's `roles`: analyst workers `producer`, every other unit `reader`), revoked
+at teardown. The catalog holds products by recipe hash (claim → commit or fail → verify), the
+"current" pointer per (bucket, kind, subject), credentials, flags and an append-only event log;
+agents write it only through SECURITY DEFINER functions. The reconciler (`store.reconcile`, the
+runtime's own login, at each launch) verifies committed products by hashing their bytes, adopts
+complete uploads whose claim expired, flags orphans and edits made on disk, and moves "current" to the
+newest qualifying product (verified, made by a declared toolkit's tool at a commit on its authoring
+branch, no flag on it or an ancestor). The human overrides a pointer or clears a flag as `ar_human`
+(`python -m auto_research.store`). The lead reads the catalog through `catalog_query` (navigation).
 
 **HITL and control.** Handler injection (`human_handler`), Telegram (rich messages, media both
 ways) and CLI connectors, `/stop` as cancellation with a shielded cleanup, `/steer`, `/status`,
@@ -577,7 +614,7 @@ checkpointer resume, detached runs (`run_research_nohup`).
 
 **Report and entry.** The reviewer writes plain text; `report/render.py` is the only LaTeX author;
 one `v<k>/` folder per report to the human; `run_research()`, `python -m auto_research`, the
-notebook. **Benchmarks:** `gate_bench` (seeded-defect catch rate), `author_bench` (authoring
+notebook. **Benchmarks** (parked since 2026-11-10, §13): `gate_bench` (seeded-defect catch rate), `author_bench` (authoring
 reliability per coder), `science_bench` (seat trees). **Live record:** PI questions #2, #7, #12
 accepted (run ledger: `tmp_handoff_closed.md` §1).
 
@@ -737,8 +774,22 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
     `test_data` maps a name to a folder, read through `TOOLKIT_DATA_<NAME>`);
   - briefing: the toolkit's root and package `README.md`s, read by roles like any file;
   - returns: `products` / `figures` under the call's `output` argument;
+  - stores (step 0b, 2026-11-10): an argument of kind `record` names a store object
+    `{store, bucket, key[, version_id]}`; a tool entry that stores products declares
+    `writes: [<store>]` and `algorithm_version` (text, bumped when what it stores changes; with the
+    tool, its settings and its input versions it forms the recipe whose hash names the product); a
+    tool reading a store without a `record` argument declares `reads: [<store>]`; every store named
+    is declared in `stores:` (refused at launch and by the CI pipeline's structural job);
+    - the toolkit's helper (`storelib` today: a support package outside the package glob, no
+      manifest) writes create-once under `<bucket>/<kind>/<subject>/<short hash>[.<n>]/`, each
+      object with five `x-amz-meta-*` entries and `recipe.json` written last; bucket, kind and
+      subject are opaque strings the toolkit chooses (its README gives their meaning);
+    - **only a manifest tool writes the store**, and **a toolkit tool calls library code only**,
+      never another manifest tool;
+    - a tool process receives its unit's keys as `AWS_*` / `PG*` and the store's name as
+      `TOOLKIT_STORE`; a store test reaches only the CI pipeline's throwaway store and stages inputs
+      through `TOOLKIT_STORE_SEED`;
   - the toolkit never imports `auto_research`.
-  The observation store (obs-db) is not yet in the contract: step 0b.
 
 ### 9.6 Execution, sandbox and environments per unit
 
@@ -890,7 +941,7 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
 | # | Status | What is being built | Checkpoint (what works after) |
 |---|---|---|---|
 | 0a | Done (2026-11-10) | **Toolkit decoupling — first** (user ruling 2026-11-04; plan rulings 2026-11-09). Every coupling between `auto_research` and `research_toolkit` is removed or read through **one toolkit contract** (name, packages, template package, test classes, authoring branch). The gate becomes the **CI pipeline**: named jobs, required ones held by the orchestration (minting checks included, so every handle resolves), test classes declared by the toolkit (fast, `slow`, `live`, `data("<name>")`, a data test skipped in CI fails the commit). The analysis environment moves into the toolkit as a derived `envs/` definition; `PFILES` is declared on its external. No new coupling lands meanwhile. | A minimal fixture toolkit loads, passes the CI pipeline and runs a tool whose result is minted as evidence; every seat's existing live test passes on the default config, built from module entry points; toolkit package names in `src/` only in the store code 0b replaces and the lead's catalog read (step 3). |
-| 0b | Todo | **The data store** (ruling 2026-11-09). Formalize the orchestration ↔ store connection and the store itself: roles the store defines and enforces (obs-db: `reader`, `recorder`, the recorder a separate writer process), held by a unit for the run; per-record fingerprint, health check, disposable copy for the CI pipeline, a synthetic namespace, the store's briefing; argument kinds `store` (location, runtime-filled) and `record` (a reference, runtime-fingerprinted); the brief's validation dataset generalised. | The obs-db is reached only through its store seam; a seat without the recorder role cannot write it; the fixture toolkit's store passes the same checks; no obs-db layout or ObsID rule left in `src/`. |
+| 0b | Todo | **The data store over the S3 contract** (rulings 2026-11-09/10/11, plan `tmp_phase3/0b/`; built 2026-11-10 as S0–S10, `store/DOCS.md`; the migration of the live store, S11, and the live cells, S13, remain). A store is S3 bytes plus a Postgres catalog: a local folder served by versitygw (with its IAM) and a Postgres the runtime starts, or a remote S3 with its catalog; the orchestration and the toolkit use only the S3 contract subset, and everything server-specific sits in two runtime adapters (key issuance: versitygw IAM users, AWS STS not built; read records: the gateway's access log, none remote). **A toolkit tool is the interface**: each agent is its own S3 user and Postgres login for the run, holding runtime-issued keys, and its role is its policy, enforced by the store and the catalog: `reader`, `producer`, the runtime's own `reconciler`, and the human's `ar_human` login in `owner`; all store I/O goes through tools. Reads are pinned to a version; writes are create-once under recipe-named keys `<bucket>/<kind>/<subject>/<short hash>/` closed by a `recipe.json` (bucket, kind and subject are opaque strings the toolkit chooses: no mission, ObsID or "raw" in `src/`); receipts carry (store, bucket, key, version_id) plus our SHA-256, minted from the store's records, never from the tool. `catalog.json` gives way to the Postgres catalog (products by recipe hash, claims, flags, "current" per (bucket, kind, subject), credentials, events); the reconciler verifies products and moves "current" automatically at each launch. The CI pipeline runs a throwaway store per test run on loopback, reached from its offline jail, seeded from declared data sets and the brief's validation records. | The obs-db is reached only through S3; a seat without the producer role cannot write it (refused by the store); the fixture toolkit's store passes the same checks; no obs-db layout or ObsID rule left in `src/`; the jails mount no store folder; the live store is migrated and healthy in preflight (S11, not yet run); every seat's live cell passes on it (S13). |
 | 0 | Todo | **Invariant freeze** — §9.3 collected as one deterministic test module over today's code, from the existing per-role tests. | Green on the current tree; it is the parity oracle for every later step. |
 | 1 | Todo | **One unit** — `_react` + channel + report tools + `turn_end` + the input validator (§9.3.9) as one unit; the four roles become definitions with validators; exceptions contained at the unit boundary (§9.3.8). | Each role's tests pass through the unit; one live cell per role; every unit's tool and model inputs pass the one input validator. |
 | 2 | Todo | **Toolkits per unit** + the generalised evidence predicate. | Two units with different toolkits in one run; a tool of an unregistered toolkit grounds nothing. |
@@ -936,7 +987,7 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
   `slack_bolt`, `python-telegram-bot`, Twilio ([P2 §9.8](CLAUDE_p2.md#98-human-feedback-channels-cli-vs-library)).
 - **Testing:** minimal `pytest` on deterministic parts only (DB ops, query parsing, schema
   validation, the Phase-2 gate). Do not assert subjective LLM behavior. End-to-end behavior
-  is exercised live via `test_full_suite.py` and its Phase-2 siblings.
+  is exercised by the per-role live cells and end-to-end live runs.
 - **Live API tests:** every module wrapping an external API leaves an opt-in real-API test
   stub, marked `live` (`pytestmark = pytest.mark.live`, or per test in a mixed module) and run only
   with `--live`. Spend is chosen by path and `-k`; a test that messages a person or takes a
@@ -1021,10 +1072,9 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 
 **Provenance**
 - **What receipts do not cover (2026-09-24):** (a) inputs a tool locates itself from an identifier
-  are not hashed, except an observation named by ObsID in a mission folder (2026-10-17: catalog
-  entry + folder listing, basis `obsdb`, or the folder's listing when uncatalogued; hashed before
-  the call runs, after it for the lead's in-process `data_catalog`; not linked to an in-run receipt
-  that wrote it); (b) grounding checks a number exists in a cited receipt, not its row/column;
+  are not hashed, except store objects (step 0b: every version a call reads in a store is taken from
+  the gateway's access log and hashed by the runtime, whatever argument led to it; the obs-db's
+  ObsID-folder hashing retired); (b) grounding checks a number exists in a cited receipt, not its row/column;
   (c) the static figure-shape scan is beaten by one indirection; the dynamic return check (G15)
   covers what the tests call; C-level writes and uncalled tools stay with the co-lead; (d) exemption shapes
   (years, Figure/Table numbers) are unchecked; (e) a toolkit tool writing model-chosen content could
@@ -1045,16 +1095,14 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   into a call with a reason are shown as its choice, never checked against any receipt.
 - **Input validator, accepted limits (rulings 2026-11-03):** a toolkit tool run on a file a peer's
   tool wrote yields the caller's own result (the peer's file is a recorded input, so ancestry holds);
-  left as is until evidence shows it is used to launder. The data catalog's source names come from
-  event-file headers no receipt hashes, and keep each header's spelling ("Cyg X-1" / "CYG X-1").
+  left as is until evidence shows it is used to launder. The toolkit's data catalog names each
+  source as its event file's header does (a pinned read its receipt records), keeping each header's
+  spelling ("Cyg X-1" / "CYG X-1").
 - **Argument kinds and one citing syntax, LIVE-TESTED 2026-11-03** (83 cells, `logs/dev/live-20261103d/`):
   lead, librarian and reviewer matrices, the worker kinds cell and a coder chain committed through
   the kind gate; every cell passes after test-side fixes, except the graph cell
   (`test_the_graph_holds_against_an_attacking_human`), which waits on the toolkit's kind edits
   being committed (preflight `toolkit_branch_clean`).
-- **Reduction products share one path per ObsID and selection** (parked): a re-reduction with other
-  settings replaces the file an earlier result points to (seen as `receipt.drift`, run
-  faraday-refs-20261026). Workers run one after another within a round; only a resumed seat overlaps.
 - **Numbers written as words are not grounded** (found live 2026-10-17): the number scan reads digits only. Ruling 2026-10-17: the check stays on digits; every role's prompt says to write numbers in digits.
 - **Report fields are checked for emptiness, not content** — accepted limit, every role (ruling
   2026-09-24); numbers stay grounded.
@@ -1147,23 +1195,17 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   `RunControl.unclosed_sessions` and closed again by the run's teardown, disconnect only (C2c). A
   hard kill can leave the coder's commit on a clean tree, which preflight (dirty-tree only) misses;
   bounded at 30 s on interrupt.
-- **The gate judges each output class (B3, 2026-11-04):** an opt-in product or figure lies inside the
-  call's output argument and is declared (`layer_b.returns.placed`, judged by the runtime's own
-  minting function `capture.admit_artifacts`, E1g); an opt-out write into an
-  obs-db is recorded through `obsdb_catalog` and leaves `healthcheck` passing
-  (`layer_b.returns.obsdb`; Q2: an in-place tag on a recorded file passes); scratch is unchecked. An
-  opt-out tool's tests run on a fixture obs-db under `tmp_path/<MISSION>/` seeded through
-  `obsdb_catalog.neutral`, the real obs-db being read-only to Layer B. Every other file a call
-  writes is scratch (bytecode, the home's caches, the temp area outside the test's `tmp_path`) or
-  fails `layer_b.returns.unclassified` (E1h, user rule 2026-11-04). Accepted limit: an
-  unrecorded file in a folder whose entry the call recorded passes (det2/det3 beside a recorded
-  det1). The recorder imports `obsdb_catalog` from the branch, which `structural.changes_allowed`
-  keeps untouched. A catalog left `regressed` passes (a re-acquire); every other unhealthy state
-  fails. A folder is an obs-db when it holds a `catalog.json` or bears a mission name the toolkit
-  knows. Real-data tests are marked `data("<name>")` and config `test_data` binds each named set
+- **The gate judges each output class (B3, 2026-11-04; the store class 2026-11-10):** an opt-in
+  product or figure lies inside the call's output argument and is declared (`layer_b.returns.placed`,
+  judged by the runtime's own minting function `capture.admit_artifacts`, E1g); a store write is
+  judged from the CI throwaway store's records (`layer_b.returns.store`, §8), never as a file;
+  scratch is unchecked. Every other file a call writes is scratch (bytecode, the home's caches, the
+  temp area outside the test's `tmp_path`) or fails `layer_b.returns.unclassified` (E1h, user rule
+  2026-11-04). The obs-db class, its fixture obs-db and the `obsdb_catalog` recorder retired with
+  step 0b. Real-data tests are marked `data("<name>")` and config `test_data` binds each named set
   read-only into the CI test run only (2026-11-09, replacing `gate_readonly_roots`); a data test skipped
-  in CI fails the commit, and in the coder's own jail it skips with its reason until role formalization
-  (step 3) gives the coder the CI pipeline's command.
+  in CI fails the commit. In the coder's own jail a data test and a store test (no `TOOLKIT_STORE`)
+  skip with their reason until role formalization (step 3) gives the coder the CI pipeline's command.
 - **The CI pipeline runs the toolkit's earlier fast tests (2026-11-04, user rule):** after the change's
   own tests, the `regression` job runs every earlier test of the toolkit's fast class (contract
   `test_classes.fast`, today `not slow and not live`), each package's in its environment, once and
@@ -1200,6 +1242,24 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   a decimal after an exempt ordinal is scanned (closed 2026-11-03); `env_untested` is visible only to the calling
   worker; a shell-written file passed to a toolkit reader can yield evidence.
 
+**Data store** (step 0b; full list of accepted limits in `store/DOCS.md`, each section's Residuals)
+- **The live store is not yet migrated** (S11, ruled 2026-11-11: the existing tree ingested through
+  the gateway into a fresh `/xray02/fzhou_db/`, `fzhou_obsdb` kept until verified): the configured
+  folders do not exist, so a live launch fails `store_config`/`store_servers` until then.
+- **Accepted residuals (2026-11-10):** gateway, runtime and human run as one Unix user, so the
+  objects folder stays writable outside the gateway (no jail mounts it; the reconciler's cheap check,
+  size and LastModified, misses an edit that keeps both until a checksum-validating read); the
+  runtime's admin role is the catalog's superuser and could act as the human (`ar_human` and the
+  authenticated-login checks separate the record, not the power); S3 keys have no expiry (revoked at
+  run end, dead runs of this host swept at launch, Postgres logins end after 7 days); a process
+  outliving its call writes into the next call's window; one store per CI run, and a nested
+  read-only manifest tool call is not detected; "current" moves only at a launch's reconcile, so a
+  run's new products become current at the next launch; the remote kind has no key adapter
+  (`aws_sts` refuses) and no read records (every listed change goes to the call).
+- **`xspec_utils/lib` diverges from its mirrored source** (S8, 2026-11-10): the toolkit's
+  `xspec_utils/sync_from_src.sh` copies `/data/fzhou/XSPEC/Cyg_X-1/lib` over it and would revert
+  the step-0b edits; run it only after porting them to the source.
+
 **Providers**
 - **Gemini parts captured twice** (`google.py`, 7 → 12) and replayed; `thought_signature` capture
   [I8] not live-verified — ruling 2026-09-12: Google is not an active seat, record only.
@@ -1223,6 +1283,10 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   [I14]; `$ref` under `allOf`/`oneOf`/`additionalProperties` unmeasured [I20].
 
 **Benchmarks**
+- **Benchmarks parked** (human ruling 2026-11-10): `gate_bench`, `author_bench` and `science_bench`
+  are not collected (`benchmarks/conftest.py` `collect_ignore_glob`): their briefs name the retired
+  observation fields and `config/observations.yaml`. They move to store records at the next rerun,
+  a new baseline not comparable with the published numbers.
 - **gate_bench pruning cache leak** — 20 pruned entries in swap batches from 2026-08-26 carried
   `.pytest_cache` naming the broken test; confirmed no agent consulted it; ruling: numbers
   stand, builder fixed 2026-09-03.
@@ -1359,3 +1423,15 @@ Compacted 2026-10-19 (every entry); detail in git history.
   `run_research` with a real librarian), worker (`test_live_ref_chain.py` rewritten on today's `xspec_utils`, test
   data mounted read-only for that test only), coder mechanism cells and the pressure cell (pin → toolkit main
   45348d8) pass. §13: XSPEC session tools carry no ancestry (accepted; XSPEC to be retired, user ruling).
+- 2026-11-10 — §9.10 row 0b rewritten for the S3 contract (user rulings 2026-11-10, plan `tmp_phase3/0b/`): local folder served as S3 by a runtime-started gateway or a remote S3; a tool is the interface; one S3 user per agent with its role as policy; pinned reads, receipts from the store's records; `catalog.json` retired; server-specific code in two adapters.
+- 2026-11-11 — **Step 0b built (S0–S10), docs synced (S12)**; S11 (migration) and S13 (live cells) remain, the row
+  stays Todo. §7: store objects named by (store, bucket, key, version_id) + the runtime's SHA-256 from the store's
+  records; flags stamped on catalog products and derived through ancestry; evidence predicate names a declared
+  toolkit (no in-process lead tool); "a catalog listing". §8: the CI pipeline's store, the data store paragraph,
+  `runner.call_in_jail` gone, store keys in the jail line, benchmarks parked. §9.5: the contract's store keys
+  (`record`, `writes`, `reads`, `algorithm_version`, the helper, only a manifest tool writes the store). §9.10 row 0b
+  matches the build (reader/producer/reconciler + `ar_human`, Postgres catalog, domain-neutral layout). §13: (a)
+  store reads; data-catalog source names; "Reduction products share one path" closed (per-call output folders and
+  recipe-named create-once keys); gate output classes without the obs-db; new Data store group (not yet migrated,
+  accepted residuals, `sync_from_src.sh`); benchmarks parked.
+- 2026-11-11 — §10: `tests/test_full_suite.py` (Phase 1 fixture) deprecated and deleted (human ruling); end-to-end behaviour is exercised by the per-role live cells and end-to-end live runs.

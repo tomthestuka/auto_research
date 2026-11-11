@@ -1,7 +1,7 @@
 """Where the project's configuration lives — one answer, resolved when it is asked for.
 
-Every configured fact about a run comes from four YAML files: the orchestration caps and paths,
-the model roles, the observation-database location, and the code-gate scan lists. Until now each
+Every configured fact about a run comes from four YAML files: the orchestration caps, paths and
+data stores, the model roles, what each model takes, and the code-gate scan lists. Until now each
 consumer computed their location itself, relative to its own source file, so the configuration
 directory was not a concept the code had — it was a coincidence that eleven modules agreed. That
 made "run this pipeline against a different configuration" inexpressible: six independent readers
@@ -33,8 +33,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-#: Set this to a directory holding ``orchestration.yaml``, ``models.yaml``, ``observations.yaml``
-#: and ``code_gate.yaml`` to configure a process against it instead of the repository's own.
+#: Set this to a directory holding ``orchestration.yaml``, ``models.yaml`` and ``code_gate.yaml``
+#: to configure a process against it instead of the repository's own.
 CONFIG_DIR_ENV = "AUTO_RESEARCH_CONFIG_DIR"
 
 _REPO_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
@@ -66,11 +66,6 @@ def models_yaml() -> Path:
     return config_dir() / "models.yaml"
 
 
-def observations_yaml() -> Path:
-    """Where the observation database is."""
-    return config_dir() / "observations.yaml"
-
-
 def code_gate_yaml() -> Path:
     """The mergeability gate's scan lists."""
     return config_dir() / "code_gate.yaml"
@@ -87,7 +82,6 @@ __all__ = [
     "config_dir",
     "model_capabilities_yaml",
     "models_yaml",
-    "observations_yaml",
     "orchestration_yaml",
     "repo_config_dir",
 ]

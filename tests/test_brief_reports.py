@@ -299,7 +299,8 @@ def test_a_brief_is_filed_as_its_document_reads_it_back(tmp_path):
     assert not cycle.briefs, "nothing was filed"
 
     good = {**_link(0), "notes": "  spaced  ",
-            "validation_data": [{"mission": "Cyg X-1", "obsid": "lit-2024"}]}
+            "validation_data": [{"store": "db", "bucket": "data", "key": "kind/subj ect/1a2b3c4d/x.dat",
+                                 "version_id": "v1"}]}
     filed = asyncio.run(provider.execute(AUTHOR_CHAIN_TOOL, {"first_link": good, "additional_links": []}))
     assert not filed.is_error and cycle.briefs["spec1"].value.notes == "spaced"
     before = cycle.briefs["spec1"].value.model_dump(exclude={"notes"})
@@ -308,7 +309,7 @@ def test_a_brief_is_filed_as_its_document_reads_it_back(tmp_path):
     assert not edited.is_error, edited.text
     after = cycle.briefs["spec1"].value
     assert after.notes == "quiet" and after.model_dump(exclude={"notes"}) == before
-    assert after.validation_data[0].mission == "Cyg X-1"
+    assert after.validation_data[0].key == "kind/subj ect/1a2b3c4d/x.dat"
 
 
 def test_a_brief_is_validated_before_its_submission(tmp_path, monkeypatch):

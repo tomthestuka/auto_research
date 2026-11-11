@@ -216,6 +216,11 @@ class CodexBackend:
         # Claude harness, which starts from the analyst init script's rebuilt env), so what is set
         # here is an overlay: the analyst science stack, the vendor key, the escalation token.
         env = dict(self._env) if self._env else dict(os.environ)
+        # The SDK starts the child from this process's os.environ overlaid with ``env``, so every store
+        # admin secret is named here with an empty value: the author never holds one.
+        from auto_research.store.config import admin_env_names
+
+        env.update({name: "" for name in admin_env_names()})
         # The harness authenticates from the vendor key named on the coder member; the SDK
         # resolves it inside the child, so it has to be present in the child's environment.
         if self._key_env:

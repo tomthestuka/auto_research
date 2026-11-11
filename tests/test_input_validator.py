@@ -2,7 +2,7 @@
 chosen values behind their call's handle (user rulings 2026-11-03; no LLM).
 
 Drives the production entry points — ``ToolkitRegistry``, ``check_toolkit_manifests``,
-``SandboxToolProvider.execute``, ``execute_data_catalog``, ``check_structural``, the report document
+``SandboxToolProvider.execute``, ``check_structural``, the report document
 parser, ``check_bindings`` and ``render_html``'s value popover; only the sandbox's tool process is
 a fake.
 """
@@ -42,7 +42,6 @@ def _pinned(monkeypatch, tmp_path):
     from auto_research.sandbox import fs_guard
 
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
-    monkeypatch.setattr(react, "_observation_path_args", lambda: {})
 
 
 def _tool(tmp_path):
@@ -71,12 +70,12 @@ def _run(tools, kind, args):
 # -- the registry --------------------------------------------------------------------------------
 
 
-def _toolkit(root: Path, properties: dict, required=()) -> Path:
+def _toolkit(root: Path, properties: dict, required=(), **entry) -> Path:
     pkg = root / "demo_utils"
     (pkg / "skills").mkdir(parents=True)
     manifest = {"research_toolkit.demo_utils.fit": {
         "module": "demo_utils.lib", "fn": "fit", "description": "Fit a demo model.",
-        "args_schema": {"type": "object", "properties": properties, "required": list(required)}}}
+        "args_schema": {"type": "object", "properties": properties, "required": list(required)}, **entry}}
     (pkg / "skills" / "__init__.py").write_text(f"TOOL_MANIFEST = {manifest!r}\n")
     (pkg / "__init__.py").write_text("from demo_utils.skills import TOOL_MANIFEST\n")
     return root
@@ -110,6 +109,45 @@ def test_launch_refuses_a_manifest_the_validator_cannot_check(tmp_path, prop, re
     assert any(said in e for e in registry.manifest_errors), registry.manifest_errors
     with pytest.raises(RuntimeError, match="input validator cannot check"):
         check_toolkit_manifests(root)
+
+
+@pytest.mark.parametrize("prop, entry, said", [
+    # Step 0b: a tool names records, never a store's location (the runtime's old fill-ins).
+    ({"location": {"kind": "store"}}, {}, "argument location names a store's location"),
+    ({"x": {"kind": "store"}}, {}, "argument x names a store's location"),
+    ({"x": {"kind": "record", "default": {"store": "db", "bucket": "ixpe", "key": "k"}}}, {}, "record argument x declares a default"),
+    ({}, {"writes": "db", "algorithm_version": "1"}, "writes is \"db\"; list the names of the stores"),
+    ({}, {"writes": [], "algorithm_version": "1"}, "writes is []"),
+    ({}, {"writes": ["db", "db"], "algorithm_version": "1"}, "each once"),
+    ({}, {"writes": ["db", " "], "algorithm_version": "1"}, "list the names of the stores"),
+    ({}, {"writes": ["db"]}, "declares writes and no algorithm_version"),
+    ({}, {"algorithm_version": 2}, "algorithm_version is 2; write it as text"),
+    ({}, {"writes": ["db"], "algorithm_version": " "}, "write it as text"),
+])
+def test_launch_refuses_a_store_location_and_an_unversioned_writer(tmp_path, prop, entry, said, _fresh_demo_modules):
+    root = _toolkit(tmp_path / "tk", prop, (), **entry)
+    registry = ToolkitRegistry(root)
+    registry.load()
+    assert any(said in e for e in registry.manifest_errors), registry.manifest_errors
+    if "location" in said:  # the refusal names the replacement
+        assert any("declare it as kind record" in e for e in registry.manifest_errors)
+    with pytest.raises(RuntimeError, match="input validator cannot check"):
+        check_toolkit_manifests(root)
+
+
+def test_a_record_reader_and_a_versioned_writer_load_and_say_how_a_record_arrives(tmp_path, _fresh_demo_modules):
+    root = _toolkit(tmp_path / "tk", {"events": {"kind": "record", "type": "object", "description": "Events."}},
+                    ["events"], writes=["db"], algorithm_version="2")
+    check_toolkit_manifests(root)
+    registry = ToolkitRegistry(root)
+    tool = "research_toolkit.demo_utils.fit"
+    assert registry.writes(tool) == ["db"] and registry.algorithm_version(tool) == "2"
+    [definition] = registry.tool_definitions()
+    events = definition["input_schema"]["properties"]["events"]
+    assert set(events) == {"description"}  # one record or a list of them: no type, no runtime key
+    assert events["description"].startswith('Events. Pass {"store": "<store name>", "bucket": "<bucket>", "key": "<object key>"}')
+    plain = ToolkitRegistry(_toolkit(tmp_path / "tk2", {"x": {"kind": "setting"}}))
+    assert plain.writes(tool) == [] and plain.algorithm_version(tool) is None
 
 
 def test_the_provider_schema_says_the_runtime_places_each_output(tmp_path, _fresh_demo_modules):
@@ -195,11 +233,9 @@ def test_the_provider_schema_states_each_kind_and_carries_no_runtime_key(tmp_pat
     assert props["label"] == {"type": "string"}
     assert '"reason": "<why this value>"' in definition["description"]
     assert provider_schema(None) == {"type": "object", "properties": {}}
-    # A default on any kind is said, never dropped silently; a typed-only path offers no reference.
-    other = provider_schema({"properties": {"mode": {"kind": "setting", "type": "string", "default": "fast"},
-                                            "where": {"kind": "path", "type": "string"}}}, references=False)
+    # A default on any kind is said, never dropped silently.
+    other = provider_schema({"properties": {"mode": {"kind": "setting", "type": "string", "default": "fast"}}})
     assert other["properties"]["mode"] == {"type": "string", "description": 'Default: "fast".'}
-    assert other["properties"]["where"] == {"type": "string", "description": "A path as text."}
 
 
 @pytest.mark.parametrize("schema, said", [
@@ -223,22 +259,18 @@ def test_a_malformed_manifest_is_a_problem_never_a_crash(tmp_path, schema, said,
 
 def test_a_disabled_tool_never_blocks_launch(tmp_path, monkeypatch, _fresh_demo_modules):
     import auto_research.graph.runtime as runtime
-    import auto_research.sandbox.merge_flow as merge_flow
+    from auto_research import toolkit_contract
 
     root = _toolkit(tmp_path / "tk", {"x": {"type": "number"}})
-    monkeypatch.setattr(merge_flow, "_resolve_toolkit_root", lambda: root)
-    monkeypatch.setattr(runtime, "load_orchestration_config",
-                        lambda path=None: {"disabled_tools": ["research_toolkit.demo_utils.fit"]})
+    orch = {"toolkits": [{"name": "research_toolkit", "root": str(root), "template_package": "demo_utils",
+                          "authoring_branch": "ai", "default_env": "analysis"}],
+            "disabled_tools": ["research_toolkit.demo_utils.fit"]}
+    toolkit_contract.bind(orch)  # the launch checks the demo toolkit (unbound after the test)
+    monkeypatch.setattr(runtime, "load_orchestration_config", lambda path=None: orch)
     check_toolkit_manifests()
-
-
-def test_the_leads_catalog_definition_carries_no_runtime_key_and_offers_no_reference():
-    defn = react.data_catalog_tool_def()
-    if defn is None:
-        pytest.skip("catalog_utils' manifest is not readable in the configured toolkit")
-    props = defn["input_schema"]["properties"]
-    assert all("kind" not in p and "default" not in p for p in props.values())
-    assert "$ref" not in json.dumps(defn)
+    orch["disabled_tools"] = []
+    with pytest.raises(RuntimeError, match="argument x declares no kind"):
+        check_toolkit_manifests()
 
 
 # -- the call path -------------------------------------------------------------------------------
@@ -323,20 +355,6 @@ def test_a_chosen_value_lives_behind_its_calls_handle(tmp_path):
     assert out.is_error and "took no argument 'nope'" in out.text and "grid" in out.text
 
 
-def test_the_leads_catalog_call_passes_the_same_validator(tmp_path, monkeypatch):
-    calls = []
-    spec = {"args_schema": {"properties": {"obs_db_path": {"kind": "path"}, "min_level": {"kind": "setting"},
-                                           "cut": {"kind": "parameter"}}, "required": ["cut"]}}
-    monkeypatch.setattr(react, "_toolkit_clean_head", lambda: "head")
-    monkeypatch.setattr(react, "_catalog_spec", lambda: spec)
-    monkeypatch.setattr(react, "_jailed_catalog_read",
-                        lambda spec, p, min_level, **_: calls.append(p) or "ok")
-    out = asyncio.run(react.execute_data_catalog({"obs_db_path": "/x", "cut": 2.0}))
-    assert out.is_error and "argument cut is a parameter" in out.text and calls == []
-    out = asyncio.run(react.execute_data_catalog({"obs_db_path": "/x", "cut": {"value": 2.0, "reason": "r"}}))
-    assert not out.is_error and calls == ["/x"]
-
-
 # -- the report side -----------------------------------------------------------------------------
 
 
@@ -382,6 +400,18 @@ def test_the_gate_fails_a_tool_whose_argument_declares_no_kind(tmp_path):
     missing = manifest({"type": "number"})
     assert not missing.passed and "argument x declares no kind" in missing.detail
     assert manifest({"kind": "parameter", "default": 1.0}).passed
+    assert manifest({"kind": "record"}).passed
+
+    # Step 0b: a writing tool declares its algorithm version, and a store location is refused.
+    (pkg / "skills" / "__init__.py").write_text(textwrap.dedent('''\
+        TOOL_MANIFEST = {"research_toolkit.demo_utils.my_tool": {
+            "module": "demo_utils.lib.demo_help", "fn": "my_tool", "description": "d", "writes": ["db"],
+            "args_schema": {"properties": {"location": {"kind": "store"}}}}}
+        '''))
+    check = {c.name: c for c in check_structural(repo, _spec(), collect_targets(repo))}["structural.argument_kinds"]
+    assert not check.passed
+    assert "declares writes and no algorithm_version" in check.detail
+    assert "argument location names a store's location" in check.detail and "kind record" in check.detail
 
 
 def test_data_takes_only_what_a_tool_returned_and_args_reach_only_chosen_or_passed_values(tmp_path):

@@ -591,3 +591,4 @@ Compacted 2026-09-24 and 2026-10-19 (every entry); detail in git history.
   `observability.costs.token_rates_for`.
 - 2026-11-04 — Z1d: a trial's config dir carries `model_capabilities.yaml` byte for byte
   (`environment.py`); `Seat.capability` reads it through `media_capability`.
+- 2026-11-10 — PARKED (human ruling, Phase 3 step 0b): the benchmark's tests are not collected (`benchmarks/conftest.py` `collect_ignore_glob`) until its briefs move from the retired observation fields and `config/observations.yaml` to store records, at the next rerun (a new baseline, not comparable with the published numbers).

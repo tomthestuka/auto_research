@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from datetime import datetime
 
 import pytest
@@ -420,40 +419,49 @@ def _worker_reports(shape: str, store=None, work=None):
     ]
 
 
-def _wired_lead(shape: str):
+async def _wired_lead(monitor, control, keys):
     """A real analyst lead, wired by the run path's own seams and nothing else: the run's workspace
-    (`create_run_workspace`), `attach_lead_runtime` with production's web source, and the quick
-    channel (`attach_channel`). Returns ``(lead, store, monitor, work)``; ``work`` is a worker's
-    folder of the run, where a seeded worker file lives as it would in a run."""
+    (`create_run_workspace`), `wire_lead` (run_research's lead wiring: its own catalog login issued
+    into the run's ``keys``, production's web source and retrieval), and the quick channel
+    (`attach_channel`). Returns ``(lead, store, work)``; ``work`` is a worker's folder of the run,
+    where a seeded worker file lives as it would in a run."""
     from auto_research.agents.prompts import load_prompt
     from auto_research.agents.roles import AnalystLeadAgent
     from auto_research.env import toolkit_root as configured_toolkit_root
-    from auto_research.graph.runtime import attach_channel, attach_lead_runtime
-    from auto_research.monitor import RunMonitor
+    from auto_research.graph.runtime import attach_channel, wire_lead
     from auto_research.provenance import ReceiptStore
-    from auto_research.run_control import RunControl
     from auto_research.sandbox.workspace import create_run_workspace, run_dir
-    from auto_research.sources import WebSource
+
+    run_id = monitor.run_id
+    folders = create_run_workspace(run_id, ["analyst_lead", "analyst_worker_0", "analyst_worker_1"])
+    lead = AnalystLeadAgent(prompt=load_prompt("analyst_lead"), monitor=monitor)
+    await wire_lead(lead, run_id=run_id, toolkit_root=configured_toolkit_root(), keys=keys,
+                    run_monitor=monitor, run_control=control)
+    attach_channel((lead,), run_id=run_id, run_control=control, monitor=monitor)
+    return lead, ReceiptStore.for_run(run_dir(run_id)), folders["analyst_worker_0"]
+
+
+def _launched(shape: str, state: dict, body):
+    """Run ``await body(lead, store, monitor, work)`` in one task with the cost meter installed, as
+    `run_research` does, inside the run's store launch step (`tests/live_store.run_stores`: the
+    real store, made by migration item S11), the lead wired by `_wired_lead`.
+    ``state`` gets the monitor and the store as soon as they exist (for `_note_run`)."""
+    from auto_research.monitor import RunMonitor
+    from auto_research.observability.costs import install_cost_meter
+    from auto_research.run_control import RunControl
+    from tests.live_store import run_stores
 
     # The ledger lives under logs/dev, not tmp_path: pytest prunes its numbered tmpdirs.
     monitor = RunMonitor(chatter=3, jsonl_path=dev_log_path("turn-end-shapes", f"{shape}_monitor", ".jsonl"))
-    run_id = monitor.run_id
-    folders = create_run_workspace(run_id, ["analyst_lead", "analyst_worker_0", "analyst_worker_1"])
     control = RunControl()
-    lead = AnalystLeadAgent(prompt=load_prompt("analyst_lead"), monitor=monitor)
-    attach_lead_runtime(lead, run_id=run_id, toolkit_root=configured_toolkit_root(),
-                        run_monitor=monitor, run_control=control, web_source=WebSource())
-    attach_channel((lead,), run_id=run_id, run_control=control, monitor=monitor)
-    return lead, ReceiptStore.for_run(run_dir(run_id)), monitor, folders["analyst_worker_0"]
-
-
-def _metered(monitor, coroutine_fn):
-    """Run ``coroutine_fn()`` with the cost meter installed in its own task, as `run_research` does."""
-    from auto_research.observability.costs import install_cost_meter
+    state.update(monitor=monitor)
 
     async def main():
         monitor.cost_meter = install_cost_meter(run_id=monitor.run_id, monitor=monitor)
-        return await coroutine_fn()
+        async with run_stores(monitor.run_id, monitor, control) as keys:
+            lead, store, work = await _wired_lead(monitor, control, keys)
+            state.update(store=store)
+            return await body(lead, store, monitor, work)
 
     return asyncio.run(main())
 
@@ -471,10 +479,7 @@ def _drive_shape(shape: str, tmp_path, *, rounds_left=2, seed_state=None, instru
     seat = _seat_for(shape)
     state: dict = {}
 
-    def _run():
-        lead, store, monitor, work = _wired_lead(shape)
-        state.update(monitor=monitor, store=store)
-
+    async def body(lead, store, monitor, work):
         # Capture every turn_end refusal the harness issued, which is what these cells assert on.
         inner = lead.tools.execute
 
@@ -498,8 +503,10 @@ def _drive_shape(shape: str, tmp_path, *, rounds_left=2, seed_state=None, instru
             instructions=f"{instructions}\n\n{attack}",
         )
         reports = _worker_reports(shape, store, work)
-        return _metered(monitor, lambda: lead.run_cycle(
-            task, reports, sources=["w0", "w1"], rounds_left=rounds_left)), lead.model
+        return await lead.run_cycle(task, reports, sources=["w0", "w1"], rounds_left=rounds_left), lead.model
+
+    def _run():
+        return _launched(shape, state, body)
 
     try:
         if seat is None:
@@ -1025,35 +1032,39 @@ def _drive_escape(shape: str, tmp_path, instructions: str, *, cap: int = 4):
     from auto_research.agents.roles import ReactBudgetExhausted
     from auto_research.schemas import AnalysisTask
 
-    lead, store, monitor, work = _wired_lead(shape)
     calls = {"n": 0, "last": []}
-    inner = lead.model
+    state: dict = {}
 
-    class _Counting:  # observes the model calls; the provider, the loop and the tools are production's
-        config = getattr(inner, "config", None)
+    async def body(lead, store, monitor, work):
+        inner = lead.model
 
-        def __getattr__(self, name):
-            return getattr(inner, name)
+        class _Counting:  # observes the model calls; the provider, the loop and the tools are production's
+            config = getattr(inner, "config", None)
 
-        async def call(self, messages, **kwargs):
-            calls["n"] += 1
-            calls["last"] = list(messages)
-            return await inner.call(messages, **kwargs)
+            def __getattr__(self, name):
+                return getattr(inner, name)
 
-    lead.model = _Counting()
+            async def call(self, messages, **kwargs):
+                calls["n"] += 1
+                calls["last"] = list(messages)
+                return await inner.call(messages, **kwargs)
+
+        lead.model = _Counting()
+        return await lead.run_cycle(
+            task, _worker_reports(shape, store, work), sources=["w0", "w1"], rounds_left=1)
+
     saved = roles._react_loop_cap, roles._react_loop_absolute_cap
     roles._react_loop_cap, roles._react_loop_absolute_cap = (lambda: cap), (lambda: cap + 2)
     task = AnalysisTask(question="Summarise what the analysts established about the IXPE polarization.",
                         instructions=instructions)
     try:
-        outcome = _metered(monitor, lambda: lead.run_cycle(
-            task, _worker_reports(shape, store, work), sources=["w0", "w1"], rounds_left=1))
+        outcome = _launched(shape, state, body)
         filed = outcome.filed if outcome.report is not None else None
     except ReactBudgetExhausted:
         filed = None
     finally:
         roles._react_loop_cap, roles._react_loop_absolute_cap = saved
-        _note_run(shape, {"monitor": monitor, "store": store})
+        _note_run(shape, state)
     return calls["last"], calls["n"], filed
 
 

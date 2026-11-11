@@ -1,15 +1,16 @@
-"""Turning one tool call into receipts: its output, the figures and products it declared, what it read.
+"""Turning one tool call into receipts: its output, the figures and products it declared, what it read
+and what it wrote in a store.
 
 The tool providers call :func:`inputs_before` just before a call runs and :func:`receipt_call` just
-after. Nothing here trusts what a tool says about itself: hashes are computed over the bytes on
-disk, a figure or product whose file is missing is dropped (and said so), and a declared hash that
+after; what a call read and wrote in a store comes from the store's own records
+(``store.records``) and is handed to :func:`receipt_call`. Nothing here trusts what a tool says
+about itself: hashes are computed over the bytes on disk, a figure or product whose file is missing is dropped (and said so), and a declared hash that
 disagrees with the file is overridden (and said so). Only what a tool declares is minted (user
 ruling 2026-11-04, opt-in output): a file it writes and does not declare is its own scratch.
 """
 
 from __future__ import annotations
 
-import functools
 import json
 import mimetypes
 import os
@@ -18,13 +19,12 @@ import subprocess
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 from auto_research.provenance.store import ReceiptStore
 from auto_research.toolkit_contract import is_toolkit_producer
-from auto_research.schemas.artifacts import InputFile, Receipt
+from auto_research.schemas.artifacts import InputFile, Receipt, StoreObject
 from auto_research.schemas.figures import FigureRef
 
 #: The most products one call mints; a declared product past it is named in a note.
@@ -77,6 +77,10 @@ class CallReceipts:
     figures: list[FigureRef] = field(default_factory=list)
     products: list[Receipt] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: The flags this call earned itself (``failed``, its own store records' flags, a read whose bytes
+    #: differ from what its in-run writer recorded): what is stamped on its products in the store's
+    #: catalog. The receipt's ``flags`` add what it carried from its inputs and parents.
+    own_flags: frozenset[str] = frozenset()
 
     def header(self) -> str:
         """The line the model sees first, naming what it can cite from this call."""
@@ -117,30 +121,6 @@ def _stat(path: Path) -> tuple[int, int] | None:
     return (st.st_size, st.st_mtime_ns)
 
 
-def _named_strings(args: Mapping[str, Any], skip: set[str]) -> list[str]:
-    """Every string an argument holds, through lists and dicts (keys and values), ``skip`` keys
-    excepted: ObsID candidates."""
-    found: list[str] = []
-
-    def visit(value: Any) -> None:
-        if isinstance(value, str) and value.strip():
-            found.append(value.strip())
-        elif isinstance(value, int) and not isinstance(value, bool):
-            found.append(str(value))  # a NuSTAR ObsID passed as a number
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                visit(item)
-        elif isinstance(value, Mapping):
-            for key, item in value.items():
-                visit(key)
-                visit(item)
-
-    for key, value in args.items():
-        if key not in skip:
-            visit(value)
-    return found
-
-
 def _named_paths(args: Mapping[str, Any], cwd: Path | None, skip: Iterable[str]) -> list[Path]:
     skip = set(skip)
     found: list[Path] = []
@@ -162,66 +142,12 @@ def _named_paths(args: Mapping[str, Any], cwd: Path | None, skip: Iterable[str])
 
 
 def inputs_before(
-    store: ReceiptStore, args: Mapping[str, Any], *, cwd: Path | None = None,
-    skip_keys: Iterable[str] = (), observation_paths: Mapping[str, Any] | None = None,
-    named_folders: Iterable[str] | None = None,
+    store: ReceiptStore, args: Mapping[str, Any], *, cwd: Path | None = None, skip_keys: Iterable[str] = (),
 ) -> CallInputs:
-    """Hash every existing path the arguments name (skipping ``skip_keys``: data roots, outputs),
-    and every observation they name by ObsID. For each mission folder in ``observation_paths``
-    (``{argument: folder}``; relative to ``cwd`` as the tool resolves it; ``named_folders``: the
-    arguments the caller wrote itself, default all), every string an argument
-    holds — nested in lists and dicts too (``epoch={"IXPE": ["01002901"]}``) — that the folder's
-    catalog lists is an ``obsdb`` input; one naming a subfolder the catalog does not list is that
-    folder's ``listing`` (so a ``synth…`` observation still flags its result). A folder the caller
-    named, with no observation named in it, records its ``catalog.json``."""
+    """Hash every existing file or folder the arguments name, before the call runs (skipping
+    ``skip_keys``: outputs, records). What a call reads in a store is recorded from the store's own
+    records after it ran (``store.records``), never from a path."""
     state = CallInputs(started_ns=call_started_ns())
-    from auto_research.observations import CATALOG_FILENAME, obsid_index
-    from auto_research.provenance.store import _catalog_entries
-
-    named = set(observation_paths or {}) if named_folders is None else set(named_folders)
-    folders: list[tuple[Path, bool, str]] = []
-    for key, value in sorted((observation_paths or {}).items()):
-        if isinstance(value, str) and value.strip():
-            folder = Path(value.strip())
-            try:
-                resolved = (folder if folder.is_absolute() or cwd is None else cwd / folder).resolve()
-            except (OSError, ValueError):  # a NUL or a loop in a model-written path: nothing to record
-                continue
-            # The mission is the folder's name as given (a symlink resolves to another name).
-            folders.append((resolved, key in named, folder.name))
-    names = []
-    for raw in dict.fromkeys(_named_strings(args, set(observation_paths or {}))):
-        name = raw.removeprefix("./").rstrip("/")
-        if re.fullmatch(r"[A-Za-z0-9_.+-]+", name) and name not in (".", ".."):
-            names.append(name)
-    recorded: set[str] = set()
-    chosen: dict[Path, bool] = {}
-    missions: dict[Path, str] = {}
-    for folder, by_caller, mission in folders:
-        chosen[folder] = chosen.get(folder, False) or by_caller
-        missions.setdefault(folder, mission)
-    for folder, by_caller in chosen.items():
-        entries = _catalog_entries(folder / CATALOG_FILENAME)
-        tree = functools.cache(partial(obsid_index, folder, missions[folder]))  # walked once, if needed
-        held = False
-        for name in dict.fromkeys(names):
-            try:
-                entry = store.hash_obsdb_entry(folder, name, entries=entries, mission=missions[folder],
-                                               index=tree)
-            except Exception:  # noqa: BLE001 — an observation that cannot be hashed is left out (§9.3.8)
-                continue
-            if entry is not None and str(entry.path) not in recorded:
-                recorded.add(str(entry.path))
-                state.inputs.append(entry)
-                held = True
-        catalog = folder / CATALOG_FILENAME
-        if not held and by_caller and catalog.is_file():
-            # A call that names a mission folder itself and no observation in it reads the folder's
-            # catalog (`data_catalog`); a folder the runtime filled in is not something it read.
-            try:
-                state.inputs.append(store.hash_input(catalog))
-            except Exception:  # noqa: BLE001 — left out, never fatal (§9.3.8)
-                pass
     for path in _named_paths(args, cwd, skip_keys):
         if _stat(path) is None:
             continue
@@ -270,6 +196,11 @@ def receipt_call(
     call_id: str | None = None,
     products: Sequence[DeclaredProduct] = (),
     products_dir: Path | None = None,
+    reads: Sequence[InputFile] = (),
+    writes: Sequence[StoreObject] = (),
+    flags: Iterable[str] = (),
+    carried: Iterable[str] = (),
+    commit: Any = ...,
 ) -> CallReceipts:
     """Mint the call's result receipt and one receipt per figure and declared product.
 
@@ -292,18 +223,34 @@ def receipt_call(
     named on the result receipt (``returned_sha256``), which is what a ``$ref`` resolves against.
     ``call_id``: the id the caller allocated before the call ran (it names the call's own products
     folder, ``provenance.calls.resolve_call_args``); a fresh one when the caller allocated none.
+
+    ``reads``, ``writes``, ``flags``: what the call read and wrote in a store, from the store's own
+    records (``store.records.StoreRecords.bracket``). Each object read joins the call's inputs,
+    linked to the in-run receipt that wrote that version when its bytes are the ones written (else
+    the call is marked ``unverified``, with a note); ``writes`` is named on the result receipt;
+    ``flags`` (the call's own) and ``carried`` (from the products its reads descend from) mark every
+    receipt the call mints; ``CallReceipts.own_flags`` keeps the call's own apart.
+
+    ``commit``: the toolkit commit the process that ran the call imported (a REPL's boot commit,
+    ``PersistentSandbox.call_commit``, the value its keyed tools were handed); omitted, the toolkit's
+    HEAD now (:func:`toolkit_commit`).
     """
     reachable = reachable or _allow_listed
     state = state or CallInputs(started_ns=call_started_ns())
     call_id = call_id or uuid.uuid4().hex
-    commit = toolkit_commit(toolkit_root)
+    own = set(flags) | ({"failed"} if failed else set())
+    linked, link_notes = _linked_reads(store, reads)
+    if link_notes:
+        own.add("unverified")
+    marks = own | set(carried)
+    commit = toolkit_commit(toolkit_root) if commit is ... else commit
     common = dict(
         source=source, produced_by=produced_by, call_id=call_id, toolkit_commit=commit,
         # The root names where a toolkit tool lives; a harness call (the shell, a read) has none.
         toolkit_root=(Path(toolkit_root).resolve()
                       if commit is not None and is_toolkit_producer(produced_by) else None),
-        args=dict(args), inputs=state.inputs, failed=failed, env=env, env_default=env_default,
-        parents=list(parents),
+        args=dict(args), inputs=[*state.inputs, *linked], failed=failed, env=env, env_default=env_default,
+        parents=list(parents), flags=sorted(marks),
         **({"env_untested": True} if env_untested else {}),
     )
     extra = dict(fields or {})
@@ -315,8 +262,10 @@ def receipt_call(
         from auto_research.provenance.calls import canonical_args
 
         store.put_blob(canonical_args(dict(args)))
+    if writes:
+        extra["writes"] = list(writes)
     result = store.mint(kind=kind, data=text, **common, **extra)
-    out = CallReceipts(result=result)
+    out = CallReceipts(result=result, notes=link_notes, own_flags=frozenset(own))
 
     # One decision for both kinds, shared with the gate's return check (`admit_artifacts`).
     def joined(path: Path) -> Path:
@@ -349,6 +298,29 @@ def receipt_call(
             mime_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream", **common,
         ))
     return out
+
+
+def _linked_reads(store: ReceiptStore, reads: Sequence[InputFile]) -> tuple[list[InputFile], list[str]]:
+    """Each object read linked to the in-run receipt that wrote its version (its parent), when the
+    bytes read are the bytes written; a note per version whose bytes changed since it was written."""
+    linked: list[InputFile] = []
+    notes: list[str] = []
+    for item in reads:
+        obj = item.object
+        writer = None if obj is None else store.object_writer(obj.store, obj.bucket, obj.key, obj.version_id)
+        if writer is None:
+            linked.append(item)
+            continue
+        written = next(w for w in writer.writes if (w.store, w.bucket, w.key, w.version_id)
+                       == (obj.store, obj.bucket, obj.key, obj.version_id))
+        if written.sha256 is not None and written.sha256 != obj.sha256:
+            notes.append(f"{obj.store} {obj.bucket}/{obj.key} version {obj.version_id} differs from what "
+                         f"{writer.handle} wrote (written {written.sha256[:12]}, read {obj.sha256[:12]}): "
+                         "it was changed in the store's folder after it was written")
+            linked.append(item)
+            continue
+        linked.append(item.model_copy(update={"receipt": writer.handle}))
+    return linked, notes
 
 
 #: The action a worker has when its tool's product is dropped: the tool is the coding pipeline's.

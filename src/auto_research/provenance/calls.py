@@ -1,7 +1,6 @@
 """The arguments a toolkit call ran with, rebuilt from the run ledger.
 
-A worker's call runs with the model's arguments completed by the runtime (a configured mission
-folder, a figure path under the worker's folder, each output argument in the call's own folder,
+A worker's call runs with the model's arguments completed by the runtime (pinned record versions, a figure path under the worker's folder, each output argument in the call's own folder,
 the shell's folder and environment). The
 runtime's part is the call's *context*, recorded on its ``tool_result`` ledger line; the model's
 part is on its ``tool_call`` line. :func:`resolve_call_args` is the one statement of the
@@ -46,7 +45,9 @@ def resolve_call_args(arguments: Mapping[str, Any], context: Mapping[str, Any]) 
     ``agents.react.SandboxToolProvider._call_context``):
     - ``cwd``: filled when the model names no ``cwd`` (``bash_exec``);
     - ``shell_env``: the runtime's record alone; a model-supplied value is dropped first;
-    - ``observation_paths``: ``{argument: folder}``, filled when the model's value is empty;
+    - ``records``: ``{argument: pinned value}``, each ``record`` argument whose records the runtime
+      pinned to a version before the call (``provenance.inputs.record_pins``), in place of the
+      model's value;
     - ``defaults``: ``{parameter: value}`` a toolkit manifest declares, filled when the model
       leaves the argument out (``provenance.inputs.declared_defaults``);
     - ``figure_args`` + ``products_dir`` + ``fn``: each figure argument is placed in the call's own
@@ -70,9 +71,8 @@ def resolve_call_args(arguments: Mapping[str, Any], context: Mapping[str, Any]) 
         args.pop("shell_env", None)
         if context["shell_env"] is not None:
             args["shell_env"] = context["shell_env"]
-    for name, path in (context.get("observation_paths") or {}).items():
-        if not args.get(name):
-            args[name] = path
+    for name, pinned in (context.get("records") or {}).items():
+        args[name] = pinned
     for name, value in (context.get("defaults") or {}).items():
         if name not in args:
             args[name] = value

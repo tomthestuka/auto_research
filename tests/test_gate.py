@@ -71,7 +71,6 @@ def test_emptied_config_sections_scan_as_nothing_to_flag():
         "finding_vocabulary": None,
         "hard_fail_code_patterns": None,
         "finding_code_patterns": None,
-        "allowlist_obsid_tokens": None,
     }
     src = 'x = np.random.normal(0, 1)  # fake data for now\n'
     hard, findings = scan_python_source("lib/x.py", src, config=emptied)
@@ -96,22 +95,14 @@ def test_vocabulary_whole_word_avoids_collisions():
     assert hard == [], [c.detail for c in hard]
 
 
-def test_synth_obsid_line_is_allowlisted():
-    src = 'def test_g():\n    load("synth240611-abcdef")  # synthetic fixture\n    assert True\n'
-    hard, _ = scan_python_source("demo_utils/tests/test_x.py", src)
-    assert hard == [], [c.detail for c in hard]
-
-
 @pytest.mark.parametrize("rel", ["demo_utils/lib/x.py", "demo_utils/skills/x.py", "demo_utils/lib/tests/x.py",
-                                 "tests/x.py"])
-def test_a_synthetic_obsid_in_tool_code_is_scanned_like_any_line(rel):
-    """User ruling 2026-11-04: the ObsID exemption holds under a package's `tests/` only, where a
-    test builds its marked synthetic fixture; in a tool's own code the line is scanned."""
+                                 "demo_utils/tests/test_x.py", "tests/x.py"])
+def test_a_line_naming_a_marked_fixture_is_scanned_like_any_line(rel):
+    """Step 0b: the ObsID exemption is retired (synthetic data lives in a store's synthetic buckets),
+    so a line naming a marked fixture is scanned wherever it stands, a package's tests/ included."""
     src = 'def g():\n    return load("synth240611-abcdef")  # mock data for the fit\n'
     hard, _ = scan_python_source(rel, src)
     assert any("mock data" in c.detail for c in hard), [c.detail for c in hard]
-    tested, _ = scan_python_source("demo_utils/tests/test_x.py", src)
-    assert tested == [], [c.detail for c in tested]
     text_hard, _ = scan_text_source(rel.replace(".py", ".sh"), 'run synth240611-abcdef  # mock data\n')
     assert any("mock data" in c.detail for c in text_hard)
 
@@ -334,10 +325,10 @@ def test_text_scan_banned_vocabulary_hard_fails():
     assert any(c.name == "no_fabrication.vocabulary" and not c.passed for c in hard)
 
 
-def test_text_scan_synth_obsid_line_allowlisted():
-    src = "#!/bin/bash\n# load synth240611-abcdef (synthetic fixture)\ncp data $OUT\n"
+def test_text_scan_scans_a_test_scripts_lines_too():
+    src = "#!/bin/bash\n# load synth240611-abcdef (mock data)\ncp data $OUT\n"
     hard, _ = scan_text_source("demo_utils/tests/reduce.sh", src)
-    assert hard == []
+    assert any("mock data" in c.detail for c in hard), [c.detail for c in hard]
 
 
 # ── structural checks ───────────────────────────────────────────────────────────
@@ -350,7 +341,7 @@ def _spec(**kw):
         proposed_tool_name="my_tool",
         target_domain="demo_utils",
         disposition="extend_existing",
-        validation_data=[ValidationDataset(mission="IXPE", obsid="0001")],
+        validation_data=[ValidationDataset(store="db", bucket="data", key="k/s/a.dat", version_id="v1")],
     )
     base.update(kw)
     return ToolSpec(**base)

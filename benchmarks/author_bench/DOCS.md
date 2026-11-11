@@ -423,3 +423,4 @@ Compacted 2026-09-01, 2026-09-24 and 2026-10-19 (every entry); detail in git his
 - 2026-11-04 — Z1d: the grid axes live in `grid.yaml` (`legs._grid_axis`); Z.AI's co-lead is
   `glm-5.3-flash`, so the lead-correlated diagonal is same-model again (tested); a member's
   capability is its `config/model_capabilities.yaml` entry.
+- 2026-11-10 — PARKED (human ruling, Phase 3 step 0b): the benchmark's tests are not collected (`benchmarks/conftest.py` `collect_ignore_glob`) until its briefs move from the retired observation fields and `config/observations.yaml` to store records, at the next rerun (a new baseline, not comparable with the published numbers).

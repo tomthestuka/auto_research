@@ -30,11 +30,6 @@ def _allow_list_is_the_test_folder(monkeypatch, tmp_path):
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
 
 
-@pytest.fixture(autouse=True)
-def _no_data_roots(monkeypatch):
-    monkeypatch.setattr(react, "_observation_path_args", lambda: {})
-
-
 def _provider(tmp_path, store, tool_fn, schema=None):
     reg = _FakeRegistry(known={"research_toolkit.tk.fit"}, mcp=set(), schema=schema or {"properties": {
         "out_path": {"kind": "output", "shape": "file"}, "out_dir": {"kind": "output", "shape": "folder"},
@@ -264,26 +259,6 @@ def test_a_submit_that_commits_mints_a_commit_receipt_the_lead_may_cite(tmp_path
     # A submit that did not commit (the SHA did not move) mints nothing.
     prov._commit_receipted(session, "da3ba8b909aa", ToolOutcome(text="rejected"))
     assert len(store.receipts(kind="commit")) == 1
-
-
-def test_the_leads_in_process_data_catalog_is_receipted_as_the_toolkit_tool(tmp_path, monkeypatch):
-    import asyncio
-
-    from auto_research.agents import react
-    from auto_research.agents.react import DATA_CATALOG_TOOL, ReadOnlyToolProvider, ToolOutcome
-    from auto_research.provenance import ReceiptStore
-    from auto_research.provenance.store import is_evidence
-
-    async def fake_catalog(arguments):
-        return ToolOutcome(text="01002901 level 2")
-
-    monkeypatch.setattr(react, "execute_data_catalog", fake_catalog)
-    store = ReceiptStore(tmp_path / "receipts")
-    prov = ReadOnlyToolProvider(roots=[], include_data_catalog=True, receipts=store,
-                                receipt_source="analyst_lead")
-    asyncio.run(prov.execute(DATA_CATALOG_TOOL, {}))
-    (r,) = store.receipts()
-    assert r.produced_by == "research_toolkit.catalog_utils.data_catalog" and is_evidence(r)
 
 
 def test_a_dotdot_after_a_planted_link_never_mints_the_file_it_reaches(tmp_path):

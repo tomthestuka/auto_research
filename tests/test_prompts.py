@@ -171,19 +171,29 @@ def test_no_prompt_teaches_the_removed_output_rules(role: str) -> None:
 
 
 def test_the_coder_is_taught_the_three_output_classes() -> None:
-    """What the runtime mints and the gate checks (B1-B3) is what the coder reads (B4)."""
+    """What the runtime mints and the gate checks (B1-B3; the store, step 0b S3/S7/S8) is what the
+    coder reads (B4, S10): the argument kinds and manifest keys the input validator enforces, the
+    store-product class, and the CI pipeline's store variables."""
     from auto_research.provenance.capture import _MAX_PRODUCTS, PRODUCT_KEYS
-    from auto_research.provenance.inputs import OUTPUT_SHAPE_KEY, OUTPUT_SHAPES
+    from auto_research.provenance.inputs import (ALGORITHM_VERSION_KEY, ARG_KINDS, OUTPUT_SHAPE_KEY,
+                                                 OUTPUT_SHAPES, READS_KEY, RECORD_KEYS, WRITES_KEY)
+    from auto_research.store import ci
+    from auto_research.store.reconcile import RECIPE_FILE
 
     coder = " ".join(load_prompt("coder").split())  # a phrase may wrap across lines
-    for taught in ('`"output"`', f'`"{OUTPUT_SHAPE_KEY}"`', *(f'`"{shape}"`' for shape in OUTPUT_SHAPES),
+    for taught in (*(f'`"{kind}"`' for kind in ARG_KINDS), f'`"{OUTPUT_SHAPE_KEY}"`',
+                   *(f'`"{shape}"`' for shape in OUTPUT_SHAPES),
                    '`"default"`', '"products": [{', *(f'"{key}": "<' for key in PRODUCT_KEYS),
                    f"at most {_MAX_PRODUCTS} products", "depends on a `parameter`-kind argument",
-                   "outside the mission team's defaults", "recommended settings only", "`synth<YYMMDD>-<hex>`",
-                   "obsdb_catalog.neutral.new",
-                   "neutral.advance(level=", "obsdb_catalog.healthcheck", 'tmp_path / "<MISSION>"',
+                   "outside the standard settings the data's providers recommend", "recommended settings only",
+                   "{" + ", ".join(f'"{key}"' for key in RECORD_KEYS) + "}",
+                   f'`"{WRITES_KEY}"`', f'`"{READS_KEY}"`', f'`"{ALGORITHM_VERSION_KEY}"`',
+                   "**A store product**", "store helper", "`produce`", f"`{RECIPE_FILE}`",
+                   "Only a manifest tool writes the store", "A toolkit tool calls library code only",
+                   "`store` fixture", "`seed` fixture", f"`{ci.ENV_STORE}`", f"`{ci.ENV_SEED}`",
+                   f"`{ci.ENV_VALIDATION}`", "seeded as a product", "flags every result computed on it synthetic",
                    "in exactly one class", "tempfile.mkdtemp()", "(`unclassified`)",
-                   'tmp_path / "out"', "in-place header keyword", "**Scratch**",
+                   'tmp_path / "out"', "**Scratch**",
                    f'"kind": "output", "{OUTPUT_SHAPE_KEY}":'):
         assert taught in coder, f"coder.md no longer teaches {taught!r}"
 
@@ -193,17 +203,77 @@ def test_the_roles_around_the_coder_read_the_same_classes(role: str) -> None:
     content = " ".join(load_prompt(role).split())  # type: ignore[arg-type]
     if role != "analyst_worker":  # the Q1 rule, as the lead briefs and the co-lead reviews it
         assert "depends on a `parameter`-kind argument" in content and "recommended settings only" in content, role
-        # Synthetic validation data is a marked ObsID the tests build in their fixture obs-db (user
-        # ruling 2026-11-04), in the form the runtime flags: a result built on it is synthetic.
-        from auto_research.provenance.store import is_synthetic_path
-
-        assert "`synth<YYMMDD>-<hex>`" in content and "fixture obs-db" in content, role
-        example = "synth<YYMMDD>-<hex>".replace("<YYMMDD>", "261104").replace("<hex>", "ab12cd")
-        assert is_synthetic_path(Path("IXPE") / example / "event_l2" / "x.fits")
+        # A store product (step 0b) and synthetic data as a product the tests store in the CI
+        # pipeline's throwaway store, flagged synthetic (S7: seeded synthetic products are stamped).
+        assert "**store product**" in content and "synthetic product" in content, role
+        assert "`writes`" in content, role
+        # synthetic input for a tool without store arguments is a file the tests write (coder.md agrees)
+        assert ("another tool's tests write it" in content), role
+    else:  # a store product comes back as a record, passed to the next tool's record argument
+        assert "comes back as its record" in content and "record argument" in content, role
     assert "own folder" in content or role == "analyst_colead", f"{role}: says nothing of the call's own folder"
     assert "output argument" in content or "`output` argument" in content, role
-    if role != "analyst_worker":
-        assert "obsdb_catalog" in content and "products" in content, role
+
+
+def test_the_colead_rejects_an_artifact_stored_as_a_store_product() -> None:
+    """The store holds generic data; the catalog's current product is every later analysis's
+    default, so a run's choice stored there is a reject (step 0b, the Q1 rule carried over)."""
+    colead = " ".join(load_prompt("analyst_colead").split())
+    assert "stores a science artifact as a store product" in colead and "reject it" in colead
+    assert "calls no other manifest tool" in colead and "`algorithm_version`" in colead
+
+
+def test_every_unit_reads_the_data_store_conventions() -> None:
+    """``conventions.md`` (loaded before every unit role) states how the store is used (step 0b S10):
+    records with their keys, pinned reads, recipe-named create-once products, refusals, a peer's claim,
+    the runtime-kept current product, and scratch in the call's folder."""
+    from auto_research.agents.prompts import UNIT_ROLES
+    from auto_research.provenance.inputs import RECORD_KEYS
+
+    record = "`{" + ", ".join(f'"{key}"' for key in RECORD_KEYS) + "}`"
+    for role in UNIT_ROLES:
+        content = " ".join(load_prompt(role).split())  # type: ignore[arg-type]
+        assert "## Working with the data store" in load_prompt(role), role  # type: ignore[arg-type]
+        for taught in (record, "Every read is pinned to one version", "name built from its recipe",
+                       "A repeated recipe returns the stored product", "new product beside the old one",
+                       "When the store refuses a write, read the refusal", "a peer is making the same product",
+                       "**current**", "The runtime moves it at the start of a run", "stays exactly the version you cited",
+                       "names the whole product", "carries the flag on its receipt",
+                       "scratch files in a temporary folder of its own"):
+            assert taught in content, f"{role}: the store conventions no longer teach {taught!r}"
+
+
+def test_the_prompts_name_catalog_query_only_where_production_declares_it(tmp_path) -> None:
+    """The lead's catalog read is the runtime tool ``catalog_query`` (step 0b S9): its prompt names
+    the tool production declares to it (``graph.runtime.readonly_tools_for``), and the reviewer's
+    prompt, whose loop has no catalog, names none."""
+    from auto_research.agents.react import CATALOG_QUERY_TOOL
+    from auto_research.graph.runtime import readonly_tools_for
+
+    def declared(role: str) -> set[str]:
+        provider = readonly_tools_for(role, roots=[tmp_path], catalog={"db": object()})
+        return {tool["name"] for tool in provider.tool_definitions()}
+
+    assert CATALOG_QUERY_TOOL in declared("analyst_lead")
+    assert f"`{CATALOG_QUERY_TOOL}`" in load_prompt("analyst_lead")
+    assert CATALOG_QUERY_TOOL not in declared("reviewer")
+    assert CATALOG_QUERY_TOOL not in load_prompt("reviewer")
+
+
+#: The obs-db store that step 0b retired (S3, S5, S8, S9): its catalog file and writer, the
+#: auto-filled location arguments and the synthetic folder names, plus the toolkit's catalog tool's
+#: name (a toolkit name, which a prompt leaves to the toolkit's README).
+_RETIRED_STORE = (r"data_catalog", r"obs[-_ ]?db", r"catalog\.json", r"synth\d", r"synth<", r"<mission>_path",
+                  r"observation database", r"auto-?fill", r"LOCKED, NOT USABLE")
+
+
+@pytest.mark.parametrize("role", PROMPT_FILENAMES)
+def test_no_prompt_teaches_the_retired_store(role: str) -> None:
+    import re
+
+    content = " ".join(load_prompt(role).split())  # type: ignore[arg-type]
+    for pattern in _RETIRED_STORE:
+        assert not re.search(pattern, content, re.IGNORECASE), f"{role}: still teaches {pattern!r}"
 
 
 # ------------------------------------------------- the toolkit's domain reaches roles from its READMEs
@@ -211,17 +281,18 @@ def test_the_roles_around_the_coder_read_the_same_classes(role: str) -> None:
 #: Data sources, missions and domain software the prompts used to enumerate (W6, Phase 3 step 0a):
 #: domain text comes from the toolkit's own `README.md` files, which every role reads like any file.
 _DOMAIN_NAMES = ("HEASARC", "MAST", "Chandra", "IXPE", "NICER", "NuSTAR", "Swift", "XMM", "HXMT",
-                 "TESS", "XSPEC", "HEASoft", "PyXspec", "FITS", "CALDB")
-#: Tool names the prompts used as examples (the template's plotters, the acquisition module). The
-#: obs-db passages' "acquire" (the archive download, an English verb too) stays until step 0b.
-_TOOL_NAMES = ("plot_fit", "plot_iqu", "heasarc_help")
+                 "TESS", "XSPEC", "HEASoft", "PyXspec", "FITS", "CALDB", "ObsID", "ObsIDs", "mission",
+                 "missions")
+#: Tool and support-package names the prompts used as examples (the template's plotters, the
+#: acquisition module, the store helper and the retired catalog writer, step 0b).
+_TOOL_NAMES = ("plot_fit", "plot_iqu", "heasarc_help", "storelib", "obsdb_catalog", "data_catalog")
 
 
 @pytest.mark.parametrize("role", PROMPT_FILENAMES)
 def test_a_prompt_names_no_toolkit_package_and_no_data_source(role: str) -> None:
     """A prompt is the role's job; the toolkit's name, its packages and its domain are the toolkit's
-    to state (the coder's context names the checkout and the template package). The obs-db passages
-    name the catalog writer, ``obsdb_catalog``, until step 0b rewrites them; it is not a tool package."""
+    to state (the coder's context names the checkout and the template package; the store helper is
+    "the toolkit's store helper", which the toolkit's root README names)."""
     import re
 
     from auto_research.toolkit_contract import toolkit
@@ -340,7 +411,7 @@ def test_the_colead_reads_the_ci_jobs_and_the_live_tests_its_payload_lists() -> 
 
     spec = ToolSpec(science_context="ctx", expected_behavior="beh", proposed_tool_name="my_tool",
                     target_domain="demo_utils", disposition="extend_existing",
-                    validation_data=[ValidationDataset(mission="M", obsid="0001")])
+                    validation_data=[ValidationDataset(store="db", bucket="data", key="k/s/a.dat", version_id="v1")])
     live = CheckResult(name="layer_b.live", layer="B", passed=True, detail="tests/test_x.py::test_fetch")
     gate = GateReport(passed=True, jobs=[GateJob(name=job, status="pass") for job in GATE_JOBS],
                       layer_b=[live])

@@ -193,7 +193,6 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     from auto_research.models.media_probe import check_member_media
     from auto_research.models.keys import check_api_key_fallbacks
     from auto_research.models.providers._doc_parse import check_document_parser_ready
-    from auto_research.observations import check_catalog_health
     from auto_research.sandbox.merge_flow import check_toolkit_branch_clean, check_toolkit_git_identity
     from auto_research.sandbox.coder import (
         check_coder_harness_available,
@@ -207,6 +206,15 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     from auto_research.sandbox.review import check_author_reviewer_decorrelation
     from auto_research.sandbox.runner import check_analysis_probe
     from auto_research.storage import check_database_health
+    from auto_research.store.health import (
+        check_store_admin,
+        check_store_buckets,
+        check_store_catalog,
+        check_store_config,
+        check_store_servers,
+    )
+    from auto_research.store.reconcile import check_store_integrity
+    from auto_research.store.ci import check_ci_leftovers
     from auto_research.toolkit_contract import check_toolkit_contract, check_toolkit_test_data
 
     preflight = Preflight()
@@ -230,7 +238,14 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight.register("toolkit_git_identity", check_toolkit_git_identity)
     preflight.register("toolkit_branch_clean", check_toolkit_branch_clean)
     preflight.register("toolkit_manifests", check_toolkit_manifests)
-    preflight.register("catalog_health", check_catalog_health)
+    # The data stores (step 0b): a local store's servers are started here, then each is checked.
+    preflight.register("store_config", check_store_config)
+    preflight.register("store_servers", check_store_servers)
+    preflight.register("store_admin", check_store_admin)
+    preflight.register("store_buckets", check_store_buckets)
+    preflight.register("store_catalog", check_store_catalog)
+    preflight.register("store_integrity", check_store_integrity)
+    preflight.register("store_ci_leftovers", check_ci_leftovers)  # a notice, never a failure
     # The toolkit's environments, after its contract: human bases declared, then the default
     # environment's activation (private variables) and probe, both run as a unit's REPL starts.
     preflight.register("human_envs", check_human_envs)

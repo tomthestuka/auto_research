@@ -157,7 +157,7 @@ def test_edit_report_carries_tool_request(tmp_path):
             "science_context: need XSPEC polconst fit\n"
             "expected_behavior: fit tbabs*polconst*powerlaw, return PD/PA\n"
             "proposed_tool_name: fit_tbabs_polconst_powerlaw\n"
-            "validation_data: ixpe 01002901\n"
+            "validation_data: db | data | events/s1/1a2b3c4d/e.dat | v1\n"
         )})
     )
     assert not out.is_error

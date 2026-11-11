@@ -38,17 +38,17 @@ def test_unset_resolves_to_the_repository_config(monkeypatch):
     assert config_paths.config_dir().name == "config"
 
 
-def test_the_four_files_are_named_where_the_project_has_always_kept_them(monkeypatch):
+def test_the_files_are_named_where_the_project_has_always_kept_them(monkeypatch):
     monkeypatch.delenv(config_paths.CONFIG_DIR_ENV, raising=False)
     repo = config_paths.repo_config_dir()
     assert config_paths.orchestration_yaml() == repo / "orchestration.yaml"
     assert config_paths.models_yaml() == repo / "models.yaml"
-    assert config_paths.observations_yaml() == repo / "observations.yaml"
     assert config_paths.code_gate_yaml() == repo / "code_gate.yaml"
+    assert config_paths.model_capabilities_yaml() == repo / "model_capabilities.yaml"
 
 
 def test_the_live_repository_configuration_is_actually_there(monkeypatch):
-    """A machine-local guard: the four files are gitignored, so a fresh clone skips this."""
+    """A machine-local guard: the live files are gitignored, so a fresh clone skips this."""
     monkeypatch.delenv(config_paths.CONFIG_DIR_ENV, raising=False)
     if not config_paths.orchestration_yaml().exists():
         pytest.skip("no live configuration on this machine")
@@ -188,16 +188,6 @@ def test_the_model_registry_reads_it(elsewhere):
         encoding="utf-8",
     )
     assert registry.resolve("analyst_lead").handles[0].config.model == "m-analyst_lead"
-
-
-def test_the_observation_database_location_reads_it(elsewhere):
-    from auto_research import observations
-
-    (elsewhere / "observations.yaml").write_text(
-        f"obs_db_root: {elsewhere / 'obsdb'}\n", encoding="utf-8"
-    )
-    (elsewhere / "obsdb").mkdir()
-    assert observations.load_observations_config().obs_db_root == elsewhere / "obsdb"
 
 
 def test_the_cost_plotter_reads_it(elsewhere):

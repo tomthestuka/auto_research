@@ -8,7 +8,7 @@ import json
 import os
 import signal
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -239,14 +239,16 @@ def readonly_tools_for(
     roots: Sequence[Path],
     retrieval: RetrievalBackend | None = None,
     web_source: Any = None,
+    catalog: Mapping[str, Any] | None = None,
 ) -> ReadOnlyToolProvider:
     """The read-only inspection loop production gives ``role``.
 
     ``role`` is ``"reviewer"`` or ``"analyst_lead"``, and the two differ deliberately. The lead
-    gets the data catalog and the budget-free design channel and is denied the paper knowledge
-    base, because it investigates toolkit source and the archive rather than literature; the
-    reviewer is the paper surface. Getting those flags wrong does not fail — it silently measures a
-    role the pipeline does not have.
+    gets the stores' catalogs (``catalog``: store name → the lead's own reader-class login,
+    :func:`issue_unit_keys`) and the budget-free design channel and is denied the paper knowledge
+    base, because it investigates toolkit source and the data rather than literature; the
+    reviewer is the paper surface and is given no catalog. Getting those flags wrong does not fail
+    — it silently measures a role the pipeline does not have.
     """
     if role not in ("reviewer", "analyst_lead"):
         raise ValueError(f"no read-only tool loop is defined for role {role!r}")
@@ -255,7 +257,7 @@ def readonly_tools_for(
         roots=list(roots),
         retrieval=retrieval,
         web_source=web_source,
-        include_data_catalog=lead,
+        catalog=catalog if lead else None,
         include_text_search=not lead,
         # The reviewer reads papers through its own receipted `read_paper` (the Docling text its
         # quotes are checked against), so the native-PDF `open_paper` is not declared for it.
@@ -373,6 +375,295 @@ def release_run_contract(run_id: str) -> None:
     _CONTRACT_RUNS.discard(run_id)
 
 
+#: The runs of this process that hold the bound stores (``bind_run_stores``), by run id.
+_STORE_RUNS: set[str] = set()
+
+
+def bind_run_stores(orch: dict[str, Any], run_id: str) -> None:
+    """Bind the process to the ``stores:`` block of the configuration a run was launched with
+    (``store.config.bind``) and hold it for ``run_id`` until :func:`release_run_stores`, as
+    :func:`bind_run_contract` holds the toolkit contract: a run whose configuration declares other
+    stores while another run holds them is refused. With none holding them, an absent or invalid
+    block binds nothing; the preflight's ``store_config`` refuses it."""
+    from auto_research.store import config as store_config
+
+    try:
+        declared = store_config.stores(orch)
+    except ValueError as exc:
+        if _STORE_RUNS:
+            raise RuntimeError(f"run {run_id}: the configuration's stores are invalid ({exc}) while run(s) "
+                               f"{sorted(_STORE_RUNS)} in this process run on the bound ones") from exc
+        store_config.reset()
+        return
+    if _STORE_RUNS and declared != store_config.stores():
+        raise RuntimeError(f"run {run_id}: the configuration declares other stores than run(s) "
+                           f"{sorted(_STORE_RUNS)} in this process run on; start it when they finish, "
+                           "or in a process of its own")
+    store_config.bind(orch)
+    _STORE_RUNS.add(run_id)
+
+
+def release_run_stores(run_id: str) -> None:
+    """``run_id`` no longer holds the bound stores (its run ended, however it ended)."""
+    _STORE_RUNS.discard(run_id)
+
+
+def _bound_stores() -> list[Any]:
+    """The stores a run of this process bound (:func:`bind_run_stores`); none when the run's
+    configuration declares none or an invalid block (``store_config`` refuses that at the preflight),
+    never a block read afresh from the file."""
+    from auto_research.store.config import stores
+
+    return list(stores()) if _STORE_RUNS else []
+
+
+#: The unit name the runtime's own reconciler login is issued under.
+RECONCILER_UNIT = "reconciler"
+
+#: The run's process record in its ledger folder: host, pid and the pid's start time.
+RUN_PROCESS_FILE = "runtime.json"
+
+
+def record_run_process(run_id: str) -> None:
+    """Record that this process runs ``run_id`` (``ledgers/<run>/runtime.json``: host, pid and the
+    pid's start time, so a recycled pid never reads as the run). A resumed run overwrites it."""
+    import socket
+
+    from auto_research.graph.detached import _proc_create_time
+
+    path = ledger_dir(run_id) / RUN_PROCESS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{RUN_PROCESS_FILE}.{os.getpid()}")
+    temporary.write_text(json.dumps({"host": socket.gethostname(), "pid": os.getpid(),
+                                     "create_time": _proc_create_time(os.getpid())}))
+    os.replace(temporary, path)
+
+
+def run_process_record(run_id: str) -> dict | None:
+    """``run_id``'s process record (``{host, pid, create_time}``) in this runtime dir, or None when
+    there is none or it does not read as one."""
+    try:
+        record = json.loads((ledger_dir(run_id) / RUN_PROCESS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def run_process_alive(run_id: str) -> bool | None:
+    """Whether ``run_id``'s runtime process still runs: True or False only for a well-formed record of
+    this host (a string host, an integer pid and an integer start time); None whenever it cannot be
+    known here (no record, a malformed one, a run of another host), which nothing reads as dead."""
+    import socket
+
+    from auto_research.graph.detached import _proc_create_time
+
+    record = run_process_record(run_id) or {}
+    pid, created = record.get("pid"), record.get("create_time")
+    if (record.get("host") != socket.gethostname() or type(pid) is not int or type(created) is not int
+            or pid <= 0):
+        return None
+    return _proc_create_time(pid) == created
+
+
+async def sweep_dead_runs(store: Any, run_id: str, monitor: Any) -> list[str]:
+    """Revoke the keys every other run on this host holds in ``store`` whose runtime process is gone
+    (coordinator ruling: a run is dead when its process is); runs of another host, or with no record
+    here, are left alone. Recorded per run (``store.credentials.sweep``; a failed revoke at level 2,
+    the run goes on: its own keys are not affected). Returns the runs revoked."""
+    from auto_research.store import keys
+
+    swept = []
+    for run, principals in (await keys.live_runs(store)).items():
+        if run == run_id or run_process_alive(run) is not False:
+            continue
+        try:
+            for name in principals:
+                # Again before each: a resume of the run (same principals) writes its record before it
+                # issues anything, so it is seen here and its fresh keys stay.
+                if run_process_alive(run) is not False:
+                    break
+                await keys.revoke_principal(store, name)
+        except Exception as exc:  # noqa: BLE001 - recorded; the next launch tries again
+            await _record(monitor, "store.credentials.sweep_error", level=2,
+                          summary=f"Store {store.name}: the keys of dead run {run} were not all revoked: {exc}",
+                          data={"store": store.name, "run": run, "error": repr(exc)})
+            continue
+        swept.append(run)
+        await _record(monitor, "store.credentials.sweep", level=2,
+                      summary=f"Store {store.name}: revoked the keys of dead run {run}",
+                      data={"store": store.name, "run": run, "principals": principals})
+    return swept
+
+
+class StoreNotReady(RuntimeError):
+    """A store's servers are not running here: they did not start (``store.launch.start`` refused)
+    or do not answer (``store.health.ready_problems``' ``store_servers`` item). Raised by
+    :func:`start_run_stores` with the store's own words; every other failure of the launch step (a
+    refused admin key, a bucket or catalog schema the store lacks, a sweep, a key, the reconciler)
+    is raised as itself."""
+
+
+async def start_run_stores(run_id: str, keys: Any, monitor: Any) -> None:
+    """The run's store launch step, before its preflight (coordinator ruling B): each local store
+    ``store_config`` accepts is started (``store.launch.start``, idempotent: a running set is
+    shared); every store must then be ready (``store.health.ready_problems``: servers, admin key,
+    buckets, in the preflight's words); the keys of dead runs on this host are revoked
+    (:func:`sweep_dead_runs`); and the store is reconciled (``store.reconcile.reconcile``) as the
+    runtime's own reconciler login, issued here into ``keys`` (a ``store.keys.RunKeys``), its S3 key
+    signing the pass (``s3=``), so on-disk edits are marked and "current" moved back before the
+    preflight's checks. A store the configuration refuses is left to the preflight, which names why. A
+    failure is recorded (``store.launch.error``) and raised; servers that do not start or answer are
+    raised as :class:`StoreNotReady`."""
+    import psycopg
+
+    from auto_research.store import health, launch
+    from auto_research.store.config import LocalStore
+    from auto_research.store.reconcile import reconcile
+
+    for store in _bound_stores():
+        try:
+            if isinstance(store, LocalStore):
+                if health.refusals(store):
+                    continue
+                try:
+                    record = await asyncio.to_thread(launch.start, store)
+                except RuntimeError as exc:
+                    raise StoreNotReady(str(exc)) from exc
+                await _record(monitor, "store.launch", level=2,
+                              summary=f"Store {store.name} serves ({store.s3_endpoint})",
+                              data={"store": store.name, "host": record.get("host"), "pids": record.get("pids")})
+            problems = await asyncio.to_thread(health.ready_problems, store)
+            if problems:
+                not_ready = StoreNotReady if problems[0].startswith("store_servers:") else RuntimeError
+                raise not_ready(f"store {store.name} is not ready: {'; '.join(problems)}")
+            await sweep_dead_runs(store, run_id, monitor)
+            credentials = await keys.issue(store, RECONCILER_UNIT, "reconciler")
+            async with await psycopg.AsyncConnection.connect(credentials.dsn(), autocommit=True) as conn:
+                report = await reconcile(store, run=run_id, conn=conn, s3=credentials)
+            await _record(monitor, "store.reconcile", level=2, summary=f"Store {store.name} reconciled",
+                          data={"store": store.name, "report": _plain(report)})
+        except Exception as exc:
+            await _record(monitor, "store.launch.error", level=1,
+                          summary=f"Store {store.name}: the run's launch step failed: {exc}",
+                          data={"store": store.name, "error": repr(exc)})
+            raise
+
+
+def _plain(value: Any) -> Any:
+    """``value`` as JSON-ready data for the ledger (a pydantic model or dataclass dumped)."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    import dataclasses
+
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return json.loads(json.dumps(dataclasses.asdict(value), default=str))
+    return json.loads(json.dumps(value, default=str))
+
+
+async def issue_unit_keys(keys: Any, units: Sequence[str], monitor: Any) -> dict[str, Any]:
+    """Each unit's keys to the default store (``store.config.DEFAULT_STORE``), issued into ``keys``
+    with the role the store gives the unit (``roles``), as ``{unit: Credentials}`` for
+    :func:`attach_worker_runtime` and :func:`attach_lead_runtime`. Recorded per unit
+    (``store.credentials.issue``: role, principal, key id; never a secret). Empty when the run binds
+    no store; raises when it binds stores without the default one (``store_config`` refuses that
+    configuration at the preflight)."""
+    from auto_research.store.config import DEFAULT_STORE
+
+    bound = _bound_stores()
+    store = next((s for s in bound if s.name == DEFAULT_STORE), None)
+    if store is None:
+        if bound:  # never a silent absence: the units would run without their store
+            raise RuntimeError(f"the run's stores ({', '.join(s.name for s in bound)}) include no default "
+                               f"store {DEFAULT_STORE!r}; name one of them {DEFAULT_STORE!r} in stores:")
+        return {}
+    out: dict[str, Any] = {}
+    for unit in units:
+        credentials = await keys.issue(store, unit)
+        await _record(monitor, "store.credentials.issue", level=3,
+                      summary=f"{unit} holds {credentials.role_class} keys to store {store.name}",
+                      data={"store": store.name, "unit": unit, "role": credentials.role_class,
+                            "principal": credentials.principal, "access_key_id": credentials.access_key_id})
+        out[unit] = credentials
+    return out
+
+
+def _store_records(credentials: Any, reconciler: Any | None = None) -> Any:
+    """The unit's view of the store's records (``store.records.StoreRecords``, S5) for its tool
+    calls: its keys named by principal and run, its writable area the store's buckets when it is a
+    producer, none when a reader; ``reconciler``: the runtime's own reconciler login to that store
+    (:func:`run_reconciler`), through which the view reads the catalog and stamps flags."""
+    from auto_research.store.records import StoreRecords, writable_area
+
+    writable = writable_area([credentials.store]) if credentials.role_class == "producer" else ()
+    return StoreRecords(agent=credentials.principal, run=credentials.run, writable=writable,
+                        reconciler=reconciler)
+
+
+def run_reconciler(keys: Any, store: str) -> Any | None:
+    """The runtime's reconciler login to ``store`` that :func:`start_run_stores` issued into
+    ``keys`` (a ``store.keys.RunKeys``), or None."""
+    return next((c for c in keys.held() if c.unit == RECONCILER_UNIT and c.store == store), None)
+
+
+class RunLaunch:
+    """The run's launch step and its end, one object (S13a, main's ruling 4): what a run binds and
+    starts before its preflight, and what it gives back when it ends, for ``run_research`` and for
+    anything that drives roles outside the graph (a live cell), so neither restates the order.
+
+    ``start()`` records the run's process (:func:`record_run_process`), reads the configuration once,
+    binds the toolkit contract and the stores to the run (:func:`bind_run_contract`,
+    :func:`bind_run_stores`) and takes :func:`start_run_stores` with the run's keys (``keys``, a
+    ``store.keys.RunKeys``); it returns the configuration. ``hold(control)`` hands the keys to the
+    run's stop channel (``RunControl.credentials``), so a stop's cleanup revokes them in its order.
+    ``revoke()`` revokes every key (recorded, ``run.teardown.credentials_error`` on a failure, never
+    raised; idempotent); ``release()`` lets go of the contract and the stores; ``end()`` does both,
+    revoke first. As an async context manager it starts on entry (a failed start ends at once) and
+    ends on exit, however the block ends. A store that cannot serve raises :class:`StoreNotReady`
+    from ``start``, so a caller tells it from any other failure of the start."""
+
+    def __init__(self, run_id: str, monitor: Any) -> None:
+        from auto_research.store.keys import RunKeys
+
+        self.run_id, self.monitor = run_id, monitor
+        self.keys = RunKeys(run_id)
+        self.orch: dict[str, Any] | None = None
+
+    async def start(self) -> dict[str, Any]:
+        record_run_process(self.run_id)  # its keys are swept by a later launch once this process is gone
+        self.orch = load_orchestration_config()
+        bind_run_contract(self.orch, self.run_id)
+        bind_run_stores(self.orch, self.run_id)
+        await start_run_stores(self.run_id, self.keys, self.monitor)
+        return self.orch
+
+    def hold(self, control: Any) -> None:
+        control.credentials = self.keys
+
+    async def revoke(self) -> None:
+        await _closed("credentials", self.keys.revoke_all, self.monitor)
+
+    def release(self) -> None:
+        release_run_contract(self.run_id)
+        release_run_stores(self.run_id)
+
+    async def end(self) -> None:
+        try:
+            await self.revoke()
+        finally:
+            self.release()
+
+    async def __aenter__(self) -> "RunLaunch":
+        try:
+            await self.start()
+        except BaseException:
+            await self.end()
+            raise
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self.end()
+
+
 def attach_reviewer_runtime(
     reviewer: Any,
     *,
@@ -452,9 +743,12 @@ def attach_lead_runtime(
     run_control: RunControl | None = None,
     retrieval: Any | None = None,
     web_source: Any | None = None,
-    human_handler: Any | None = None,
+    catalog: Mapping[str, Any] | None = None,
 ) -> None:
     """Give the lead the identity, report folder, monitor, stop channel and tools production gives it.
+
+    ``catalog``: store name → the lead's own login (:func:`issue_unit_keys`; the store's ``roles``
+    make it a reader), through which its ``catalog_query`` reads each store's catalog.
 
     The analyst lead's wiring was spread across ~40 lines of ``run_request`` while the workers'
     had a seam of their own (:func:`attach_worker_runtime`, 2026-09-08), so anything driving a
@@ -485,6 +779,7 @@ def attach_lead_runtime(
                 roots=readonly_roots_for(run_id, toolkit_root),
                 retrieval=retrieval,
                 web_source=web_source,
+                catalog=catalog,
             )
         except Exception:  # noqa: BLE001 — tools are optional; never block the run
             pass
@@ -498,6 +793,40 @@ def attach_lead_runtime(
             pass
 
 
+async def wire_lead(
+    lead: Any,
+    *,
+    run_id: str,
+    toolkit_root: Path,
+    keys: Any,
+    run_monitor: Any | None = None,
+    run_control: RunControl | None = None,
+    retrieval: Any | None = None,
+    web_source: Any | None = None,
+) -> None:
+    """The analyst lead's wiring as ``run_research`` gives it, one call for the run path and for
+    anything driving a real lead outside the graph (S13a, main's ruling): the lead's own login to
+    the default store, issued into ``keys`` (the run's ``store.keys.RunKeys``, :func:`issue_unit_keys`),
+    then :func:`attach_lead_runtime` with that catalog, the run's retrieval and web source
+    (``retrieval`` defaults to the knowledge base's ``SqliteRetrievalBackend()`` and ``web_source``
+    to ``WebSource()``, as :func:`attach_reviewer_runtime` defaults them). The lead reaches the human
+    through the quick channel (:func:`attach_channel`) and its cycle (``run_cycle(human_handler=)``),
+    never through this wiring (nor through :func:`attach_lead_runtime`)."""
+    from auto_research.sources import WebSource
+
+    lead_keys = await issue_unit_keys(keys, [LEAD_KEY], run_monitor)
+    attach_lead_runtime(
+        lead,
+        run_id=run_id,
+        toolkit_root=toolkit_root,
+        run_monitor=run_monitor,
+        run_control=run_control,
+        retrieval=retrieval if retrieval is not None else SqliteRetrievalBackend(),
+        web_source=web_source if web_source is not None else WebSource(),
+        catalog={c.store: c for c in lead_keys.values()},
+    )
+
+
 def attach_worker_runtime(
     workers: Sequence[WorkerLike],
     *,
@@ -507,9 +836,16 @@ def attach_worker_runtime(
     sandbox_settings: SandboxSettings | None = None,
     mcp_client: MCPToolClient | None = None,
     run_control: RunControl | None = None,
+    credentials: dict[str, Any] | None = None,
+    reconciler: Any | None = None,
 ) -> list[PersistentSandbox]:
     """Give each worker the identity, memory, sandbox and registry production gives it.
 
+    ``credentials`` (``{unit: Credentials}``, :func:`issue_unit_keys`): each worker's store keys,
+    handed to its REPLs only (never its shell, which every worker shares), and its view of the
+    store's records (``worker.store_records``) for its tool calls; ``reconciler``: the runtime's
+    reconciler login to that store (:func:`run_reconciler`), which the view reads the catalog and
+    stamps flags through.
     Returns the sandboxes so the caller can shut them down (``await sandbox.shutdown()``).
     **Without this a worker has no tool loop at all**, which is the difference between measuring a
     seat and measuring nothing. ``sandbox_settings`` defaults to the configured ones, so a caller
@@ -525,14 +861,17 @@ def attach_worker_runtime(
         worker.report_dir = agent_dir(run_id, key)
         worker.report_dir.mkdir(parents=True, exist_ok=True)
         worker.receipts = ReceiptStore.for_run(run_dir(run_id))
+        held = (credentials or {}).get(key)
         sandbox = PersistentSandbox(
             toolkit_root=toolkit_root,
             workdir=worker.report_dir,
             mcp_client=mcp_client,
             environment=settings.environment,
             environments=settings.catalogue,
+            store_env=held.env() if held is not None else None,
         )
         worker.sandbox = sandbox
+        worker.store_records = _store_records(held, reconciler) if held is not None else None
         worker.registry = registry
         sandboxes.append(sandbox)
         if run_control is not None:
@@ -838,12 +1177,17 @@ async def run_research(
     # Run the full launch checklist — which pings the channel — before any LLM (§9.8). The run reads
     # its configuration once, here, and binds its toolkit contract first, so the preflight, the
     # registry, the gate, the evidence predicate and the environments all read one contract.
+    # The stores too (S4, ruling B): bound from the same configuration, each local one started and
+    # reconciled before the preflight checks it; the run's store keys are held in `store_keys` from
+    # here on and revoked whenever the run ends. One seam (`RunLaunch`) holds the step and its end,
+    # so a cell driving roles outside the graph takes the same one.
+    launch = RunLaunch(run_id, run_monitor)
+    store_keys = launch.keys
     try:
-        orch = load_orchestration_config()
-        bind_run_contract(orch, run_id)
+        orch = await launch.start()
         await run_preflight(human_handler=human_handler, monitor=run_monitor)
     except BaseException:
-        release_run_contract(run_id)
+        await launch.end()
         # A failed launch closes the channel the ping opened (D1c): it is all that runs yet.
         await _close_connector(human_handler, run_monitor)
         raise
@@ -853,6 +1197,8 @@ async def run_research(
     # below) owns each of them, and the stack lets go.
     setup = contextlib.AsyncExitStack()
     setup.push_async_callback(_close_connector, human_handler, run_monitor)
+    # The store keys after every process that holds them has closed (leaf to root), before the channel.
+    setup.push_async_callback(launch.revoke)
     run_control: RunControl | None = None
     _restore_signals = None
     sandboxes: list[PersistentSandbox] = []
@@ -882,6 +1228,7 @@ async def run_research(
         # the command channel writes to it. A steer is read cooperatively by the ReAct loops; a stop
         # cancels the task registered here, so it needs no cooperation from anything.
         run_control = RunControl()
+        launch.hold(run_control)  # the keys, revoked by the stop's cleanup too (leaf to root)
         run_control.register_run_task(asyncio.current_task())
         cleaned = False  # set once a stop's (or a channel failure's) cleanup has torn the run down
         _restore_signals = _install_interrupt_signals(run_control) if install_signal_handlers else None
@@ -947,15 +1294,18 @@ async def run_research(
         # V-4: a stable key + report folder for the lead's per-round adjudicated report JSONLs, its
         # monitor, its stop channel and its read-only tools — all through the one seam, so a live
         # drill driving a real lead outside the graph gets exactly this and cannot drift from it.
-        attach_lead_runtime(
+        # The lead reads the default store's catalog as itself: a login of its own, of the role the
+        # store's `roles` gives it (reader by default: it runs no tool process, only catalog
+        # queries the runtime runs on its behalf; S9).
+        await wire_lead(
             lead,
             run_id=run_id,
             toolkit_root=toolkit_root,
+            keys=store_keys,
             run_monitor=run_monitor,
             run_control=run_control,
             retrieval=retrieval,
             web_source=web_source,
-            human_handler=human_handler,
         )
 
         _attach_monitor(reviewer, run_monitor)
@@ -1044,6 +1394,13 @@ async def run_research(
         # that drives a worker outside a full run (a probe, a benchmark) gets the same worker rather
         # than a look-alike. It also registers each sandbox's aborter, so a human /stop cancels an
         # in-flight tool call instead of waiting for a safe point hours away.
+        # Each worker's own keys to the store, for its REPLs only (S4: one S3 user and one Postgres
+        # login per unit per run).
+        unit_keys = await issue_unit_keys(
+            store_keys,
+            [f"analyst_worker_{i}" for i, w in enumerate(workers) if isinstance(w, AnalystWorkerAgent)],
+            run_monitor,
+        )
         sandboxes = attach_worker_runtime(
             workers,
             run_id=run_id,
@@ -1052,6 +1409,8 @@ async def run_research(
             sandbox_settings=sandbox_settings,
             mcp_client=mcp_client,
             run_control=run_control,
+            credentials=unit_keys,
+            reconciler=next((run_reconciler(store_keys, c.store) for c in unit_keys.values()), None),
         )
         for sandbox in sandboxes:
             setup.push_async_callback(_closed, "sandbox", sandbox.shutdown, run_monitor)
@@ -1130,6 +1489,9 @@ async def run_research(
             human_handler=human_handler,
         )
     except BaseException as exc:
+        # The run ends here: it holds its contract and stores no longer (its keys are revoked below,
+        # by the stop's cleanup or the setup's teardown).
+        launch.release()
         # First, as the run's own teardown does (D8): a stop or a signal during the closes must
         # not cancel them and replace the setup's error with a bare cancel.
         if run_control is not None:
@@ -1298,10 +1660,14 @@ async def run_research(
                             data={"error": repr(exc)},
                         )
                 await _closed("mcp", mcp_client.shutdown, run_monitor)
+                # The store keys: every process holding them is gone (S4).
+                await launch.revoke()
                 # The channel last, as a stop's cleanup closes it (leaf to root, D8/D1c).
                 await _close_connector(human_handler, run_monitor)
     finally:
-        release_run_contract(run_id)
+        # Whatever ended the run (an outer cancel in the teardown, a stop step that timed out): no key
+        # it issued outlives it. Idempotent: nothing left, nothing done.
+        await launch.end()
         await _closed("checkpointer", held.aclose, run_monitor)  # as the run returns
 
     verdict = final_state["verdict"]
@@ -1597,6 +1963,15 @@ async def _interrupt_cleanup(
         await _step("MCP closed", "mcp_shutdown", mcp_client.shutdown())
     else:  # a stop during the setup, before the tools server was made (D1e)
         await _skipped("MCP closed", "mcp_shutdown", "this run started no tools server")
+
+    # 4b — the store keys the run issued (S4): nothing that holds them runs any more.
+    credentials = getattr(run_control, "credentials", None)
+    if credentials is not None and credentials.pending():
+        # Each key is a few IAM calls and a login's sessions ended (up to 5 s): the reset's budget.
+        await _step("store keys revoked", "revoke_store_keys", credentials.revoke_all(),
+                    timeout=_INTERRUPT_RESET_TIMEOUT_S)
+    else:
+        await _skipped("store keys revoked", "revoke_store_keys", "this run holds no store keys")
 
     # 5 — the record, then the checklist to the human while the channel is still open.
     if fatal is not None:

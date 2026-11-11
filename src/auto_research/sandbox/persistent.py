@@ -15,7 +15,13 @@ from pathlib import Path
 
 from typing import Any
 
-from auto_research.sandbox.runner import builtin_function_source, private_folders
+from auto_research.sandbox.runner import (
+    STORE_ENV_VARIABLE,
+    builtin_function_source,
+    keyed_env,
+    private_folders,
+    write_store_env,
+)
 
 
 def _descendant_pids(pid: int) -> list[int]:
@@ -92,6 +98,32 @@ _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
                 return v
         return v
 
+    #: The stamp the runtime gives this REPL's receipts: only the runtime's value stands (an
+    #: activation or the boot file never supplies it), and an unknown one is absent.
+    _STAMP_NAMES = ("AR_TOOLKIT_COMMIT", "AR_ENV_FINGERPRINT")
+
+    def _load_store_env():
+        \"\"\"The unit's store credentials and stamp, from the file AR_STORE_ENV names in this REPL's
+        private /tmp (written by ``PersistentSandbox.start``), into this process's environment, then
+        the file removed: they reach the tools this REPL runs, and nothing else. Absent: none.\"\"\"
+        for _name in _STAMP_NAMES:
+            os.environ.pop(_name, None)
+        _path = os.environ.pop("AR_STORE_ENV", "")
+        if not _path:
+            return {}
+        try:
+            with open(_path, "r", encoding="utf-8") as _f:
+                _values = json.load(_f)
+            os.environ.update(_values)
+            return _values
+        finally:
+            try:
+                os.unlink(_path)
+            except OSError:
+                pass
+
+    _loaded = _load_store_env()
+
     def _run_boot():
         \"\"\"Exec the environment's boot file (``boot.py``) at subprocess boot (best-effort).
 
@@ -121,6 +153,11 @@ _REPL_SCRIPT = SAFE_PATH_PRELUDE + \
             pass
         os.dup2(_s1, 1)
         os.close(_s1)
+        for _name in _STAMP_NAMES:  # the runtime's stamp again, whatever the boot file set
+            if _name in _loaded:
+                os.environ[_name] = _loaded[_name]
+            else:
+                os.environ.pop(_name, None)
 
     # Private duplicate of the real stdout — used ONLY for JSON protocol lines.
     _proto = os.fdopen(os.dup(1), "w")
@@ -229,8 +266,12 @@ class PersistentSandbox:
         mcp_client: Any | None = None,
         environments: Any | None = None,
         label: str = "repl",
+        store_env: dict[str, str] | None = None,
     ) -> None:
         self._toolkit_root = Path(toolkit_root)
+        #: The unit's store credentials (``store.keys.Credentials.env``): handed to each REPL start
+        #: through a file in its private /tmp, to its pool REPLs too; never logged or shown.
+        self._store_env = dict(store_env or {})
         self._workdir = Path(workdir)
         #: The software environment this REPL runs in; its fingerprint stamps every receipt.
         self.environment = environment
@@ -323,7 +364,8 @@ class PersistentSandbox:
             from auto_research.sandbox.envs import in_environment
 
             script = in_environment(self.environment, f'{shlex.quote(python_exec)} "$@"', self._toolkit_root,
-                                    pass_args=True, keep=("AR_BOOT_PY", "PYTHONPYCACHEPREFIX"), quiet=True)
+                                    pass_args=True, keep=("AR_BOOT_PY", "PYTHONPYCACHEPREFIX", STORE_ENV_VARIABLE),
+                                    quiet=True)
             command = ["/bin/bash", "--noprofile", "--norc", "-c", script, "_", *command[1:]]
         argv = wrap(
             command,
@@ -347,6 +389,20 @@ class PersistentSandbox:
         # The environment state this REPL booted on (taken above): a call after it changes
         # restarts it first (env plan B2a); its receipts stamp it only once its lock is on disk.
         self.booted_lock_written = await asyncio.to_thread(self._lock_booted)
+        # The unit's store credentials, with the commit this start runs at and the state its receipts
+        # stamp (a store write carries both): a file in this start's fresh private /tmp, never a
+        # command line (the REPL reads and removes it at boot). Every start takes them afresh, so a
+        # restart after a commit hands the new commit on.
+        # The commit this start imports the toolkit at: its receipts stamp it (``call_commit``), never
+        # a later HEAD, since the modules it imported stay as they were until the next start.
+        from auto_research.provenance.capture import toolkit_commit
+
+        self.booted_commit = await asyncio.to_thread(toolkit_commit, self._toolkit_root)
+        if self._store_env:
+            stamp = self.booted_fingerprint if self.booted_lock_written else None
+            keyed = keyed_env(self._store_env, commit=self.booted_commit, fingerprint=stamp)
+            secrets_file = write_store_env(keyed, self._private_tmp)
+            env[STORE_ENV_VARIABLE] = f"/tmp/{secrets_file.name}"
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
@@ -430,7 +486,7 @@ class PersistentSandbox:
         """Terminate the current subprocess **and its descendants**, if any.
 
         Killing the REPL alone leaves whatever it shelled out still running — an XSPEC fit, a
-        multi-GB HEASARC download — and those children keep writing into the obs-db after the
+        multi-GB HEASARC download — and those children keep writing into the store or the call's folder after the
         caller believes the sandbox is gone. They are killed first (deepest last, so a parent
         cannot spawn more while we work) and then the REPL itself.
 
@@ -523,16 +579,18 @@ class PersistentSandbox:
                 child = PersistentSandbox(
                     self._toolkit_root, self._workdir, environment=environment,
                     default_timeout_s=self._default_timeout_s,
-                    label=f"repl-{environment.name}",
+                    label=f"repl-{environment.name}", store_env=self._store_env,
                 )
                 self._pool[environment.name] = child
             self.call_environment = child.environment
             result = await child.call_tool(module, fn, args, timeout_s=timeout_s)
             self._notice = child.take_notice()
             self.call_stamp = child.call_stamp
+            self.call_commit = child.call_commit
             return result
         self.call_environment = self.environment
         self.call_stamp = None
+        self.call_commit = None
         if not self.is_alive:
             # Started before the stamp is taken: a first call (a pool REPL's, or after a restart)
             # names the state it runs in like every other.
@@ -551,6 +609,7 @@ class PersistentSandbox:
         # The state this call runs in, fixed before it runs: a timeout or crash restarts the REPL
         # inside `_call`, and the receipt must still name the state the call actually ran in.
         self.call_stamp = self.booted_fingerprint if getattr(self, "booted_lock_written", False) else None
+        self.call_commit = getattr(self, "booted_commit", None)
         return await self._call(module, fn, args, timeout_s=timeout_s)
 
     async def _call(self, module: str, fn: str, args: dict, *, timeout_s: int | None) -> dict:

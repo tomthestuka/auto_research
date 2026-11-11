@@ -16,7 +16,17 @@ Every argument of a toolkit tool declares a **kind** in its manifest (``args_sch
   (:data:`OUTPUT_SHAPES`): a ``folder``, a ``file`` (the model's value keeps only its file name) or a
   ``prefix`` for file names (the same). A folder ignores the model's value. A file or prefix may
   declare a ``default``, whose file name is the one used when the model gives none (so the manifest
-  sets the extension); a folder has no name to default.
+  sets the extension); a folder has no name to default;
+* ``record`` — an object in a named store (step 0b): ``{"store": "<name>", "bucket": "<bucket>",
+  "key": "<key>", "version_id": "<version id>"}``, or a non-empty list of them. ``version_id`` is
+  optional as the model writes it: the runtime pins a record without one to the store's current version before the call
+  (:func:`record_pins`, through a :data:`CurrentVersion` the store seam supplies) and records the
+  pinned value with the call, so the call's arguments name the exact version it read.
+
+A tool entry may also declare ``writes`` (the stores it creates products in, a list of store names)
+and ``algorithm_version`` (text the tool changes whenever its outputs change; part of a product's
+identity), required with ``writes`` (:func:`spec_problems`). A tool names records, never a store's
+location: the retired kind ``store`` is refused with ``record`` as their replacement.
 
 :func:`check_arguments` judges the arguments as the model wrote them, before the runtime completes
 the call. :func:`tool_values` then turns the completed arguments into the plain values the tool
@@ -46,8 +56,42 @@ from auto_research.provenance.refs import (
 )
 from auto_research.provenance.store import ReceiptStore
 
-#: The kinds an argument declares (the toolkit README's four, then ``output``, 2026-11-04).
-ARG_KINDS: tuple[str, ...] = ("data", "parameter", "path", "setting", "output")
+#: The kinds an argument declares (the toolkit README's four, ``output`` 2026-11-04, ``record`` 2026-11-10).
+ARG_KINDS: tuple[str, ...] = ("data", "parameter", "path", "setting", "output", "record")
+
+#: The keys of a ``record`` value: ``store``, ``bucket`` and ``key`` required, ``version_id`` (the
+#: S3 name, as the catalog's object rows use) pinned by the runtime when the model leaves it out.
+RECORD_KEYS: tuple[str, ...] = ("store", "bucket", "key", "version_id")
+#: The keys a record must name.
+_RECORD_REQUIRED = frozenset({"store", "bucket", "key"})
+
+#: Per-tool manifest keys (beside ``module``, ``fn``, ``description``, ``args_schema``): the stores
+#: the tool creates products in, and the version of its algorithm (part of a product's identity).
+WRITES_KEY = "writes"
+#: The stores a tool reads without a ``record`` argument (through the catalog, say): symmetric with
+#: ``writes``, so its package counts as a store package (the CI pipeline gives its tests a store).
+READS_KEY = "reads"
+ALGORITHM_VERSION_KEY = "algorithm_version"
+
+#: Argument names that once received a store's location filled in by the runtime (the obs-db root,
+#: retired in step 0b): a tool names records instead (kind ``record``).
+
+#: The kind that once named a store's location (planned for step 0b, retired by ruling 2026-11-10).
+RETIRED_KINDS: tuple[str, ...] = ("store",)
+
+#: ``(store, bucket, key) -> version_id``: the version a store holds as current for ``key`` in
+#: ``bucket``. Raises :class:`NoSuchRecord` when the store holds no such object (any other
+#: exception is a store fault). Supplied by the store seam.
+CurrentVersion = Callable[[str, str, str], str]
+
+
+class NoSuchRecord(LookupError):
+    """Raised by a :data:`CurrentVersion` when the store holds no object at the key."""
+
+_RECORD_REPLACEMENT = (
+    'declare it as kind record (a value {"store": "<name>", "bucket": "<bucket>", "key": "<key>"}; the '
+    "runtime pins its version_id), and list the stores the tool writes products in under the tool's writes"
+)
 
 #: The manifest key an ``output`` argument names its shape under, and the shapes it may name.
 OUTPUT_SHAPE_KEY = "shape"
@@ -95,9 +139,116 @@ def declared_defaults(schema: Mapping[str, Any] | None) -> dict[str, Any]:
             if isinstance(prop, Mapping) and prop.get("kind") == "parameter" and "default" in prop}
 
 
+def declared_records(schema: Mapping[str, Any] | None) -> list[str]:
+    """The arguments an ``args_schema`` declares as kind ``record``."""
+    return [name for name, kind in declared_kinds(schema).items() if kind == "record"]
+
+
+def record_value(value: Any) -> dict[str, str] | None:
+    """``value`` as one record (``{"store", "bucket", "key"[, "version_id"]}``, each a non-blank
+    string, no other key), or ``None`` when it is not one."""
+    if not isinstance(value, Mapping) or not _RECORD_REQUIRED <= set(value) or not set(value) <= set(RECORD_KEYS):
+        return None
+    if not all(isinstance(v, str) and v.strip() and not is_ref(v) for v in value.values()):
+        return None  # each field is the text itself: a reference resolves after the shape check
+    return {k: value[k] for k in RECORD_KEYS if k in value}
+
+
+def _records(value: Any) -> list[dict[str, str]] | None:
+    """The records ``value`` holds (one, or a non-empty list of them), or ``None`` when it is
+    neither."""
+    one = record_value(value)
+    if one is not None:
+        return [one]
+    if isinstance(value, list) and value:
+        many = [record_value(item) for item in value]
+        if all(r is not None for r in many):
+            return many  # type: ignore[return-value]
+    return None
+
+
+class RecordPinError(LookupError):
+    """A record the runtime could not pin to a version (its message is the model's)."""
+
+
+def _store_fault(name: str, record: Mapping[str, str], why: str) -> str:
+    return (f"argument {name}: store {record['store']!r} could not name the current version of "
+            f"{record['key']!r} in bucket {record['bucket']!r} ({why}); state the store fault in your report, with the record "
+            "you needed")
+
+
+def record_pins(
+    arguments: Mapping[str, Any], schema: Mapping[str, Any] | None, current: CurrentVersion | None,
+) -> dict[str, Any]:
+    """``{argument: pinned value}`` for every ``record`` argument holding a record without a
+    ``version_id``: the same record (or list) with each missing ``version_id`` set to what
+    ``current`` names for its store, bucket and key. The runtime records the result with the call
+    (``calls.resolve_call_args``, context key ``records``), so the arguments it hashes name the
+    version read. A value that is not a record is left to :func:`check_arguments`. Raises
+    :class:`RecordPinError` when a record needs pinning and ``current`` is ``None`` (this call path
+    reaches no store), or ``current`` finds no object (:class:`NoSuchRecord`) or fails."""
+    pins: dict[str, Any] = {}
+    for name in declared_records(schema):
+        records = _records(arguments.get(name))
+        if records is None or all("version_id" in r for r in records):
+            continue
+        if current is None:
+            raise RecordPinError(
+                f"argument {name} names a record without its version_id, and this call path reaches "
+                "no store to pin it: give the record's version_id")
+        pinned = []
+        for record in records:
+            if "version_id" not in record:
+                try:
+                    version = current(record["store"], record["bucket"], record["key"])
+                except NoSuchRecord:
+                    raise RecordPinError(
+                        f"argument {name}: store {record['store']!r} holds no object at key "
+                        f"{record['key']!r} in bucket {record['bucket']!r}; name a bucket and key "
+                        "the store holds") from None
+                except Exception as exc:  # noqa: BLE001 — a store fault is this call's error (§9.3.8)
+                    raise RecordPinError(_store_fault(name, record, type(exc).__name__)) from exc
+                if not isinstance(version, str) or not version.strip():
+                    raise RecordPinError(_store_fault(name, record, "it returned no version"))
+                record = {**record, "version_id": version}
+            pinned.append(record)
+        pins[name] = pinned[0] if record_value(arguments.get(name)) is not None else pinned
+    return pins
+
+
+def spec_problems(tool: str, spec: Any) -> list[str]:
+    """Why a tool's manifest entry cannot be validated: its ``args_schema``
+    (:func:`manifest_problems`), a ``writes`` or ``reads`` that is not a list of distinct store names,
+    or an ``algorithm_version`` that is not text (required when the tool writes). Empty when it can."""
+    if not isinstance(spec, Mapping):
+        return manifest_problems(tool, None)
+    problems = manifest_problems(tool, spec.get("args_schema"))
+    writes = spec.get(WRITES_KEY)
+    if writes is not None and not (
+            isinstance(writes, list) and writes
+            and all(isinstance(w, str) and w.strip() for w in writes) and len(set(writes)) == len(writes)):
+        problems.append(f"{tool}: {WRITES_KEY} is {_shown(writes)}; list the names of the stores the "
+                        "tool creates products in, each once")
+    reads = spec.get(READS_KEY)
+    if reads is not None and not (
+            isinstance(reads, list) and reads
+            and all(isinstance(r, str) and r.strip() for r in reads) and len(set(reads)) == len(reads)):
+        problems.append(f"{tool}: {READS_KEY} is {_shown(reads)}; list the names of the stores the tool "
+                        "reads without a record argument (through the catalog), each once")
+    version = spec.get(ALGORITHM_VERSION_KEY)
+    if version is not None and not (isinstance(version, str) and version.strip()):
+        problems.append(f"{tool}: {ALGORITHM_VERSION_KEY} is {_shown(version)}; write it as text, "
+                        "such as \"1\"")
+    elif version is None and writes:
+        problems.append(f"{tool}: it declares {WRITES_KEY} and no {ALGORITHM_VERSION_KEY}; add one, "
+                        "such as \"1\", and change it whenever the tool's outputs change")
+    return problems
+
+
 def manifest_problems(tool: str, schema: Mapping[str, Any] | None) -> list[str]:
     """Why a tool's ``args_schema`` cannot be validated: a property with no kind or an unknown
-    one, an optional parameter with no ``default``, or an output with no shape. Empty when it can."""
+    one, an optional parameter with no ``default``, an output with no shape, or a store's location
+    (the retired kind ``store``). Empty when it can."""
     problems: list[str] = []
     if schema is not None and not isinstance(schema, Mapping):
         return [f"{tool}: args_schema is a {type(schema).__name__}, not an object"]
@@ -107,7 +258,10 @@ def manifest_problems(tool: str, schema: Mapping[str, Any] | None) -> list[str]:
     required = set(r for r in ((schema or {}).get("required") or ()) if isinstance(r, str))
     for name, prop in properties.items():
         kind = prop.get("kind") if isinstance(prop, Mapping) else None
-        if kind is None:
+        if kind in RETIRED_KINDS:
+            problems.append(f"{tool}: argument {name} names a store's location, and a tool names "
+                            f"records instead: {_RECORD_REPLACEMENT}")
+        elif kind is None:
             problems.append(f"{tool}: argument {name} declares no kind (one of {', '.join(ARG_KINDS)})")
         elif kind not in ARG_KINDS:
             problems.append(f"{tool}: argument {name} declares kind {kind!r}, not one of {', '.join(ARG_KINDS)}")
@@ -119,6 +273,10 @@ def manifest_problems(tool: str, schema: Mapping[str, Any] | None) -> list[str]:
         elif kind == "output" and "default" in prop and prop[OUTPUT_SHAPE_KEY] == "folder":
             problems.append(f"{tool}: output folder {name} declares a default; the runtime gives "
                             "each call its own folder, so declare none")
+        elif kind == "record" and "default" in prop:
+            problems.append(f"{tool}: record argument {name} declares a default; the runtime pins "
+                            "only the records a call names, so make it required or leave it optional "
+                            "with no default")
         elif kind == "output" and "default" in prop and not output_name(prop["default"]):
             problems.append(f"{tool}: output argument {name} declares a default that names no file; "
                             "give a file name such as 'fit.log' (its file name is what is used), or none")
@@ -185,6 +343,12 @@ def check_arguments(
                 f'{{"{VALUE_KEY}": <the value>, "{REASON_KEY}": "<why this value>"}} for a value you '
                 "choose, or leave it out for the default its description names"
             )
+        elif kind == "record" and _records(value) is None:
+            lines.append(
+                f'argument {name} is a record in a store: pass {{"store": "<store name>", "bucket": '
+                '"<bucket>", "key": "<object key>"}, adding "version_id": "<version id>" to read an '
+                "earlier version (a list passes several)"
+            )
         elif kind == "output" and refs_in(value):
             lines.append(f"argument {name} is an output the runtime places: write a file name alone, "
                          "or leave it out")
@@ -230,7 +394,9 @@ def tool_values(
 
 
 __all__ = [
-    "ARG_KINDS", "OUTPUT_SHAPES", "OUTPUT_SHAPE_KEY", "REASON_KEY", "VALUE_KEY", "RefError", "ToolValues",
-    "check_arguments", "declared_defaults", "declared_kinds", "declared_output_names", "declared_outputs",
-    "manifest_problems", "output_name", "tool_values", "typed_parameter",
+    "ALGORITHM_VERSION_KEY", "ARG_KINDS", "CurrentVersion", "NoSuchRecord", "OUTPUT_SHAPES", "OUTPUT_SHAPE_KEY", "REASON_KEY",
+    "RECORD_KEYS", "RETIRED_KINDS", "RecordPinError", "RefError", "ToolValues", "VALUE_KEY",
+    "READS_KEY", "WRITES_KEY", "check_arguments", "declared_defaults", "declared_kinds", "declared_output_names",
+    "declared_outputs", "declared_records", "manifest_problems", "output_name", "record_pins", "record_value",
+    "spec_problems", "tool_values", "typed_parameter",
 ]

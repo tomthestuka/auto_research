@@ -25,6 +25,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
@@ -514,6 +515,8 @@ def compile_report(
     timeout_s: int = 120,
 ) -> CompileResult:
     """Compile ``report.tex`` twice (labels and longtable widths settle on the second pass)."""
+    from auto_research.store.config import without_admin_secrets
+
     if not shutil.which(compiler):
         return CompileResult(pdf_path=None, errors=[f"{compiler} is not on PATH, so no PDF was produced."])
     log_text = ""
@@ -522,6 +525,7 @@ def compile_report(
             result = run(
                 [compiler, "-interaction=nonstopmode", "-halt-on-error", TEX_NAME],
                 cwd=report_dir, capture_output=True, text=True, timeout=timeout_s,
+                env=without_admin_secrets(os.environ),  # model-written text: no store admin secret in reach
             )
         except subprocess.TimeoutExpired:
             return CompileResult(pdf_path=None, errors=[f"{compiler} timed out after {timeout_s} s"])

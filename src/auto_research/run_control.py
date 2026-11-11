@@ -163,6 +163,10 @@ class RunControl:
         # Coding sessions whose close raised (a coder disconnect that failed, C2c): the run's
         # teardown closes each again, leaf to root (D8), so no coder process outlives the run.
         self.unclosed_sessions: list[Any] = []
+        # The store keys the run issued (``store.keys.RunKeys``, S4): revoked by the run's teardown
+        # and a stop's cleanup once nothing holding them runs (leaf to root, D8); a dead unit's
+        # alone through ``credentials.revoke(unit)``.
+        self.credentials: Any | None = None
 
     # ── stop ──────────────────────────────────────────────────────────────────
     def request_stop(self, reason: str = "", by: str = "human") -> None:

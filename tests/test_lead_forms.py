@@ -71,7 +71,7 @@ GOOD_LINK = {
     "proposed_tool_name": "ixpe_pcube_timeseg",
     "target_domain": "ixpe_utils",
     "disposition": "extend_existing",
-    "validation_data": [{"mission": "IXPE", "obsid": "01002901"}],
+    "validation_data": [{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
 }
 
 

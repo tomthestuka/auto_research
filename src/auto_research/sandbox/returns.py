@@ -18,19 +18,21 @@ the files the call wrote are written down. The gate process then judges those re
                              at most ``_MAX_PRODUCTS``), run in the test process, drops nothing; a
                              file inside an output that the call returns under another key is
                              declared
-  layer_b.returns.obsdb      opt-out: every file a call creates or changes in an obs-db (one its
-                             arguments name, walked before and after the call, so a subprocess or
-                             a rename is seen; or one an audited write reaches) and that still
-                             exists is recorded in its catalog, or sits in a folder whose catalog
-                             entry the call recorded; the catalog file is written only by
-                             ``obsdb_catalog.neutral``; ``obsdb_catalog.healthcheck`` passes after
-                             the call. A raised call is judged too. An in-place change to a file
-                             the catalog already records needs no new record (ruling Q2)
+  layer_b.returns.store      a store's products (step 0b): with a throwaway store in the run
+                             (``store.ci``), each watched call is bracketed by the runtime's own
+                             ``StoreRecords.bracket`` (the test's producer key; the store's listing
+                             and access log, never the tool's word). Every version it wrote lies in
+                             a store its manifest names in ``writes``, creates its key (no
+                             overwrite, no delete marker), carries the helper's five
+                             ``x-amz-meta-*`` entries (``sha256`` = its bytes'), and each recipe hash
+                             it wrote under ends with one complete ``recipe.json``
+                             (``reconcile.RecipeFile``: the catalog's hash of its recipe, listing
+                             every other object of the hash, key, version, sha256 and size). A
+                             raised or failed call is judged too, all but the recipe file
 
   layer_b.returns.unclassified  every file a call writes is in exactly one class (user rule
                              2026-11-04): inside an output folder (declared, else ``.placed``
-                             fails), inside an obs-db (``.obsdb``), or scratch (interpreter
-                             bytecode; the home's caches:
+                             fails), or scratch (interpreter bytecode; the home's caches:
                              ``~/.cache``, ``~/.astropy``, ``~/.xspec``, ``~/.matplotlib``,
                              ``~/.config/{matplotlib,astropy}``, the first folders of each declared private variable
                              (``env_externals.<name>.private``), ``$MPLCONFIGDIR``,
@@ -39,9 +41,8 @@ the files the call wrote are written down. The gate process then judges those re
                              output folder and the running test's ``tmp_path`` are walked before
                              and after the call, so a subprocess's or a rename's file is seen
 
-Scratch is not otherwise judged. The real obs-db is read-only
-to Layer B, so an opt-out tool's tests build a fixture obs-db under ``tmp_path`` (``<tmp>/<MISSION>/``,
-its catalog seeded through ``obsdb_catalog.neutral``) and point the tool at it.
+Scratch is not otherwise judged. A store is reached over S3 only, so its products are judged by
+``.store`` from the store's records, never as files.
 
 The recorder runs in the analysis interpreter, which cannot import this package, so it is assembled
 from the runtime's source text (``inspect.getsource``) rather than restated: the payload rule, the
@@ -100,13 +101,17 @@ _FIGURE_REQUIRED = frozenset(k for k, f in FigureRef.model_fields.items() if f.i
 _FIGURE_ALLOWED = frozenset(FigureRef.model_fields)
 
 _RECORDER_BODY = r'''
-import functools, importlib, itertools, json, os, shutil, sys, tempfile, threading, time
+import functools, importlib, itertools, json, os, shutil, socket, sys, tempfile, threading, time, uuid
 
 _OUT = Path(os.environ["AR_RETURNS_OUT"])
 _TOOLS = json.loads(os.environ["AR_RETURNS_TOOLS"])
 _CAP = int(os.environ["AR_RETURNS_COPY_CAP"])
 _local = threading.local()
 _seq = itertools.count()
+#: The runtime's bracket socket (``store.ci``), read once at load: unset when the run has no store.
+_STORE = os.environ.get("AR_STORE_CALLS") or None
+#: Seconds the recorder waits for the runtime to list the store before or after a call.
+_STORE_WAIT = 600
 
 
 def _write(rec):
@@ -138,136 +143,59 @@ def _audit(event, args):
 sys.addaudithook(_audit)
 
 
-def _profile_missions():
-    """The acquire engine's mission names (``heasarc_utils.lib.heasarc.MISSIONS`` keys), read from
-    its source as data: importing it would change the test process (its package edits sys.path)."""
-    import ast, importlib.util
-    try:
-        spec = importlib.util.find_spec("heasarc_utils")
-        source = os.path.join(os.path.dirname(spec.origin), "lib", "heasarc.py")
-        tree = ast.parse(open(source, encoding="utf-8").read())
-    except Exception:
-        return set()
-    for node in tree.body:
-        target = node.targets[0] if isinstance(node, ast.Assign) else getattr(node, "target", None)
-        if getattr(target, "id", None) == "MISSIONS" and isinstance(node.value, ast.Dict):
-            return {k.value for k in node.value.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
-    return set()
-
-
-def _obsdb():
-    """``(missions, neutral, healthcheck, error)`` from the toolkit's catalog writer, imported on
-    first use. ``missions``: every mission name the toolkit knows (the catalog's scanners and
-    archive trees, and the acquire engine's mission profiles when that package imports)."""
-    if not hasattr(_obsdb, "cache"):
-        try:
-            from obsdb_catalog import _domain, neutral
-            from obsdb_catalog.healthcheck import healthcheck
-            missions = set(_domain._SCANNERS) | set(getattr(_domain, "TREES", {})) | _profile_missions()
-            _obsdb.cache = ({m.lower() for m in missions}, neutral, healthcheck, None)
-        except Exception as exc:
-            _obsdb.cache = (set(), None, None, f"{type(exc).__name__}: {exc}")
-    return _obsdb.cache
-
-
 def _within(path, folder):
     return os.path.commonpath([path, folder]) == folder
 
 
-def _obsdb_root(path, missions, outputs):
-    """The obs-db ``path`` is (or lies) in: the nearest folder at or above it that holds a catalog or
-    is named after a mission the catalog writer knows; never one of the call's own output folders."""
-    d = path if os.path.isdir(path) else os.path.dirname(path)
-    while d and d != os.path.dirname(d):
-        if d in outputs:
-            return None
-        if os.path.isfile(os.path.join(d, "catalog.json")) or os.path.basename(d).lower() in missions:
-            return d
-        d = os.path.dirname(d)
-    return None
+#: The bracket open in this process, if any: a store tool called while it is open, from any thread,
+#: joins it (its writes are that call's), so a call fanning out to threads never waits on itself.
+_OPEN = {"count": 0, "call": None, "lock": threading.Lock()}
 
 
-def _catalog_own(rel):
-    """A file the catalog writer itself writes: the catalog, its lock, its history, its temp file."""
-    base = os.path.basename(rel)
-    return (rel in ("catalog.json", "catalog.json.lock") or rel.startswith(".catalog_history" + os.sep)
-            or (os.path.dirname(rel) == "" and base.startswith(".catalog-") and base.endswith(".tmp")))
-
-
-#: The most files one fixture obs-db is walked for; a larger one is judged by its audited writes.
-_WALK_CAP = 20000
-
-
-def _state(root):
-    """An obs-db as it stands: its files (``{rel: [size, mtime]}``, the writer's own left out;
-    ``None`` past ``_WALK_CAP``), its catalog entries and its health."""
-    missions, neutral, healthcheck, error = _obsdb()
-    files = {}
-    for dirpath, _dirs, names in os.walk(root):
-        for name in names:
-            full = os.path.join(dirpath, name)
-            rel = os.path.relpath(full, root)
-            if not _catalog_own(rel):
-                files[rel] = _stat(full)
-        if len(files) > _WALK_CAP:
-            files = None
-            break
+def _store_open(key):
+    """Open the runtime's bracket around one call of ``key`` (``store.ci``): ``(connection, lines,
+    record)``; the runtime has listed the store when this returns. ``(None, None, None)`` when the
+    run has no store; ``(None, None, {"call", "joined"})`` inside an open bracket (any thread);
+    ``(None, None, {"call", "error"})`` when the bracket could not open."""
+    if not _STORE:
+        return None, None, None
+    with _OPEN["lock"]:
+        _OPEN["count"] += 1
+        if _OPEN["count"] > 1:
+            return None, None, {"call": _OPEN["call"], "joined": True}
+        call = _OPEN["call"] = uuid.uuid4().hex
     try:
-        entries = neutral.read(root).get("entries", {})
-    except Exception:
-        entries = {}
-    try:
-        health = healthcheck(root)
+        conn = socket.socket(socket.AF_UNIX)
+        conn.settimeout(_STORE_WAIT)
+        conn.connect(_STORE)
+        conn.sendall((json.dumps({"call": call, "tool": key}) + "\n").encode())
+        lines = conn.makefile("rb")
+        answer = json.loads(lines.readline() or b"{}")
     except Exception as exc:
-        health = {"error": f"{type(exc).__name__}: {exc}"}
-    return {"files": files, "entries": entries, "health": health}
+        return None, None, {"call": call, "error": f"{type(exc).__name__}: {exc}"}
+    if not answer.get("ok"):
+        conn.close()
+        return None, None, {"call": call, "error": str(answer.get("error") or "the runtime gave no answer")}
+    return conn, lines, {"call": call}
 
 
-def _roots_named(values, outputs):
-    """The writable obs-dbs the call's arguments name (only a fixture one is writable to Layer B)."""
-    missions, _neutral, _health, error = _obsdb()
-    roots = set()
-    for value in values:
-        if isinstance(value, (str, os.PathLike)) and os.fspath(value).strip() and "\0" not in os.fspath(value):
-            root = _obsdb_root(os.path.realpath(os.fspath(value)), missions, outputs)
-            if root is not None and os.access(root, os.W_OK):
-                roots.add(root)
-    return roots
-
-
-def _obsdb_judged(before, written, outputs):
-    """``{root: …}`` for every obs-db the call named or wrote into: the files it created or changed
-    that still exist and its catalog does not record (a file in a folder whose catalog entry the
-    call recorded is taken as recorded), whether it wrote the catalog file itself, and the health
-    before and after."""
-    missions, neutral, healthcheck, error = _obsdb()
-    real = {os.path.realpath(w) for w in written}
-    roots = dict(before)
-    for w in real:
-        root = _obsdb_root(w, missions, outputs)
-        if root is not None:
-            roots.setdefault(root, None)
-    out = {}
-    for root, then in roots.items():
-        if error is not None:
-            out[root] = {"error": error}
-            continue
-        now = _state(root)
-        audited = {os.path.relpath(w, root) for w in real if _within(w, root)}
-        changed = {r for r in audited if not _catalog_own(r) and os.path.isfile(os.path.join(root, r))}
-        if then is not None and then["files"] is not None and now["files"] is not None:
-            changed |= {r for r, st in now["files"].items() if then["files"].get(r) != st}
-        old = then["entries"] if then is not None else {}
-        recorded_dirs = {os.path.dirname(p.get("path", "")) for obsid, e in now["entries"].items()
-                         if old.get(obsid) != e for p in e.get("products", [])}
-        known = {p.get("path") for e in now["entries"].values() for p in e.get("products", [])}
-        out[root] = {
-            "unrecorded": sorted(r for r in changed if r not in known and os.path.dirname(r) not in recorded_dirs),
-            "hand_written": "catalog.json" in audited,
-            "health_before": then["health"] if then is not None else None,
-            "health": now["health"],
-        }
-    return out
+def _store_close(conn, lines, info):
+    """Close the bracket (the outermost call's): the runtime lists the store again and records what
+    the call wrote."""
+    if info is None:
+        return
+    with _OPEN["lock"]:
+        _OPEN["count"] -= 1
+    if conn is None:
+        return
+    try:
+        conn.sendall(b'{"end": true}\n')
+        if not json.loads(lines.readline() or b"{}").get("ok"):
+            info["error"] = "the runtime did not record the call's store writes"
+    except Exception as exc:
+        info["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        conn.close()
 
 
 #: pytest's base temporary folder (`--basetemp`, the tests' `tmp_path` lives under it), set at
@@ -327,12 +255,11 @@ def _scratch_roots():
             if not any(_within(g, r) for g in guarded)]
 
 
-def _classes(written, out_before, folders, declared, obsdb_roots, inputs, returned=(), started=0):
+def _classes(written, out_before, folders, declared, inputs, returned=(), started=0):
     """Every file the call left written, by class: ``{"undeclared", "unclassified",
     "at_path_args", "notes"}``.
     Output: inside an output folder, declared (``declared=None``: not judged, the call raised).
-    Obs-db: inside an obs-db (judged by `_obsdb_judged`). A file at a path the test passed in a
-    ``path`` argument is no class (named apart, so its message says to declare the argument an
+    A file at a path the test passed in a ``path`` argument is no class (named apart, so its message says to declare the argument an
     ``output``). Scratch: interpreter bytecode, the home's caches, the temp area outside
     the tests' own ``tmp_path`` and the tree under test. Anything else is unclassified."""
     candidates = {os.path.realpath(w) for w in written if os.path.isfile(w)}
@@ -344,8 +271,14 @@ def _classes(written, out_before, folders, declared, obsdb_roots, inputs, return
             notes.append(f"{real} holds over {_OUTPUT_WALK_CAP} files; only Python writes there were judged")
             continue
         candidates |= {p for p, st in now.items() if then.get(p) != st}
-    # A link's target changed during the call (a write through a staged input) is judged at the target.
-    candidates |= {t for t in targets if os.path.isfile(t) and (_stat(t) or [0, 0])[1] >= started}
+    # A link's target changed during the call (a write through a staged input) is judged at the target:
+    # one in a folder walked before the call by its stat then, any other by its mtime (the coarse
+    # clock stamps a file written in the call's first tick with the call's own start, hence >=).
+    known = {}
+    for then in out_before.values():
+        known.update(then or {})
+    candidates |= {t for t in targets if os.path.isfile(t) and (
+        known[t] != _stat(t) if t in known else (_stat(t) or [0, 0])[1] >= started)}
     outputs = [f[2] for f in folders]
     asked = {os.path.realpath(p) for p in inputs}
     returned = {os.path.realpath(p) for p in returned}
@@ -354,9 +287,7 @@ def _classes(written, out_before, folders, declared, obsdb_roots, inputs, return
     base = os.path.realpath(_BASETEMP[0]) if _BASETEMP[0] else None
     out = {"undeclared": [], "unclassified": [], "at_path_args": [], "notes": notes}
     for path in sorted(candidates):
-        if any(_within(path, r) for r in obsdb_roots):
-            continue  # an obs-db item: `.obsdb` judges it, wherever the test put the fixture
-        elif any(_within(path, f) for f in outputs):
+        if any(_within(path, f) for f in outputs):
             if declared is not None and path not in declared and path not in returned:
                 out["undeclared"].append(path)  # (a returned path is named once, by `.placed`)
         elif "__pycache__" in path.split(os.sep):
@@ -403,7 +334,6 @@ def _wrap(key, fn, placed, path_args=None):
                 where = os.path.abspath(os.fspath(value))
                 folder = where if shape == "folder" else os.path.dirname(where)
                 folders.append([name, folder, os.path.realpath(folder)])
-        outputs = {f[2] for f in folders}
         inputs = {os.path.abspath(os.fspath(v)) for n, v in full.items() if n not in placed
                   and isinstance(v, (str, os.PathLike)) and os.fspath(v).strip() and "\0" not in os.fspath(v)}
         # The files the test named in `path`-kind arguments: a write there is unclassified,
@@ -411,12 +341,6 @@ def _wrap(key, fn, placed, path_args=None):
         asked_paths = {
             os.path.abspath(os.fspath(full[n])) for n in path_args or ()
             if isinstance(full.get(n), (str, os.PathLike)) and os.fspath(full[n]).strip() and "\0" not in os.fspath(full[n])}
-        try:  # the obs-dbs the arguments name, as they stand before the call
-            before_obsdb = {root: _state(root) for root in _roots_named(full.values(), outputs)}
-        except Exception as exc:
-            before_obsdb, obsdb_error = {}, f"{type(exc).__name__}: {exc}"
-        else:
-            obsdb_error = None
         out_before = {f[2]: (_files_under(f[2]) if os.path.isdir(f[2]) else {}) for f in folders}
         test_tmp = _TEST_TMP[0]
         if test_tmp and os.path.isdir(test_tmp) and os.path.realpath(test_tmp) not in out_before:
@@ -428,41 +352,37 @@ def _wrap(key, fn, placed, path_args=None):
         # before the call is marked as running, so a failure here leaves nothing half-set.
         private_env, made = private_folders(os.environ)
         private_before = {k: os.environ.get(k) for k in private_env if os.environ.get(k) != private_env[k]}
-        _local.depth, _local.written = 1, set()
         rec = {"tool": key, "started_ns": started, "before": before}
+        # The runtime's bracket of the store (a run with a store): opened once the store is listed.
+        conn, lines, store = _store_open(key)
+        if store is not None:
+            rec["store"] = store
+        _local.depth, _local.written = 1, set()
 
         def classes_now(declared):
-            roots = [r for r in rec.get("obsdb", {}) if not r.startswith("(")]
             try:
-                return _classes(written, out_before, folders, declared, roots, asked_paths,
+                return _classes(written, out_before, folders, declared, asked_paths,
                                 [os.path.join(str(cwd), p) for _k, p in rec.get("returned_files", [])],
                                 started)
             except Exception as exc:
                 return {"undeclared": [], "unclassified": [], "error": f"{type(exc).__name__}: {exc}"}
 
-        def obsdb_now():
-            if obsdb_error is not None:
-                return {"(arguments)": {"error": obsdb_error}}
-            try:
-                return _obsdb_judged(before_obsdb, written, outputs)
-            except Exception as exc:
-                return {"(recorder)": {"error": f"{type(exc).__name__}: {exc}"}}
-
         os.environ.update(private_env)
         try:
             result = fn(*a, **k)
         except BaseException as exc:
-            # A call that raises is a failed call: what it left in an obs-db is judged all the same.
+            # A call that raises is a failed call: what it wrote is judged all the same.
             _local.depth, written, _local.written = 0, _local.written, None
+            _store_close(conn, lines, store)
             os.environ.update(private_before)
             for folder in made:
                 shutil.rmtree(folder, ignore_errors=True)
             rec["raised"] = f"{type(exc).__name__}: {exc}"
-            rec["obsdb"] = obsdb_now()
             rec["classes"] = classes_now(None)
             _write(rec)
             raise
         _local.depth, written, _local.written = 0, _local.written, None
+        _store_close(conn, lines, store)
         os.environ.update(private_before)
         for folder in made:
             shutil.rmtree(folder, ignore_errors=True)
@@ -484,13 +404,8 @@ def _wrap(key, fn, placed, path_args=None):
         rec["is_file"] = {p: os.path.isfile(p) for p in paths}
         rec["written"] = sorted(written)
         rec["cwd"], rec["folders"], rec["placed_names"] = str(cwd), folders, sorted(placed)
-        rec["obsdb"] = obsdb_now()
-        roots = [r for r in rec["obsdb"] if not r.startswith("(")]
-        in_obsdb = lambda s: next((r for r in roots if _within(os.path.realpath(s), r)), None)
-        rec["in_obsdb"] = {p: root for p in declared if (root := in_obsdb(os.path.join(str(cwd), p)))}
-        rec["folders_holding_obsdb"] = sorted(f[0] for f in folders for r in roots if _within(r, f[2]))
         # The opt-in rule, by the runtime's own function (`capture.admit_artifacts`): each figure
-        # and product the call returns that exists and is no obs-db item, in the output folder
+        # and product the call returns that exists, in the output folder
         # that holds it (the runtime has one folder per call; a test may pass several).
         def _home(path):
             held = [f[1] for f in folders if _within(path, f[1])]
@@ -508,7 +423,7 @@ def _wrap(key, fn, placed, path_args=None):
         artifacts = []
         for singular, caption, declared_path in entries:
             path = os.path.join(str(cwd), declared_path)
-            if os.path.isfile(path) and in_obsdb(path) is None:
+            if os.path.isfile(path):
                 home = _home(os.path.abspath(path))
                 real = next((f[2] for f in folders if f[1] == home), None)
                 artifacts.append((singular, caption, Path(path), Path(home) if home else None,
@@ -523,9 +438,8 @@ def _wrap(key, fn, placed, path_args=None):
         def _strings(key, value):
             if isinstance(value, str) and value.strip() and len(value) < 4096 and "\n" not in value and "\0" not in value:
                 text = value.strip()
-                # A file inside an output folder, not an echoed input, not an obs-db item.
-                if (inside(text) and os.path.isfile(text) and os.path.abspath(text) not in inputs
-                        and in_obsdb(text) is None):
+                # A file inside an output folder, not an echoed input.
+                if inside(text) and os.path.isfile(text) and os.path.abspath(text) not in inputs:
                     returned.append([key, text])
             elif isinstance(value, dict):
                 for item in value.values():
@@ -558,6 +472,27 @@ def _wrap(key, fn, placed, path_args=None):
     return inner
 
 
+def _bracket_only(key, fn):
+    """A store tool this change leaves unchanged: bracketed (its writes are a call's, not the
+    test's), never judged."""
+    @functools.wraps(fn)
+    def inner(*a, **k):
+        if getattr(_local, "depth", 0):
+            return fn(*a, **k)
+        conn, lines, info = _store_open(key)
+        _local.depth = 1
+        try:
+            return fn(*a, **k)
+        finally:
+            _local.depth = 0
+            _store_close(conn, lines, info)
+            if info is not None and "error" in info:  # its writes would read as written outside a call
+                _write({"event": "store_error", "tool": key, "error": info["error"]})
+
+    inner.__ar_returns_original__ = fn
+    return inner
+
+
 def pytest_configure(config):
     _BASETEMP[0] = getattr(config.option, "basetemp", None)
     _TREE[0] = os.path.realpath(os.getcwd())
@@ -572,17 +507,21 @@ def pytest_runtest_call(item):
 
 
 def pytest_collection_finish(session):
-    for key, entry in _TOOLS.items():
+    store_tools = json.loads(os.environ.get("AR_STORE_TOOLS") or "{}") if _STORE else {}
+    for key, entry in [*_TOOLS.items(), *((k, e) for k, e in store_tools.items() if k not in _TOOLS)]:
         module, name = entry[0], entry[1]
         placed = entry[2] if len(entry) > 2 else {}
         path_args = entry[3] if len(entry) > 3 else ()
+        if key not in _TOOLS and module not in sys.modules:
+            continue  # an unchanged store tool no collected test imports: nothing of the run calls it
         try:
             fn = getattr(importlib.import_module(module), name)
         except Exception as exc:
-            _write({"event": "import_error", "tool": key, "error": f"{type(exc).__name__}: {exc}"})
+            if key in _TOOLS:
+                _write({"event": "import_error", "tool": key, "error": f"{type(exc).__name__}: {exc}"})
             continue
         fn = getattr(fn, "__ar_returns_original__", fn)
-        wrapped = _wrap(key, fn, placed, path_args)
+        wrapped = _wrap(key, fn, placed, path_args) if key in _TOOLS else _bracket_only(key, fn)
         for mod in list(sys.modules.values()):
             for attr, value in list(getattr(mod, "__dict__", {}).items()):
                 if value is fn:
@@ -634,25 +573,15 @@ def _fail(check: str, detail: str) -> CheckResult:
 
 def _placed_checks(tool: str, rec: dict, artifacts: list[tuple[str, str]]) -> list[CheckResult]:
     """Opt-in: what the runtime's own minting decision (``capture.admit_artifacts``, run in the test
-    process) drops fails; an obs-db item is never declared; a file inside an output returned under
-    another key is declared; an output the test leaves unset is named."""
+    process) drops fails; a file inside an output returned under another key is declared; an output
+    the test leaves unset is named."""
     import os
 
     folders, cwd = rec.get("folders", []), rec.get("cwd", "")
-    in_obsdb = rec.get("in_obsdb", {})
     out: list[CheckResult] = []
-    for name in rec.get("folders_holding_obsdb", []):
-        out.append(_fail("placed", f"{tool}'s test passes {name} a folder that holds the obs-db, so the "
-                                   "check cannot tell products from obs-db items. Pass each output argument "
-                                   "a folder of its own (tmp_path / 'out'), apart from the obs-db."))
     names = rec.get("placed_names", [])
     for label, path in artifacts:
-        if path in in_obsdb:
-            out.append(_fail("placed", f"{tool} returns {label} at {path}, an obs-db item: "
-                                       "record it in its catalog through obsdb_catalog.neutral and "
-                                       "leave it out of 'products' and 'figures'; a science artifact goes under "
-                                       "an output argument instead."))
-        elif not folders and names:
+        if not folders and names:
             out.append(_fail("placed", f"{tool} returns {label} at {path}, but its test leaves "
                                        f"{', '.join(names)} unset; the runtime always fills it. Pass it a "
                                        "folder of the test's own (tmp_path / 'out') and write there."))
@@ -706,78 +635,210 @@ def _class_checks(tool: str, rec: dict) -> list[CheckResult]:
         )))
     for path in classes.get("unclassified", []):
         out.append(_fail("unclassified", (
-            f"{tool} writes {path}, which is in none of the three classes. Write an artifact under an "
-            "output argument and declare it, an obs-db item into the observation database through "
-            "obsdb_catalog, and the program's own bookkeeping in a temporary folder (tempfile) or "
-            "the home's caches."
+            f"{tool} writes {path}, which is in no class. Write an artifact under an output argument "
+            "and declare it, a product for a store into the store over S3 (the tool's \"writes\"), and "
+            "the program's own bookkeeping in a temporary folder (tempfile) or the home's caches."
         )))
     return out
 
 
-def _unhealthy(health) -> dict:
-    """What of a ``healthcheck`` report fails the gate: all but ``regressed``, a designed state (a
-    re-acquire flags its stale level-3 products for re-reduction; ruling 2026-11-04)."""
-    if health is True:
-        return {}
-    report = health if isinstance(health, dict) else {"report": health}
-    return {k: v for k, v in report.items() if k != "regressed"}
+def _store_meta() -> tuple[str, ...]:
+    """The metadata the toolkit's store helper writes on every object (``store.reconcile.META_*``)."""
+    from auto_research.store import reconcile
+
+    return (reconcile.META_RECIPE_HASH, reconcile.META_SHA256, reconcile.META_PRODUCER,
+            reconcile.META_TOOLKIT_COMMIT, reconcile.META_ENV_FINGERPRINT)
 
 
-def _obsdb_checks(tool: str, rec: dict) -> list[CheckResult]:
-    """Opt-out: what the call wrote into an obs-db is in its catalog, written by the catalog writer,
-    and the catalog is healthy after the call (``regressed`` accepted; unhealthy before it, the
-    fixture is named as the fault)."""
+def _where(w: dict) -> str:
+    return f"{w['store']} {w['bucket']}/{w['key']} (version {w['version_id']})"
+
+
+def _store_checks(tool: str, rec: dict, calls: dict[str, dict] | None, *, complete: bool) -> list[CheckResult]:
+    """What one bracketed call wrote in the run's throwaway store, as the store recorded it
+    (``store.ci``): every version in a store the tool's manifest names in ``writes``, creating its key,
+    with the helper's metadata; with ``complete`` (the call returned and did not fail), every recipe
+    hash it wrote under ends with one complete recipe file, naming this tool. ``calls`` is ``None`` for
+    a run without a store; in a run with one, a call the recorder did not bracket fails."""
+    from pydantic import ValidationError
+
+    from auto_research.store.reconcile import META_RECIPE_HASH, META_SHA256, RECIPE_FILE, RecipeFile
+
+    info = rec.get("store")
+    if calls is None:
+        return []
+    if info is None:
+        return [_fail("store", f"the CI pipeline's run had a store and {tool}'s call was not recorded there "
+                               "(the recorder found no bracket). Run the tests again; when it repeats, message "
+                               "the lead with this check.")]
+    facts = calls.get(str(info.get("call")))
+    error = info.get("error") or (facts or {}).get("error")
+    if error or facts is None:
+        return [_fail("store", f"the CI pipeline could not record what {tool} wrote in its store "
+                               f"({error or 'no record of the call'}). Run the tests again; when it repeats, "
+                               "message the lead with this check.")]
     out: list[CheckResult] = []
-    for root, info in sorted((rec.get("obsdb") or {}).items()):
-        if "error" in info:
-            out.append(_fail("obsdb", f"{tool}'s obs-db writes could not be checked at {root} "
-                                      f"({info['error']}). Keep obsdb_catalog importable from the toolkit."))
+    if "unverified" in facts.get("flags", []):
+        notes = facts.get("notes", [])
+        unpinned = [n for n in notes if "without a version" in n]
+        if unpinned:
+            out.append(_fail("store", f"{tool} " + "; ".join(unpinned) + ". Read each object by the version_id "
+                                      "its record names."))
+        rest = [n for n in notes if n not in unpinned]
+        if rest or not unpinned:
+            out.append(_fail("store", f"the store's records of {tool}'s call are incomplete: "
+                                      + "; ".join(rest) + ". Write each product once, through one store key, "
+                                      "within the call."))
+    writes = facts.get("writes", [])
+    removals = [n for n in facts.get("notes", []) if n.startswith("removed ")]
+    for note in removals:
+        out.append(_fail("store", f"{tool} {note}. Keep every version: write a new product instead."))
+    if "undeclared_write" in facts.get("flags", []) and "unverified" not in facts.get("flags", []):
+        # A write the store's log shows and its listing does not: named from the records' own notes.
+        for note in facts.get("notes", []):
+            if not note.startswith(("removed ", "wrote ")):
+                out.append(_fail("store", f"{tool}: {note}. Write products with single or multipart PUTs "
+                                          "of new keys only."))
+    for w in writes:
+        where = _where(w)
+        if w.get("delete_marker"):
+            out.append(_fail("store", f"{tool} deletes {where}. Keep every object; write a new product instead."))
             continue
-        if info.get("hand_written"):
-            out.append(_fail("obsdb", f"{tool} writes {root}/catalog.json itself. Record each product through "
-                                      "obsdb_catalog.neutral.new or .advance, which write the catalog."))
-        if info["unrecorded"]:
-            shown = ", ".join(info["unrecorded"][:5]) + (" …" if len(info["unrecorded"]) > 5 else "")
-            out.append(_fail("obsdb", (
-                f"{tool} wrote {shown} into the obs-db {root} and recorded nothing for it in the catalog. "
-                "Record each product it writes through obsdb_catalog.neutral.new or .advance; a science "
-                "artifact (an output that depends on a parameter, or on a setting outside the mission "
-                "team's defaults) goes under an output argument instead."
-            )))
-        if _unhealthy(info["health"]):
-            report = _unhealthy(info["health"])
-            shown = "; ".join(f"{k}: {json.dumps(v, default=str)[:200]}" for k, v in report.items())
-            if info.get("health_before") is not None and _unhealthy(info["health_before"]):
-                out.append(_fail("obsdb", (
-                    f"{tool}'s test gives an obs-db at {root} that is unhealthy before the call "
-                    f"(obsdb_catalog.healthcheck: {shown}). Seed the fixture through obsdb_catalog.neutral "
-                    "so it is healthy, then the check can judge the tool."
-                )))
-            else:
-                out.append(_fail("obsdb", (
-                    f"{tool} leaves the catalog of {root} unhealthy (obsdb_catalog.healthcheck: {shown}). "
-                    "Record every product the call writes through obsdb_catalog.neutral."
-                )))
+        if not w.get("declared", True):
+            out.append(_fail("store", (
+                f"{tool} writes {where}, and its manifest names no {w['store']} under \"writes\". List each "
+                "store the tool creates products in under its \"writes\", with its \"algorithm_version\".")))
+        if w.get("overwrote"):
+            out.append(_fail("store", (
+                f"{tool} writes {where} over the key's earlier version {w['overwrote']}. Write each key once, "
+                "create-only (If-None-Match: *), in the product's own recipe folder.")))
+        if w.get("read_error"):
+            out.append(_fail("store", f"{tool} wrote {where}, which the CI pipeline could not read back "
+                                      f"({w['read_error']}). Write it with a single PUT, as the store helper does."))
+            continue
+        meta = w.get("metadata") or {}
+        missing = [m for m in _store_meta() if not meta.get(m)]
+        if missing:
+            out.append(_fail("store", (
+                f"{tool} stores {where} without the metadata {', '.join('x-amz-meta-' + m for m in missing)}. "
+                "Store every object through the toolkit's store helper, which writes the recipe hash, sha256, "
+                "producer, toolkit commit and environment fingerprint on each.")))
+        elif meta.get(META_SHA256) != w.get("sha256"):
+            out.append(_fail("store", f"{tool} stores {where} with x-amz-meta-{META_SHA256} "
+                                      f"{meta.get(META_SHA256)!r}, which is not the sha256 of its bytes "
+                                      f"({w.get('sha256')}). Name each object's own sha256."))
+    if not complete:
+        return out
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for w in writes:
+        recipe_hash = (w.get("metadata") or {}).get(META_RECIPE_HASH)
+        if recipe_hash and not w.get("delete_marker"):
+            groups.setdefault((w["bucket"], recipe_hash), []).append(w)
+    for (bucket, recipe_hash), group in sorted(groups.items()):
+        files = [w for w in group if w["key"].rsplit("/", 1)[-1] == RECIPE_FILE]
+        members = [w for w in group if w not in files]
+        if len(files) != 1:
+            shown = ", ".join(w["key"] for w in group[:5]) + (" …" if len(group) > 5 else "")
+            out.append(_fail("store", (
+                f"{tool} stores {len(group)} object(s) of recipe {recipe_hash[:12]} in {bucket} ({shown}) and "
+                f"{len(files)} {RECIPE_FILE}. End each product with one {RECIPE_FILE}, written last, listing "
+                "every other object of the product (key, version_id, sha256, size).")))
+            continue
+        marker = files[0]
+        try:
+            listed = RecipeFile.model_validate_json(marker.get("recipe_file") or "")
+        except ValidationError as exc:
+            out.append(_fail("store", f"{tool}'s {_where(marker)} is not a recipe file ({exc.error_count()} "
+                                      f"problems: {exc.errors()[0]['msg']}). Write it in the store helper's form."))
+            continue
+        if listed.recipe_hash != recipe_hash or marker.get("recipe_hash_computed") != recipe_hash:
+            out.append(_fail("store", (
+                f"{tool}'s {_where(marker)} names recipe hash {listed.recipe_hash[:12]}; its objects carry "
+                f"{recipe_hash[:12]} and the catalog hashes its recipe to "
+                f"{str(marker.get('recipe_hash_computed'))[:12]}. Name the hash catalog.claim answered.")))
+        if listed.recipe.get("tool") != tool:
+            out.append(_fail("store", (
+                f"{tool}'s {_where(marker)} names the tool {listed.recipe.get('tool')!r}. Name the tool by its "
+                "manifest key, as the reconciler qualifies a product by it; a toolkit tool calls library code "
+                "only, so every product names the tool the agent called.")))
+        entries = {(o.key, o.version_id): o for o in listed.objects}
+        for w in members:
+            o = entries.pop((w["key"], w["version_id"]), None)
+            if o is None:
+                out.append(_fail("store", f"{tool}'s {_where(marker)} leaves out {_where(w)}. List every "
+                                          "object of the product in it."))
+            elif o.size != w.get("size") or o.sha256 != w.get("sha256"):
+                out.append(_fail("store", f"{tool}'s {_where(marker)} lists {_where(w)} with a size or sha256 "
+                                          "its bytes do not have. List each object's own."))
+        for (key, version), _o in sorted(entries.items()):
+            out.append(_fail("store", f"{tool}'s {_where(marker)} lists {bucket}/{key} version {version}, which "
+                                      "the call did not store. List the objects the call stored."))
+    out.extend(_product_checks(tool, facts, sorted({h for _b, h in groups})))
     return out
 
 
-def judge_record(rec: dict, out_dir: Path) -> list[CheckResult]:
-    """Every way one recorded call falls short of what the analyst runtime needs from it."""
+def _product_checks(tool: str, facts: dict, hashes: list[str]) -> list[CheckResult]:
+    """Ruling A, for a call that returned: each product it stored is claimed and committed in the
+    catalog by the call's own producer login; and, per call (main's ruling 1), the union of its
+    products' recipe inputs covers every version the call read from outside itself (the version
+    itself, or the product it belongs to); a version of the call's own products, read back or chained
+    into a later product of the same call, is no outside read."""
+    if "catalog_error" in facts:
+        return [_fail("store", f"the CI pipeline could not read the catalog after {tool}'s call "
+                               f"({facts['catalog_error']}). Run the tests again; when it repeats, message the lead.")]
+    out: list[CheckResult] = []
+    own = {(w.get("store"), w.get("bucket"), w.get("key"), w.get("version_id")) for w in facts.get("writes", [])}
+    reads = [r for r in facts.get("reads", [])
+             if (r["store"], r["bucket"], r["key"], r["version_id"]) not in own and r.get("product") not in hashes]
+    names: set[tuple] = set()
+    parents: set[str] = set()
+    for recipe_hash in hashes:
+        product = (facts.get("products") or {}).get(recipe_hash)
+        if product is None:
+            out.append(_fail("store", (
+                f"{tool} stores objects of recipe {recipe_hash[:12]} that the catalog holds no claim for. Claim "
+                "each recipe (catalog.claim) before storing its objects, then commit them (catalog.commit).")))
+            continue
+        if product["owner"] != facts.get("producer"):
+            out.append(_fail("store", f"{tool}'s product {recipe_hash[:12]} is claimed by {product['owner']}, not by "
+                                      "the call's own login. Claim and commit through the tool's own store keys."))
+        if product["state"] not in ("committed", "verified"):
+            out.append(_fail("store", (
+                f"{tool}'s product {recipe_hash[:12]} is {product['state']} in the catalog when the call returns. "
+                "Commit it (catalog.commit) once its recipe.json is stored.")))
+        names |= {(i.get("store"), i.get("bucket"), i.get("key"), i.get("version_id")) for i in product["inputs"]}
+        parents |= {i.get("product") for i in product["inputs"]} - {None}
+    if hashes:
+        for r in reads:
+            if (r["store"], r["bucket"], r["key"], r["version_id"]) not in names and (
+                    r.get("product") is None or r["product"] not in parents):
+                out.append(_fail("store", (
+                    f"{tool} read {_where(r)}, and no product the call stored names it among its recipe's "
+                    "inputs. List every record a product is made from among its inputs (a product's "
+                    "recipe.json names the whole product).")))
+    return out
+
+
+def judge_record(rec: dict, out_dir: Path, calls: dict[str, dict] | None = None) -> list[CheckResult]:
+    """Every way one recorded call falls short of what the analyst runtime needs from it. ``calls``:
+    what the run's store recorded of each bracketed call (``store.ci``), by call id; ``None`` for a
+    run without a store."""
     tool = rec["tool"]
-    if "raised" in rec:  # a call that raised: what it left in an obs-db, and every other write
-        return _obsdb_checks(tool, rec) + _class_checks(tool, rec)
+    if "raised" in rec:  # a call that raised: what it left in the store, and every other write
+        return _store_checks(tool, rec, calls, complete=False) + _class_checks(tool, rec)
     if "transmit_error" in rec:
-        return [_fail("transmit", (
+        return _store_checks(tool, rec, calls, complete=False) + [_fail("transmit", (
             f"{tool} returned a value the tool REPL cannot send ({rec['transmit_error']}), so the "
             "call fails in a real run. Return plain JSON types: float()/int() for numpy scalars, "
             ".tolist() for arrays, str() for paths."
         ))]
     raw = normalize_tool_raw(rec["payload"])
     text, exit_code = tool_text(raw)
-    obsdb = _obsdb_checks(tool, rec) + _class_checks(tool, rec)  # judged on a failed call too
+    # Judged on a failed call too (all but the recipe file: a failed production ends without one).
+    written = _store_checks(tool, rec, calls, complete=exit_code == 0) + _class_checks(tool, rec)
     if exit_code != 0:
-        return obsdb  # a failed call is receipted as failed and grounds nothing
-    out: list[CheckResult] = obsdb
+        return written  # a failed call is receipted as failed and grounds nothing
+    out: list[CheckResult] = written
     is_file = rec.get("is_file", {})
 
     figures, notes = parse_tool_figures(raw.get("figures"))
@@ -838,9 +899,13 @@ def judge_record(rec: dict, out_dir: Path) -> list[CheckResult]:
     return out
 
 
-def judge(out_dir: Path, tools: dict[str, tuple]) -> tuple[list[CheckResult], list[CheckResult]]:
+def judge(out_dir: Path, tools: dict[str, tuple],
+          store_calls: list[dict] | None = None) -> tuple[list[CheckResult], list[CheckResult]]:
     """``(checks, findings)`` for one Layer-B run's records. No record of the plugin loading is a
-    failure (the check did not run); a watched tool no test called is a finding for the co-lead."""
+    failure (the check did not run); a watched tool no test called is a finding for the co-lead.
+    ``store_calls``: what the run's throwaway store recorded of each bracketed call (``CIStore.calls``);
+    ``None`` for a run without a store."""
+    calls = None if store_calls is None else {str(c.get("call")): c for c in store_calls}
     path = Path(out_dir) / RECORDS
     lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
     records = [json.loads(line) for line in lines if line.strip()]
@@ -855,9 +920,13 @@ def judge(out_dir: Path, tools: dict[str, tuple]) -> tuple[list[CheckResult], li
     for rec in records:
         if rec.get("event") == "import_error":
             checks.append(_fail("recorder", f"{rec['tool']} could not be imported to watch: {rec['error']}"))
+        elif rec.get("event") == "store_error":
+            checks.append(_fail("store", f"the CI pipeline could not record what {rec['tool']} wrote in its store "
+                                         f"({rec['error']}). Run the tests again; when it repeats, message the lead "
+                                         "with this check."))
         elif "tool" in rec and "event" not in rec:
             called.add(rec["tool"])
-            checks.extend(judge_record(rec, Path(out_dir)))
+            checks.extend(judge_record(rec, Path(out_dir), calls))
     # One line per distinct problem: a test that calls a tool twenty times reports it once.
     checks = list({c.detail: c for c in checks}.values())
     noted = [c for c in checks if c.name.startswith("finding.")]  # for the co-lead, not a failure

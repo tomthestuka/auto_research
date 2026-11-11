@@ -103,15 +103,18 @@ def test_run_research_actually_calls_both_factories():
     """
     tree = _tree(RUNTIME)
     owners = _enclosing_functions(tree)
-    # The lead's and reviewer's read-only loops are built through their own attach seams, which
-    # `run_research` calls, so a factory counts as the run path's when either calls it.
-    seams = {"attach_lead_runtime", "attach_reviewer_runtime"}
+    # The lead's and reviewer's read-only loops are built through their own seams, which
+    # `run_research` calls (the lead's through `wire_lead`, which calls `attach_lead_runtime`), so a
+    # factory counts as the run path's when one of them calls it.
+    seams = {"wire_lead", "attach_reviewer_runtime"}
     for seam in seams:
         callers = {owners.get(line) for _, line in _calls_to(tree, (seam,))}
         assert "run_research" in callers, f"{seam} is not called by run_research"
+    lead_seam = {owners.get(line) for _, line in _calls_to(tree, ("attach_lead_runtime",))}
+    assert "wire_lead" in lead_seam, "wire_lead does not wire the lead through attach_lead_runtime"
     for factory in FACTORIES:
         callers = {owners.get(line) for _, line in _calls_to(tree, (factory,))}
-        assert callers & ({"run_research"} | seams), (
+        assert callers & ({"run_research", "attach_lead_runtime"} | seams), (
             f"{factory} is not called by run_research (callers: {callers or 'none'})"
         )
 
@@ -132,22 +135,28 @@ def test_the_seat_probe_does_not_hand_roll_a_role_loop():
 
 
 def test_the_seat_probe_uses_the_factories_it_should():
+    """The probe's lead is wired by `wire_lead` (run_research's lead wiring, which builds its loop
+    through `readonly_tools_for`) and its worker by `attach_worker_runtime`."""
     source = PROBE.read_text(encoding="utf-8")
-    for factory in (*FACTORIES, "readonly_roots_for"):
+    for factory in ("wire_lead", "attach_worker_runtime"):
         assert factory in source, f"the seat probe never calls {factory}"
 
 
 def test_the_lead_and_reviewer_loops_differ_the_way_production_says():
     """The two read-only loops are not interchangeable, and the difference is the point.
 
-    The lead investigates toolkit source and the observation archive; the reviewer is the paper
+    The lead investigates toolkit source and the stores' catalogs; the reviewer is the paper
     surface. A probe that gave the lead the reviewer's loop would measure a role the pipeline does
-    not have, and nothing would fail.
+    not have, and nothing would fail. Both are offered the same login; only the lead declares it.
     """
     from auto_research.graph.runtime import readonly_tools_for
+    from auto_research.store.keys import Credentials
 
-    lead = readonly_tools_for("analyst_lead", roots=[REPO])
-    reviewer = readonly_tools_for("reviewer", roots=[REPO])
+    login = {"db": Credentials(store="db", unit="analyst_lead", run="r", role_class="reader",
+                               principal="ar_r_analyst_lead_0", access_key_id="k", secret_access_key="s",
+                               pg_password="p")}
+    lead = readonly_tools_for("analyst_lead", roots=[REPO], catalog=login)
+    reviewer = readonly_tools_for("reviewer", roots=[REPO], catalog=login)
     lead_tools = {definition["name"] for definition in lead.tool_definitions()}
     reviewer_tools = {definition["name"] for definition in reviewer.tool_definitions()}
 
@@ -181,12 +190,16 @@ def test_the_lead_has_a_wiring_seam_and_run_research_uses_it():
         node.name for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    assert "attach_lead_runtime" in defined, "the lead has no wiring seam in runtime.py"
+    assert {"attach_lead_runtime", "wire_lead"} <= defined, "the lead has no wiring seam in runtime.py"
     owners = _enclosing_functions(tree)
-    callers = {owners.get(line) for _, line in _calls_to(tree, ("attach_lead_runtime",))}
+    callers = {owners.get(line) for _, line in _calls_to(tree, ("wire_lead",))}
     assert "run_research" in callers, (
-        f"attach_lead_runtime is not called by run_research (callers: {callers or 'none'}) — a "
+        f"wire_lead is not called by run_research (callers: {callers or 'none'}) — a "
         "seam the run path does not use describes a role production no longer builds"
+    )
+    attached = {owners.get(line) for _, line in _calls_to(tree, ("attach_lead_runtime",))}
+    assert "wire_lead" in attached and "run_research" not in attached, (
+        f"run_research wires the lead beside wire_lead (attach_lead_runtime callers: {attached})"
     )
 
 
@@ -194,8 +207,8 @@ def test_the_stop_drill_wires_its_lead_through_the_seam():
     """The live drill must not restate the lead's wiring; it must ask for production's."""
     drill = Path(__file__).with_name("test_live_stop_mid_drive.py")
     tree = _tree(drill)
-    called = {name for name, _ in _calls_to(tree, ("attach_lead_runtime", "readonly_tools_for"))}
-    assert "attach_lead_runtime" in called, "the drill hand-rolls the lead's wiring"
+    called = {name for name, _ in _calls_to(tree, ("wire_lead", "attach_lead_runtime", "readonly_tools_for"))}
+    assert called == {"wire_lead"}, f"the drill hand-rolls the lead's wiring: {sorted(called)}"
 
     # The tell-tale of a hand-rolled equivalent is assigning the attributes the seam owns.
     source = drill.read_text(encoding="utf-8")
@@ -245,14 +258,15 @@ def _restated_fields(tree: ast.AST) -> list[str]:
 
 
 @pytest.mark.parametrize("cell, builder, role", [
-    ("test_live_turn_end_shapes.py", "_wired_lead", "attach_lead_runtime"),
+    ("test_live_turn_end_shapes.py", "_wired_lead", "wire_lead"),
     ("test_live_librarian_shapes.py", "_drive", "attach_librarian_runtime"),
 ])
 def test_the_shape_matrices_wire_their_role_through_the_seams_and_restate_nothing(cell, builder, role):
     """User rule 2026-10-28: tests use only module endpoints, never a hand-rolled equivalent. The
     builder calls the seams, and nowhere in the file is a field the seams own assigned by hand."""
     tree = _tree(Path(__file__).with_name(cell))
-    node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == builder)
+    node = next(n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == builder)
     called = {name for name, _ in _calls_to(node, (role, "attach_channel"))}
     assert called == {role, "attach_channel"}, f"{cell}:{builder} does not wire through {role} and attach_channel"
     restated = _restated_fields(tree)

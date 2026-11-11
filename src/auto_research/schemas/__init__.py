@@ -1,7 +1,7 @@
 """Pydantic v2 message schemas: the inter-agent protocol."""
 
 from auto_research.schemas.analysis import AnalysisTask, AnalystReport
-from auto_research.schemas.artifacts import InputFile, PaperAttribution, Receipt
+from auto_research.schemas.artifacts import InputFile, PaperAttribution, Receipt, StoreObject
 from auto_research.schemas.base import MessageModel
 from auto_research.schemas.figures import (
     DocumentRef,
@@ -59,6 +59,7 @@ __all__ = [
     "MessageModel",
     "PaperAttribution",
     "Receipt",
+    "StoreObject",
     "ResearchReport",
     "ResearchRequest",
     "ReviewerReport",

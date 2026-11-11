@@ -174,15 +174,22 @@ def test_the_tool_request_block_round_trips(tmp_path):
     out = _write(provider, doc(tool_request=(
         "request_kind: new_capability\nproposed_tool_name: fold_curve\n"
         "science_context: folding is missing\nexpected_behavior: folds a light curve\n"
-        "  on a given period\nvalidation_data: MISSION 0100 synthetic"
+        "  on a given period\nvalidation_data: db | data | k/s 1/a b.dat | v7"
     )))
     assert not out.is_error, out.text
     request = ws.written_report.tool_request
     assert request.proposed_tool_name == "fold_curve"
     assert request.expected_behavior == "folds a light curve\non a given period"
-    assert request.validation_data[0].obsid == "0100" and request.validation_data[0].synthetic
+    record = request.validation_data[0]
+    assert (record.store, record.bucket, record.key, record.version_id) == ("db", "data", "k/s 1/a b.dat", "v7")
     out = _edit(provider, "proposed_tool_name: fold_curve", "tool: fold_curve")
     assert out.is_error and "'tool' is not a key it takes" in out.text
+    # A key holding '|' or a leading space is named whole (store, bucket and version hold no '|').
+    out = _edit(provider, "validation_data: db | data | k/s 1/a b.dat | v7", "validation_data: db | data |  a|b  | v7")
+    assert not out.is_error, out.text
+    assert ws.written_report.tool_request.validation_data[0].key == " a|b "
+    out = _edit(provider, "validation_data: db | data |  a|b  | v7", "validation_data: IXPE 0100")
+    assert out.is_error and "validation_data takes 'STORE | BUCKET | KEY | VERSION_ID'" in out.text
 
 
 # ── every block kind survives render → parse ─────────────────────────────────
@@ -197,7 +204,8 @@ def test_render_then_parse_is_the_identity_for_every_role():
         "tool_request": {"request_kind": "fix_existing", "proposed_tool_name": "t",
                          "science_context": "s", "expected_behavior": "e\n  indented",
                          "observed_issue": "o", "notes": "n",
-                         "validation_data": [{"mission": "M", "obsid": "1", "synthetic": False}]},
+                         "validation_data": [{"store": "db", "bucket": "b", "key": "k/s/x y.dat",
+                                              "version_id": "v1"}]},
     }
     reviewer = {
         "assign_to": "human", "accepted": True, "rationale": "r", "follow_up": "f", "title": "T",

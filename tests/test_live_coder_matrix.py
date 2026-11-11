@@ -435,6 +435,7 @@ async def _run_leg(leg: Leg, root: Path, monitor: _Monitor, escalations: Escalat
 def _matrix_spec():
     """A small real `ToolSpec`: the seed turn's shape without a science-stack dependency."""
     from auto_research.schemas import ProposedCheck, ToolSpec, ValidationDataset
+    from tests.live_store import STAND_IN_RECORD
 
     return ToolSpec(
         id="matrix-demo-1",
@@ -453,9 +454,9 @@ def _matrix_spec():
             "the count, including the empty-file case."
         ),
         validation_data=[
-            # The tool under test writes its own CSV into tmp_path, so the "input" is a marked
-            # synthetic one rather than an observation.
-            ValidationDataset(mission="none", obsid="synth-matrix-csv", synthetic=True)
+            # The tool under test writes its own CSV into tmp_path, and the matrix never reaches the
+            # gate: a record in the store's form that names no object.
+            ValidationDataset(**STAND_IN_RECORD)
         ],
         proposed_checks=[
             ProposedCheck(

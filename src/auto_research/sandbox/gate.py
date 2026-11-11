@@ -20,7 +20,9 @@ jobs alone (:func:`_passed`). The jobs, by the checks each runs:
 The test jobs run the toolkit's test classes (the contract's ``test_classes``): a change's own
 tests of every class but ``live`` (no network here), twice; the earlier ``fast`` ones once; each
 ``data("<name>")`` test on the data set config ``test_data`` names, bound read-only and named by
-``TOOLKIT_DATA_<NAME>`` — a data test skipped here fails the change.
+``TOOLKIT_DATA_<NAME>`` — a data test skipped here fails the change. Hermetic: a run sees the
+declared data sets and, when the toolkit declares a store tool, a throwaway store of its own
+(``store.ci``), never the real one; ``layer_b.returns.store`` judges what each new tool wrote there.
 
 The checks keep their two historical layers on the report (``layer_a``/``layer_b``):
   Layer A (generic, domain-blind)  — the no-fabrication scan, structural checks,
@@ -51,6 +53,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -100,8 +103,8 @@ def _code_gate_config() -> dict:
 
 def _in_package(rel: str) -> bool:
     """Whether a toolkit-relative path is a top-level package (the toolkit contract's
-    ``package_glob``) or inside one. Top-level only: `obsdb_catalog/evil_utils/` is inside the
-    protected catalog writer."""
+    ``package_glob``) or inside one. Top-level only: `tools/evil_utils/` lies inside `tools/`, which
+    is no package."""
     return toolkit().is_package(rel.split("/", 1)[0])
 
 
@@ -190,7 +193,7 @@ def collect_all_changes(worktree: Path) -> list[str]:
     everything outside a ``*_utils`` package. That filter was then reused to answer *"did the
     author touch anything it should not"*, over a list from which it had already removed every
     violation — a check that could not fail for any input. Measured live 2026-09-08 (slot 4): 193
-    changed lines in ``obsdb_catalog``, the toolkit's one hand-built trusted catalog writer, were
+    changed lines in the toolkit's hand-built trusted catalog writer (a package outside the glob) were
     never scanned, never tested, never shown to the reviewer, reported as "only allowed paths
     touched", and unstageable — yielding a commit whose staged code imports a symbol defined only
     in an unstaged file, so it does not run on a clean checkout.
@@ -415,16 +418,6 @@ def _is_placeholder_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return False
 
 
-def _obsid_exempt(rel_path: str, cfg: dict) -> list[re.Pattern]:
-    """The ObsID tokens whose lines the vocabulary scan skips, for a file under a package's
-    ``tests/`` only: a test builds its marked synthetic fixture there (user ruling 2026-11-04),
-    while a synthetic ObsID written into a tool's own code (``lib/``, ``skills/``) is exactly what
-    the scan exists for."""
-    if Path(rel_path).parts[1:2] != ("tests",):  # <package>/tests/…
-        return []
-    return [re.compile(p) for p in cfg.get("allowlist_obsid_tokens") or []]
-
-
 def scan_python_source(
     rel_path: str,
     source: str,
@@ -451,17 +444,9 @@ def scan_python_source(
     finding_cfg = set(cfg.get("finding_code_patterns") or [])
     finding_detectors = finding_cfg & _FINDING_DETECTORS
     finding_code_patterns = sorted(finding_cfg - _FINDING_DETECTORS)
-    allow_res = _obsid_exempt(rel_path, cfg)
 
     hard: list[CheckResult] = []
     findings: list[CheckResult] = []
-    source_lines = source.split("\n")  # git's lines (`\n` only), as `added` counts them
-
-    # Physical source lines that reference an ObsID/path token are exempt from the
-    # vocabulary scan (§9.5 fixtures load a marked `synth…` ObsID directly).
-    allow_lines = {
-        i for i, line in enumerate(source_lines, 1) if any(rx.search(line) for rx in allow_res)
-    }
 
     def _hard(name: str, lineno: int, detail: str) -> None:
         hard.append(CheckResult(name=name, layer="A", passed=False, detail=f"{rel_path}:{lineno} — {detail}"))
@@ -476,14 +461,11 @@ def scan_python_source(
         # A string constant is in scope when any physical line it spans was added, and is then
         # scanned whole: its value's own line breaks (a `\n` escape, a form feed) are not git's
         # lines, so mapping them onto line numbers let added text escape (B3c-1 review 25).
-        if span is not None:
-            if added is not None and not any(line in added for line in span):
-                return
-            if all(line in allow_lines for line in span):
-                return
+        if span is not None and added is not None and not any(line in added for line in span):
+            return
         for offset, raw in enumerate(text.splitlines()):
             lineno = base_line + offset if span is None else span.start
-            if span is None and (not _in_scope(lineno, added) or lineno in allow_lines):
+            if span is None and not _in_scope(lineno, added):
                 continue
             low = raw.lower()
             for phrase in _match_vocabulary(low, vocab):
@@ -588,19 +570,18 @@ def scan_text_source(
 
     There is no AST, so the RNG / placeholder-body / literal-array / provenance checks
     (all Python concepts) do not apply; the vocabulary scans do, run over every physical
-    line (a shell file has no cheap comment/string boundary to narrow to). The ObsID
-    allowlist and ``added`` scoping match :func:`scan_python_source`. Pure.
+    line (a shell file has no cheap comment/string boundary to narrow to). ``added`` scoping
+    matches :func:`scan_python_source`. Pure.
     """
     cfg = config if config is not None else _code_gate_config()
     vocab = [v.lower() for v in cfg.get("hard_fail_vocabulary") or []]
     finding_vocab = [v.lower() for v in cfg.get("finding_vocabulary") or []]
-    allow_res = _obsid_exempt(rel_path, cfg)
 
     hard: list[CheckResult] = []
     findings: list[CheckResult] = []
     seen: set[tuple[int, str]] = set()
     for lineno, raw in enumerate(source.split("\n"), 1):  # git's lines (`\n` only)
-        if not _in_scope(lineno, added) or any(rx.search(raw) for rx in allow_res):
+        if not _in_scope(lineno, added):
             continue
         low = raw.lower()
         for phrase in _match_vocabulary(low, vocab):
@@ -841,9 +822,9 @@ def check_structural(
     # (a) changes_allowed — the gate's third job, beside the no-fabrication scan and the double
     # pytest run (§9.4). An **explicit allow-list**: a change is permitted only under a
     # ``*_utils`` package, which is the layout `prompts/coder.md` already teaches and §9.2
-    # specifies. Everything else is rejected and named, `obsdb_catalog` included — the toolkit's
-    # hand-built trusted catalog writer is human + build-agent work (CLAUDE.md §3), never the
-    # runtime coder's, and a review that asks for a change inside it is a message to the lead.
+    # specifies. Everything else is rejected and named, a hand-built package outside the glob
+    # included: it is human + build-agent work (CLAUDE.md §3), never the runtime coder's, and a
+    # review that asks for a change inside it is a message to the lead.
     #
     # Computed over `collect_all_changes`, NOT over `targets`: the old check filtered its input
     # through the very pattern it then tested, so it could not fail for any input (F2). An
@@ -932,9 +913,10 @@ def check_structural(
     ))
 
     # (d) every argument of every tool in a touched package declares its kind (and an optional
-    #     parameter its default): the input validator refuses a call it cannot check, so a tool
-    #     committed without them could never run (``provenance.inputs.manifest_problems``).
-    from auto_research.provenance.inputs import manifest_problems
+    #     parameter its default; a writing tool its stores and algorithm version): the input
+    #     validator refuses a call it cannot check, so a tool committed without them could never
+    #     run (``provenance.inputs.spec_problems``).
+    from auto_research.provenance.inputs import spec_problems
 
     unchecked: list[str] = []
     for pkg_name, pkg_root in packages.items():
@@ -946,14 +928,26 @@ def check_structural(
             unchecked.append(f"{pkg_name}: TOOL_MANIFEST is not a pure-data dict literal")
             continue
         for tool, spec in entries.items():
-            unchecked.extend(manifest_problems(str(tool), spec.get("args_schema") if isinstance(spec, dict) else None))
+            unchecked.extend(spec_problems(str(tool), spec))
+    # A `writes`/`reads` store the configuration does not declare could never be reached (main's ruling B).
+    from auto_research.store import ci
+    from auto_research.store import config as store_config
+
+    try:
+        configured = [s.name for s in store_config.stores(_orchestration_config())]
+    except ValueError:
+        configured = []
+    unchecked.extend(ci.undeclared_store_names(worktree, packages, configured))
     out.append(CheckResult(
         name="structural.argument_kinds", layer="A", passed=not unchecked,
         detail="" if not unchecked else (
             "; ".join(unchecked) + ". Each args_schema property declares \"kind\": \"data\" (another "
             "tool's output, passed by reference), \"parameter\" (a number that changes the science; "
-            "an optional one declares \"default\"), \"path\", \"setting\", or \"output\" (where the "
-            "tool writes what it returns, with its \"shape\": folder, file or prefix)."
+            "an optional one declares \"default\"), \"path\", \"setting\", \"output\" (where the "
+            "tool writes what it returns, with its \"shape\": folder, file or prefix), or \"record\" "
+            "(an object in a store, {\"store\", \"bucket\", \"key\"[, \"version_id\"]}). A tool that creates "
+            "products in a store lists those stores under \"writes\" and declares its "
+            "\"algorithm_version\"; one that reads a store without a record argument lists it under \"reads\"."
         ),
     ))
     return out
@@ -1265,6 +1259,7 @@ def _gate_data() -> dict[str, Path]:
 def ci_test_rules() -> str:
     """The test-class rules the CI pipeline applies, and the data sets it provides (``_gate_data``),
     as the lead reads them where it briefs a coding chain (W6): model-facing text, one paragraph."""
+    from auto_research.store import ci
     from auto_research.toolkit_contract import data_variable
 
     try:
@@ -1277,7 +1272,14 @@ def ci_test_rules() -> str:
             "xfail test fails the change. A test marked live (it reaches the network) is listed for "
             "the co-lead to judge, and the change also needs tests that run offline. Real data "
             "reaches a test through a data set: a test marked data(\"<name>\") reads the set's folder "
-            f"from TOOLKIT_DATA_<NAME>. Data sets the CI pipeline provides: {sets}.")
+            f"from TOOLKIT_DATA_<NAME>. Data sets the CI pipeline provides: {sets}. A toolkit with store "
+            "tools (\"writes\", \"reads\" or a record argument) gets a fresh throwaway store in each test run: "
+            "the tests reach it with the producer's keys in the standard AWS_* and PG* variables, "
+            f"{ci.ENV_STORE} names it, and a test stages its inputs through {ci.ENV_SEED} (a data set's file, "
+            "or synthetic bytes stored as a product), and through it only. Each product a "
+            "new tool stores is create-only, carries the store helper's metadata, ends with its recipe.json, "
+            "is committed by the tool's own login and names among its inputs what the call read. A toolkit "
+            "tool calls library code only, so every product names the tool the agent called.")
 
 
 def _junit_classes(junit_path: Path) -> dict[str, tuple[list[str], str, bool]]:
@@ -1372,7 +1374,7 @@ def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[boo
     Pass ⇔ pytest exited 0 **and ≥1 test PASSED**. ``rc == 0`` alone is insufficient:
     pytest also exits 0 when every test is SKIPPED, so a suite whose data-guards
     (``skipif(not path.exists(...))``) all fire — the normal-path case when the validation
-    ObsID is absent or a path is hardcoded/off-host — would merge a tool that never ran,
+    data is absent or a path is hardcoded/off-host — would merge a tool that never ran,
     breaking §9.4 ("an untested tool is not mergeable"). Nothing verified ⇒ fail loud
     (→ rework or honest failure), never a silent pass.
     """
@@ -1393,7 +1395,7 @@ def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[boo
 async def _default_test_runner(
     worktree: Path, test_paths: list[str], *, timeout_s: int = 900,
     returns_tools: dict[str, tuple[str, str]] | None = None, masked: Path | None = None,
-    environment: Any, regression: list[str] | tuple[str, ...] = (),
+    environment: Any, regression: list[str] | tuple[str, ...] = (), validation: list | tuple = (),
 ) -> dict:
     """Run the worktree's tests twice and compare **per-test outcomes** for determinism.
 
@@ -1430,23 +1432,80 @@ async def _default_test_runner(
     extra_ro = tuple(str(p) for p in (environment.prefix,
                                       *((environment.activate.parent,) if environment.activate else ())))
 
+    from auto_research.store import ci
     from auto_research.toolkit_contract import data_variable
 
     classes = toolkit().test_classes
     # Each data set the host provides, named to the tests (the toolkit's root conftest reads it).
-    data_env = {data_variable(name): str(folder) for name, folder in _gate_data().items()}
+    data = _gate_data()
+    data_env = {data_variable(name): str(folder) for name, folder in data.items()}
+    # A store tool in the tree under test (`writes`, or a `record` argument): each run gets a
+    # throwaway store of its own, mirroring the configured one (`store.ci`); the real one stays out.
+    tools = ci.store_tools(worktree)
+    mirror = ci.mirror_of(cfg) if tools.packages else None
+    # The brief's validation records are copied in from the real store before each run that has a
+    # store (S9): a record the real store lacks fails `layer_b.validation_data` before any test runs.
+    validation = ([v.model_dump() if hasattr(v, "model_dump") else dict(v) for v in validation]
+                  if tools.packages else [])
+    outside: list[str] = []  # ruling E: versions no call wrote, from the sweep after each run
+    if validation:
+        missing, unreachable = ci.validation_problems(mirror, validation)
+        if missing or unreachable:
+            stopped = [CheckResult(
+                name="layer_b.validation_data", layer="B", passed=False,
+                detail=("The brief's validation data could not be copied into the CI pipeline's store: "
+                        + "; ".join(missing) + ". The lead names records the catalog query lists; message "
+                        "the lead with this check."))] if missing else []
+            if unreachable:
+                stopped.append(CheckResult(name=INFRA_REAL_STORE, layer="B", passed=False, detail=(
+                    "The real store did not answer the CI pipeline's check of the brief's validation data: "
+                    + "; ".join(unreachable) + ". The change was not judged; this lies outside it.")))
+            return {"results": stopped, "findings": [], "deterministic": True, "determinism_detail": ""}
 
-    def _run(junit_path: str, paths: list[str] | None = None) -> tuple[int, str, dict[str, str]]:
+    def _run(junit_path: str, paths: list[str] | None = None, *,
+             packages: frozenset[str] = frozenset()) -> tuple[int, str, dict[str, str], list[dict] | None]:
+        """One pytest run: ``(exit code, output, outcomes, what its store recorded of each call)``,
+        the last ``None`` for a run without a store. ``packages``: the packages whose tests it holds;
+        it gets a store only when one of them declares a store tool (ruling C)."""
+        with contextlib.ExitStack() as stack:
+            ci_store = None
+            if mirror is not None and packages & tools.packages:
+                try:
+                    ci_store = stack.enter_context(ci.throwaway(mirror, data_sets=data, writes=tools.writes,
+                                                                validation=validation, cache=cache,
+                                                                tools=tools.entries))
+                except ci.ValidationRefused as exc:  # the brief's to fix: no test runs on it
+                    raise _Stopped(CheckResult(name="layer_b.validation_data", layer="B", passed=False, detail=(
+                        f"The brief's validation data could not be copied into the CI pipeline's store: {exc}. "
+                        "Message the lead with this check."))) from None
+                except Exception as exc:  # noqa: BLE001 — a fault outside the change (ruling B)
+                    raise _Stopped(CheckResult(name=INFRA_STORE_START, layer="B", passed=False, detail=(
+                        f"the throwaway store did not start ({type(exc).__name__}: {str(exc)[-600:]}). The "
+                        "change was not judged; this lies outside it."))) from None
+            rc, out, outcomes = _pytest(junit_path, paths, ci_store)
+            if ci_store is not None:
+                try:
+                    outside.extend(f"{v['bucket']}/{v['key']} version {v['version_id']}" for v in ci_store.sweep())
+                except Exception as exc:  # noqa: BLE001 — the sweep could not list the store
+                    raise _Stopped(CheckResult(name=INFRA_STORE_START, layer="B", passed=False, detail=(
+                        f"the throwaway store could not be listed after the run ({type(exc).__name__}: {exc}). "
+                        "The change was not judged; this lies outside it."))) from None
+            return rc, out, outcomes, list(ci_store.calls) if ci_store is not None else None
+
+    def _pytest(junit_path: str, paths: list[str] | None, ci_store) -> tuple[int, str, dict[str, str]]:
         # The return check's recorder (G15) loads in both runs, so the two argvs stay identical for
         # the determinism compare; each run records into its own directory beside its JUnit file.
         plugin_dir = Path(junit_path).with_suffix(".returns")
-        plugin_args, run_env = returns.install(plugin_dir, returns_tools or {}, {**env, **data_env})
-        # The test-class labels (`data` tests in the JUnit report), from the same folder.
+        store_env = ci_store.env if ci_store is not None else {}
+        plugin_args, run_env = returns.install(plugin_dir, returns_tools or {}, {**env, **data_env, **store_env})
+        # The test-class labels (`data` tests in the JUnit report), and the store's relay into the
+        # jail's own loopback (idle in a run without a store), from the same folder.
         (plugin_dir / f"{_CLASSES_PLUGIN}.py").write_text(_CLASSES_SOURCE, encoding="utf-8")
+        (plugin_dir / f"{ci.PLUGIN_NAME}.py").write_text(ci.PLUGIN_SOURCE, encoding="utf-8")
         run_env["AR_DATA_MARKER"] = classes.data
         # The change's own tests: every class but live (no network here); `paths` brings its own selection.
-        argv = [python_exec, "-m", "pytest", "-p", "no:cacheprovider", *plugin_args, "-p", _CLASSES_PLUGIN, "-q",
-                f"--junitxml={junit_path}",
+        argv = [python_exec, "-m", "pytest", "-p", "no:cacheprovider", *plugin_args, "-p", _CLASSES_PLUGIN,
+                "-p", ci.PLUGIN_NAME, "-q", f"--junitxml={junit_path}",
                 *(["-m", f"not ({classes.live})", *test_paths] if paths is None else paths)]
         # A clean start in the environment, inside the jail below (the shared launcher).
         import shlex
@@ -1455,13 +1514,15 @@ async def _default_test_runner(
 
         script = in_environment(environment, f'{shlex.quote(python_exec)} "$@"', worktree, pass_args=True,
                                 keep=("AR_RETURNS_OUT", "AR_RETURNS_TOOLS", "AR_RETURNS_COPY_CAP", "PYTHONPATH",
-                                      "AR_DATA_MARKER", *data_env))
+                                      "AR_DATA_MARKER", *data_env, *store_env))
         argv = ["/bin/bash", "--noprofile", "--norc", "-c", script, "_", *argv[1:]]
         # The OS jail, with **no network** (§12): a mergeability verdict that can reach the network
         # is a verdict that depends on something other than the data on disk, and §9.4's premise is
         # real local input. Verified against all 30 existing Layer-B suites before being turned on.
+        # A run with a store sees its socket folder, read-only, and nothing else of it.
         run_env = {**run_env, "PYTHONNOUSERSITE": "1"}
-        argv = _jailed_pytest(argv, junit_path=junit_path, worktree=worktree, masked=masked, extra_ro=extra_ro)
+        argv = _jailed_pytest(argv, junit_path=junit_path, worktree=worktree, masked=masked,
+                              extra_ro=(*extra_ro, *((str(ci_store.socket_dir),) if ci_store is not None else ())))
         # Its own folder for each declared private variable (F23), shared by both runs like the
         # private /tmp. In an environment, the launcher puts the kept part back after the activation
         # (an activation may point the variable at the real home's folder, F23).
@@ -1488,73 +1549,91 @@ async def _default_test_runner(
 
     # JUnit reports go to a throwaway dir outside the worktree, so they never pollute the
     # changeset (collect_targets) or survive a later git clean.
-    with tempfile.TemporaryDirectory() as td:
-        rc1, out1, map1 = _run(str(Path(td) / "junit1.xml")) if test_paths else (0, "", {})
-        data1 = _junit_data_tests(Path(td) / "junit1.xml") if test_paths else {}
-        unverified1 = _unverified(Path(td) / "junit1.xml") if test_paths else []
-        # The change's live tests, collected only (nothing runs): the co-lead reviews each.
-        live1 = _collected(_run(str(Path(td) / "junit_live.xml"),
-                                ["--collect-only", "-m", classes.live, *test_paths])[1]) if test_paths else []
-        # Run 1's pytest scratch goes before run 2 (human ruling 2026-10-06): a toolkit suite can
-        # leave tens of GB there (measured: 65 GB in 10 min), and two runs' worth filled the disk.
-        for scratch in _gate_private_tmp(str(Path(td) / "junit1.xml")).glob("pytest-of-*"):
-            shutil.rmtree(scratch, ignore_errors=True)
-        _rc2, _out2, map2 = _run(str(Path(td) / "junit2.xml")) if test_paths else (0, "", {})
-        return_checks, return_findings = (
-            returns.judge(Path(td) / "junit1.returns", returns_tools) if returns_tools and test_paths else ([], [])
-        )
-        regression_checks: list[CheckResult] = []
-        if regression:
-            # The toolkit's earlier fast tests, once, for regression (user rules 2026-11-04): one
-            # pytest call per package (two packages' test files may share a name), outside the
-            # determinism maps; the recorder judges only the watched tools they happen to call.
-            ignored = [f"--ignore={path}" for path in test_paths]
-            failing: dict[str, str] = {}  # test id -> what it returned
-            unfinished: list[tuple[str, str]] = []  # (what happened, pytest output)
-            data_skipped: list[str] = []  # an earlier data test the gate skipped fails the change too
-            seen = {(c.name, c.detail) for c in return_checks}
-            for index, folder in enumerate(regression):
-                junit3 = Path(td) / f"junit_regression{index}.xml"
-                # junit_logging=all: each failure's captured output travels with it in the report.
-                rc3, out3, map3 = _run(str(junit3), ["-m", classes.fast, "-o", "junit_logging=all", *ignored, folder])
-                texts = _junit_failures(junit3)
-                broken = [t for t, outcome in map3.items() if outcome not in ("PASSED", "SKIPPED")]
-                failing.update({t: texts.get(t, "") for t in broken})
-                data_skipped += _data_skips(_junit_data_tests(junit3))
-                if rc3 == 2 and broken:
-                    unfinished.append((f"pytest stopped at a collection error in {folder}, so its other tests "
-                                       "ran no further", ""))
-                elif rc3 not in (0, 5) and not broken:  # 5: no earlier fast test in this package
-                    unfinished.append((f"the earlier fast tests in {folder} did not finish within {timeout_s}s"
-                                       if rc3 == 124 else
-                                       f"the earlier fast tests in {folder} ended with pytest exit code {rc3}", out3))
-                # The recorder loads when a test reaches its call; a run where none did has nothing to judge.
-                if returns_tools and any(outcome in ("PASSED", "FAILED") for outcome in map3.values()):
-                    watched_checks, _unobserved = returns.judge(junit3.with_suffix(".returns"), returns_tools)
-                    for c in watched_checks:
-                        if not c.passed and (c.name, c.detail) not in seen:
-                            seen.add((c.name, c.detail))
-                            regression_checks.append(c)
-            names = sorted(failing)
-            shown = names[:_REGRESSION_SHOWN]
-            share = _layer_b_output_cap() // max(1, len(shown) + sum(1 for _what, out in unfinished if out))
-            parts = [f"an earlier test that fails with this change: {t}\n{_bounded_text(failing[t], share)}"
-                     for t in shown]
-            rest = names[len(shown):]
-            if rest:
-                parts.append(f"and {len(rest)} more earlier tests that fail with this change: "
-                             + ", ".join(rest[:20]) + (f" and {len(rest) - 20} more" if len(rest) > 20 else ""))
-            parts += [what + (":\n" + _bounded_text(out, share) if out else ".") for what, out in unfinished]
-            if data_skipped:
-                parts.append(_data_skip_detail(data_skipped))
-            ok = not (failing or unfinished or data_skipped)
-            regression_checks.insert(0, CheckResult(
-                name="layer_b.regression", layer="B", passed=ok,
-                detail="" if ok else "\n\n".join(
-                    parts + ["Make the change keep every earlier fast test of the toolkit passing."]),
-            ))
+    try:
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as cleanup:
+            # The validation bytes, fetched once per runner and copied into each run's store; outside
+            # every jail (the JUnit folder is bound into it).
+            cache = Path(tempfile.mkdtemp(prefix="ar-ci-validation-")) if validation else None
+            if cache is not None:
+                cleanup.callback(shutil.rmtree, cache, True)
+            own = frozenset(path.split("/", 1)[0] for path in test_paths)
+            rc1, out1, map1, calls1 = _run(str(Path(td) / "junit1.xml"), packages=own) if test_paths else (0, "", {}, None)
+            data1 = _junit_data_tests(Path(td) / "junit1.xml") if test_paths else {}
+            unverified1 = _unverified(Path(td) / "junit1.xml") if test_paths else []
+            # The change's live tests, collected only (nothing runs): the co-lead reviews each.
+            live1 = _collected(_run(str(Path(td) / "junit_live.xml"),
+                                    ["--collect-only", "-m", classes.live, *test_paths])[1]) if test_paths else []
+            # Run 1's pytest scratch goes before run 2 (human ruling 2026-10-06): a toolkit suite can
+            # leave tens of GB there (measured: 65 GB in 10 min), and two runs' worth filled the disk.
+            for scratch in _gate_private_tmp(str(Path(td) / "junit1.xml")).glob("pytest-of-*"):
+                shutil.rmtree(scratch, ignore_errors=True)
+            _rc2, _out2, map2, _calls2 = (_run(str(Path(td) / "junit2.xml"), packages=own) if test_paths
+                                          else (0, "", {}, None))
+            return_checks, return_findings = (
+                returns.judge(Path(td) / "junit1.returns", returns_tools, calls1)
+                if returns_tools and test_paths else ([], [])
+            )
+            regression_checks: list[CheckResult] = []
+            if regression:
+                # The toolkit's earlier fast tests, once, for regression (user rules 2026-11-04): one
+                # pytest call per package (two packages' test files may share a name), outside the
+                # determinism maps; the recorder judges only the watched tools they happen to call.
+                ignored = [f"--ignore={path}" for path in test_paths]
+                failing: dict[str, str] = {}  # test id -> what it returned
+                unfinished: list[tuple[str, str]] = []  # (what happened, pytest output)
+                data_skipped: list[str] = []  # an earlier data test the gate skipped fails the change too
+                seen = {(c.name, c.detail) for c in return_checks}
+                for index, folder in enumerate(regression):
+                    junit3 = Path(td) / f"junit_regression{index}.xml"
+                    # junit_logging=all: each failure's captured output travels with it in the report.
+                    rc3, out3, map3, calls3 = _run(str(junit3), ["-m", classes.fast, "-o", "junit_logging=all", *ignored,
+                                                                  folder], packages=frozenset({folder.split("/", 1)[0]}))
+                    texts = _junit_failures(junit3)
+                    broken = [t for t, outcome in map3.items() if outcome not in ("PASSED", "SKIPPED")]
+                    failing.update({t: texts.get(t, "") for t in broken})
+                    data_skipped += _data_skips(_junit_data_tests(junit3))
+                    if rc3 == 2 and broken:
+                        unfinished.append((f"pytest stopped at a collection error in {folder}, so its other tests "
+                                           "ran no further", ""))
+                    elif rc3 not in (0, 5) and not broken:  # 5: no earlier fast test in this package
+                        unfinished.append((f"the earlier fast tests in {folder} did not finish within {timeout_s}s"
+                                           if rc3 == 124 else
+                                           f"the earlier fast tests in {folder} ended with pytest exit code {rc3}", out3))
+                    # The recorder loads when a test reaches its call; a run where none did has nothing to judge.
+                    if returns_tools and any(outcome in ("PASSED", "FAILED") for outcome in map3.values()):
+                        watched_checks, _unobserved = returns.judge(junit3.with_suffix(".returns"), returns_tools, calls3)
+                        for c in watched_checks:
+                            if not c.passed and (c.name, c.detail) not in seen:
+                                seen.add((c.name, c.detail))
+                                regression_checks.append(c)
+                names = sorted(failing)
+                shown = names[:_REGRESSION_SHOWN]
+                share = _layer_b_output_cap() // max(1, len(shown) + sum(1 for _what, out in unfinished if out))
+                parts = [f"an earlier test that fails with this change: {t}\n{_bounded_text(failing[t], share)}"
+                         for t in shown]
+                rest = names[len(shown):]
+                if rest:
+                    parts.append(f"and {len(rest)} more earlier tests that fail with this change: "
+                                 + ", ".join(rest[:20]) + (f" and {len(rest) - 20} more" if len(rest) > 20 else ""))
+                parts += [what + (":\n" + _bounded_text(out, share) if out else ".") for what, out in unfinished]
+                if data_skipped:
+                    parts.append(_data_skip_detail(data_skipped))
+                ok = not (failing or unfinished or data_skipped)
+                regression_checks.insert(0, CheckResult(
+                    name="layer_b.regression", layer="B", passed=ok,
+                    detail="" if ok else "\n\n".join(
+                        parts + ["Make the change keep every earlier fast test of the toolkit passing."]),
+                ))
+    except _Stopped as stop:
+        # A run that cannot be judged (its store, the brief's data) ends Layer B with that one
+        # check: no partial verdict beside it (ruling B: an infrastructure fault is the only failure).
+        return {"results": [stop.check], "findings": [], "deterministic": True, "determinism_detail": ""}
 
     results: list[CheckResult] = []
+    if validation:
+        results.append(CheckResult(name="layer_b.validation_data", layer="B", passed=True,
+                                   detail=f"{len(validation)} validation records copied into each run's store "
+                                          f"({ci.ENV_VALIDATION})"))
     if test_paths:
         passed, detail = _layer_b_verdict(rc1, map1, out1)
         results.append(CheckResult(name="layer_b.pytest", layer="B", passed=passed, detail=detail))
@@ -1581,6 +1660,14 @@ async def _default_test_runner(
                        "did not run here; the co-lead reviews each: " + ", ".join(live1)))
     results.extend(return_checks)
     results.extend(regression_checks)
+    if outside:
+        shown = list(dict.fromkeys(outside))
+        results.append(CheckResult(name="layer_b.returns.store", layer="B", passed=False, detail=(
+            f"The test runs left {len(shown)} version(s) in the store that no tool call wrote (written outside a "
+            "call): " + ", ".join(shown[:10]) + (" …" if len(shown) > 10 else "") + ". Write the store through "
+            "the toolkit's tools, within their calls (a tool's thread or process ends before it returns), and "
+            "stage a test's inputs through TOOLKIT_STORE_SEED (a data set's file, or synthetic bytes as a "
+            "product) or the brief's validation data.")))
     deterministic, detail = _outcomes_determinism(map1, map2)
     return {
         "results": results,
@@ -1605,7 +1692,8 @@ def _jailed_pytest(
     argv: list[str], *, junit_path: str, worktree: Path | None = None, masked: Path | None = None,
     extra_ro: tuple[str, ...] = (),
 ) -> list[str]:
-    """Wrap the Layer-B pytest invocation in the OS jail, network denied.
+    """Wrap the Layer-B pytest invocation in the OS jail, network denied. ``extra_ro``: the
+    environment's prefix and activation, and a run's throwaway store's socket folder.
 
     The JUnit report is written to a throwaway directory outside the worktree, so that directory
     has to be writable inside the jail too — otherwise the run succeeds and its outcome map comes
@@ -1623,13 +1711,14 @@ def _jailed_pytest(
     host_tmp = Path("/tmp").resolve()
     tree = Path(worktree).resolve() if worktree else None
     # Writable: the worktree under test, the JUnit folder and its own home -- nothing else. This
-    # process runs coder-authored code nobody has reviewed yet, so every other allow-listed root
-    # (the observation data, every run's folders and authoring control files) is read-only to it
-    # (F24, 2026-10-06), and the host /tmp is replaced by a private one (F20 review): it holds other
-    # sessions' trees and credential files. The JUnit folder, usually under the host /tmp, is still
-    # bound on top of the private one.
+    # process runs coder-authored code nobody has reviewed yet (F24, 2026-10-06), and the host /tmp
+    # is replaced by a private one (F20 review): it holds other sessions' trees and credential
+    # files. The JUnit folder, usually under the host /tmp, is still bound on top of the private one.
+    # Hermetic (step 0b): of the allow-list only the read-only roots (the software the environments
+    # use: a human base, the externals), never a writable one (the runs' folders, the toolkit
+    # checkout); data reaches the tests only as a declared data set or the run's throwaway store.
     others = tuple(
-        e for e in (*base.ro, *base.rw)
+        e for e in base.ro
         if Path(e).resolve() != host_tmp and (tree is None or Path(e).resolve() != tree)
     )
     # The data sets the toolkit's `data` tests read, for this run only (never the workers' allow-list):
@@ -1769,6 +1858,19 @@ def _orchestration_config() -> dict:
 #: required; this module holds the checks of each (``_job_of``).
 JOBS = GATE_JOBS
 
+class _Stopped(Exception):
+    """A Layer-B run that cannot judge the change: ``check`` says why (an infrastructure fault, or the
+    brief's validation data)."""
+
+    def __init__(self, check: CheckResult) -> None:
+        super().__init__(check.detail)
+        self.check = check
+
+
+#: Faults outside the change (ruling B): the run's throwaway store did not start or could not be
+#: listed (passing: worth a retry), the real store did not answer (likely to recur until a human acts).
+INFRA_STORE_START, INFRA_REAL_STORE = "infrastructure.store_start", "infrastructure.real_store"
+
 #: The checks whose name alone does not say their job (the rest go by prefix, ``_job_of``).
 _JOB_OF_CHECK = {
     "structural.changes_allowed": "change_scope",
@@ -1876,7 +1978,7 @@ async def run_gate(
         watched = returns.watched_tools(worktree, targets, partial(_head_file, worktree))
         test_runner = partial(
             _default_test_runner, timeout_s=_gate_test_timeout(worktree, targets), masked=worktree,
-            returns_tools=watched,
+            returns_tools=watched, validation=list(tool_spec.validation_data),
         )
 
     layer_a: list[CheckResult] = []
@@ -2007,9 +2109,13 @@ async def run_gate(
     passed = _passed(jobs)
 
     reason = "gate passed" if passed else _failure_reason(layer_a, layer_b, jobs)
+    # Ruling B: a fault outside the change is said apart, so it is not charged to the submission.
+    failing = [c.name for c in (*layer_a, *layer_b) if not c.passed]
+    infra = set(failing) if failing and all(n.startswith("infrastructure.") for n in failing) else set()
     return GateReport(
         passed=passed, jobs=jobs, layer_a=layer_a, layer_b=layer_b, findings=findings,
         reason=reason, report_hash=_report_hash(layer_a, layer_b), manifest=manifest, base=base,
+        infrastructure="" if not infra else "recurring" if INFRA_REAL_STORE in infra else "passing",
     )
 
 

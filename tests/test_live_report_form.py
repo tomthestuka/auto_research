@@ -331,59 +331,75 @@ def test_red_worker_is_nudged_to_a_valid_report(tmp_path, spec, draw, monkeypatc
 # ── the lead cell ────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("draw", DRAWS)
-def test_blue_lead_files_the_form_first_try(tmp_path, draw, monkeypatch):
-    from auto_research.agents.prompts import load_prompt
-    from auto_research.agents.roles import AnalystLeadAgent
-    from auto_research.env import toolkit_root as configured_toolkit_root
-    from auto_research.graph.runtime import readonly_tools_for
-    from auto_research.models import load_registry
-    from auto_research.monitor.events import RunMonitor
-    from auto_research.observability.costs import install_cost_meter
-    from auto_research.provenance import ReceiptStore
-    from auto_research.schemas import AnalysisTask, AnalystReport
-    from tests.seats import seated
+def _lead_reports(store, run_id: str):
+    """The two workers' reports the lead adjudicates, seeded in the run's workspace and receipt store,
+    every number written as its own citation in today's form (``{{handle "quoted span"}}``: the
+    seeded results are printed text, so their values are quoted)."""
+    from auto_research.sandbox.workspace import run_dir
+    from auto_research.schemas import AnalystReport
 
-    log: list[dict] = []
-    _record_report_calls(monkeypatch, log)
-    store = ReceiptStore(tmp_path / "receipts")
     reports = []
     for key in ("analyst_worker_0", "analyst_worker_1"):
-        results, figures = _seed_worker_world(tmp_path, store, key)
+        results, figures = _seed_worker_world(run_dir(run_id), store, key)
         r0, r1, r2 = (r.handle for r in results)
         reports.append(AnalystReport(
-            summary=f"The light curve has a significant period of 3.4172 d [{r0}]. Figure 1 shows the "
-                    "periodogram and Figure 2 the folded curve.",
+            summary=f'The light curve has a significant period of {{{{{r0} "3.4172 +/- 0.0021 d"}}}}. '
+                    "Figure 1 shows the periodogram and Figure 2 the folded curve.",
             findings=[
-                f"best period = 3.4172 +/- 0.0021 d with false-alarm probability = 1.2e-06 [{r0}]",
-                f"folded amplitude = 0.083 +/- 0.006 mag [{r1}]",
-                f"the strongest alias at 1.4126 d has power 12.3 [{r2}]",
+                f'best period {{{{{r0} "3.4172 +/- 0.0021 d"}}}} with '
+                f'{{{{{r0} "false-alarm probability = 1.2e-06"}}}}',
+                f'folded amplitude {{{{{r1} "0.083 +/- 0.006 mag"}}}}',
+                f'the strongest alias {{{{{r2} "at 1.4126 d has power 12.3"}}}}',
             ],
             status="succeeded",
             cited_figures=[{"source": "self", "index": 1}, {"source": "self", "index": 2}],
             figures=figures[:2],
         ))
+    return reports
+
+
+@pytest.mark.parametrize("draw", DRAWS)
+def test_blue_lead_files_the_form_first_try(tmp_path, draw, monkeypatch):
+    from auto_research.agents.prompts import load_prompt
+    from auto_research.agents.roles import AnalystLeadAgent
+    from auto_research.env import toolkit_root as configured_toolkit_root
+    from auto_research.graph.runtime import wire_lead
+    from auto_research.models import load_registry
+    from auto_research.monitor.events import RunMonitor
+    from auto_research.observability.costs import install_cost_meter
+    from auto_research.provenance import ReceiptStore
+    from auto_research.sandbox.workspace import create_run_workspace, run_dir
+    from auto_research.schemas import AnalysisTask
+    from auto_research.run_control import RunControl
+    from tests.live_store import run_stores
+    from tests.seats import seated
+
+    log: list[dict] = []
+    _record_report_calls(monkeypatch, log)
 
     meter = None
     with seated(analyst_lead=_seat(LEAD_SEAT)):
         handle = load_registry().resolve("analyst_lead").handles[0]
         monitor = RunMonitor(jsonl_path=tmp_path / "monitor.jsonl")
+        run_id = monitor.run_id
+        create_run_workspace(run_id, ["analyst_lead", "analyst_worker_0", "analyst_worker_1"])
+        store = ReceiptStore.for_run(run_dir(run_id))  # the run's one store, which wire_lead gives the lead
+        reports = _lead_reports(store, run_id)
         lead = AnalystLeadAgent(model=handle, prompt=load_prompt("analyst_lead"), monitor=monitor)
-        lead.agent_key = "analyst_lead"
-        lead.report_dir = tmp_path / "analyst_lead"
-        lead.report_dir.mkdir(parents=True, exist_ok=True)
-        lead.tools = readonly_tools_for("analyst_lead", roots=[tmp_path, configured_toolkit_root()])
-        lead.receipts = store
-        lead.tools.receipts = store
-        lead.tools.receipt_source = "analyst_lead"
+        control = RunControl()
         task = AnalysisTask(question=QUESTION, instructions="Adjudicate the two workers' reports.")
 
         async def scenario():
             nonlocal meter
-            meter = install_cost_meter(run_id=monitor.run_id, monitor=monitor)
-            return await lead.run_cycle(
-                task, reports, sources=["analyst_worker_0", "analyst_worker_1"], rounds_left=0,
-            )
+            meter = install_cost_meter(run_id=run_id, monitor=monitor)
+            # The run's stores (the real store, made by migration item S11) and run_research's lead
+            # wiring (`wire_lead`: its catalog login, web source and retrieval, the run's receipts).
+            async with run_stores(run_id, monitor, control) as keys:
+                await wire_lead(lead, run_id=run_id, toolkit_root=configured_toolkit_root(), keys=keys,
+                                run_monitor=monitor, run_control=control)
+                return await lead.run_cycle(
+                    task, reports, sources=["analyst_worker_0", "analyst_worker_1"], rounds_left=0,
+                )
 
         outcome = None
         try:

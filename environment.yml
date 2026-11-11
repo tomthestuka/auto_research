@@ -33,8 +33,14 @@ dependencies:
   - python-telegram-bot>=22
   - rich >= 15.0.0
   - questionary>=2.0   # interactive install.sh prompts (arrow-menus/path entry); lazy-imported
+  # data stores (store/, step 0b): the S3 gateway + its IAM, the catalog server, their clients
+  - versitygw=1.11.0     # pinned: the gateway's behaviour is part of the store contract (probes 2026-11-10)
+  - postgresql>=17       # initdb, pg_ctl, postgres for a local store's catalog
+  - psycopg>=3.2
+  - boto3>=1.43
   # tests
   - pytest>=8
+  - moto>=5.2            # fast S3/IAM client tests (no enforcement: versitygw is the oracle)
   # langgraph-cli, claude-agent-sdk, openai-codex, and langgraph-checkpoint-sqlite are not on
   # conda-forge.
   - pip:

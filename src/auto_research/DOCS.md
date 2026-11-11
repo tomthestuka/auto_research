@@ -15,18 +15,18 @@ and the active Phase 2 build order in
 
 | Submodule | Step | Role |
 |---|---|---|
-| `config_paths.py` | — | Where the five config files are, resolved when asked for. `config_dir()` answers with the repository's own `config/` unless `AUTO_RESEARCH_CONFIG_DIR` names another, so a process can be run against a different configuration and every reader agrees. Before it, eleven modules each computed the location relative to their own source file. |
+| `config_paths.py` | — | Where the four config files are, resolved when asked for. `config_dir()` answers with the repository's own `config/` unless `AUTO_RESEARCH_CONFIG_DIR` names another, so a process can be run against a different configuration and every reader agrees. Before it, eleven modules each computed the location relative to their own source file. |
 | `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`, whose model-key requirements are **derived from `config/models.yaml`**: one group per provider a role is configured with, or the exact variable a member names with `key_env`); small `orchestration.yaml` accessors (`runtime_data_dir`, `papers_dir`, `sandbox_call_timeout_default`, `provider_retry_policy`, `private_variables` — `{variable: separator}` from `env_externals.<name>.private`, refused unless a variable name and a non-empty separator, a name outside `_RESERVED_PRIVATE`, and declared once, also up to case). |
-| `setup.py` | — | The install-script Python stage (`python -m auto_research.setup`, run by `install.sh`): discovers defaults, prompts (interactive `questionary`) or reads `--answers` (headless), then writes the gitignored `config/orchestration.yaml` + `observations.yaml` from their `*.example` templates (deriving `agent_fs_allow` from the answered paths) and runs the preflight smoke test. |
-| `preflight.py` | — | Launch-time **checklist** (`Preflight` / async `run_preflight()`): runs every launch precondition (all no-LLM but the last, `member_media`, one tiny image and PDF per chat member, Z1e), and carries a warning tier (`PreflightWarning`) for a precondition that is satisfiable but never proven live — the launch continues and the caution is recorded (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, human environments, the default environment's private variables and `probe` stack smoke-test, human-channel ping) before any model client is built. |
+| `setup.py` | — | The install-script Python stage (`python -m auto_research.setup`, run by `install.sh`): discovers defaults, prompts (interactive `questionary`) or reads `--answers` (headless), then writes the gitignored `config/orchestration.yaml` from its `*.example` template (deriving `agent_fs_allow` from the answered paths) and runs the preflight smoke test. |
+| `preflight.py` | — | Launch-time **checklist** (`Preflight` / async `run_preflight()`): runs every launch precondition (all no-LLM but the last, `member_media`, one tiny image and PDF per chat member, Z1e), and carries a warning tier (`PreflightWarning`) for a precondition that is satisfiable but never proven live — the launch continues and the caution is recorded (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, the data stores, human environments, the default environment's private variables and `probe` stack smoke-test, human-channel ping) before any model client is built. |
 | `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
 | `observability` | 3 | LangSmith tracing + per-call cost logging hooked into the provider layer. |
 | `storage` | 4 | SQLite layer (papers, memory, query_log; embedding column reserved for Phase 2). |
+| `store` | P3 0b | The data stores (S3 objects + a Postgres catalog): the `stores:` block, a local store's servers (versitygw + IAM, Postgres) started by the runtime, the `store_*` preflight items, per-agent keys (`keys`), the catalog (`catalog`, `query`), receipts from the store's records (`records`), the reconciler (`reconcile`), the CI pipeline's throwaway store (`ci`) and the human's CLI (`python -m auto_research.store`). Its own `store/DOCS.md`. |
 | `sources` | 5 | `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. |
 | `retrieval` | 6 | `RetrievalBackend` (text search now, vector search stubbed). |
-| `observations.py` | 8 | Single `obs_db_root` loader (`config/observations.yaml`) that discovers per-mission `<root>/<MISSION>` subdirs from disk, plus the `catalog_health` preflight check. (The catalog **read** moved to `research_toolkit`'s `catalog_utils` — the `data_catalog` tool.) |
 | `agents` | 7-8 | Runtime prompt loader plus thin per-role wrappers that load `prompts/<role>.md`, call configured model groups, and validate schema JSON. |
 | `consensus` | 9 | `ConsensusStrategy` — debate-to-converge with lead convergence checks and adjudication. |
 | `graph` | 10 | LangGraph assembly + the two capped feedback edges. |
@@ -45,8 +45,8 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - Each submodule documents its own interface in its `DOCS.md`. Cross-module
   contracts go through `auto_research.schemas`.
 - `auto_research.config_paths.config_dir()` / `orchestration_yaml()` / `models_yaml()` /
-  `observations_yaml()` / `code_gate_yaml()` / `model_capabilities_yaml()` — the configuration
-  directory and the five files in it, resolved **per call** (the capability table, Z1d, describes
+  `code_gate_yaml()` / `model_capabilities_yaml()` — the configuration
+  directory and the four files in it, resolved **per call** (the capability table, Z1d, describes
   models and is copied unchanged into any other config dir). Unset, they are the repository's own `config/`, which is every
   ordinary run. `AUTO_RESEARCH_CONFIG_DIR` overrides them, and being an environment variable is
   the point: the sandbox REPL, the author harness and the gate's test runner are subprocesses that
@@ -91,11 +91,16 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   domain briefing the roles read — every runtime path hint derives from the contract),
   `sandbox.merge_flow.check_toolkit_git_identity` (the toolkit checkout has a git
   commit identity, so a runtime tool commit can't fail mid-flow),
+  `store.health` (`store_config`, `store_servers`, `store_admin`, `store_buckets`, `store_catalog`,
+  registered after `toolkit_manifests`: the `stores:` block, a local store's servers started and
+  answering, the admin key, every bucket versioned, the catalog's schema; `store/DOCS.md`), then
+  `store.reconcile.check_store_integrity` (`store_integrity`: no recorded object of a committed or
+  verified product missing or changed on disk; checks only), `store.ci.check_ci_leftovers`
+  (`store_ci_leftovers`: a notice, never a failure, naming the CI pipeline's leftover throwaway folders,
+  their size and `python -m auto_research.store ci-sweep`),
   `sandbox.registry.check_toolkit_manifests` (every package of the contract's `package_glob` imports,
   exposes a `TOOL_MANIFEST` and keys each tool `<name>.<package>.<tool>`; a failing one would reach
   the analysts as missing tools and nothing else),
-  `observations.check_catalog_health` (every mission's local data catalog is healthy via
-  `research_toolkit`'s detect-only `obsdb_catalog.healthcheck`),
   `env.check_human_envs` (each `human_envs` prefix has a Python; every toolkit definition's `base`
   is declared), `check_private_variables` (each declared private variable is set, with its
   separator, by the default environment's activation, read back by `runner.analysis_activation_env`),
@@ -104,33 +109,6 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   resolved — `hitl.make_human_channel_check` (pings the channel, green only on a reply). `run_research()`
   resolves the handler then awaits this before any LLM; aggregates every failure into one
   `PreflightError`.
-- `auto_research.observations.load_observations_config()` loads the single `obs_db_root`
-  from config and discovers missions from disk (`<root>/<MISSION>` subdirs marked by a
-  `catalog.json`); mission names are not hardcoded in agent wrappers. `config.missions` is
-  the discovered map; `config.mission(name)` resolves one mission's path by case-insensitive
-  subdir match. The catalog **read** (parsing/listing `<obs_db_path>/catalog.json`) moved to
-  `research_toolkit`'s `catalog_utils` package — surfaced as the `data_catalog` tool — alongside
-  the `obsdb_catalog` writer (§2: domain reads belong to the toolkit). This module keeps only the
-  obs-db-location config and the launch-time health check.
-  `check_catalog_health()` is the launch-time preflight check: it runs `research_toolkit`'s
-  detect-only `obsdb_catalog.healthcheck` (pure stdlib, never writes) over every configured
-  mission, each a one-shot call in the analysis jail (`sandbox.runner.call_in_jail`: the
-  orchestrator imports no toolkit code, D25), and raises on any drift (malformed/missing/regressed/level-inconsistent/uncatalogued),
-  aggregating all missions; the human repairs via `obsdb_catalog.repair` out of band. The root
-  itself must be a directory this user can write; an empty one is healthy (H2: `acquire` creates
-  a mission's folder on its first observation).
-- `observations.obsid_folder(mission_dir, obsid, entry=None, *, mission=None, index=None) -> Path` —
-  where an ObsID's folder is under its mission folder, as the toolkit's `obsdb_catalog.locate`
-  finds it: the catalog entry's record first (a product path up to the ObsID part, the newest
-  level-2 event first; relative, no `..`, an existing folder), then `mission`'s `OBSID_TREES` rule
-  (default the folder's name; a unique match, two raise `LookupError`), else `<mission_dir>/<obsid>`.
-  `observations.obsid_index(mission_dir, mission) -> {obsid: [folders]}` walks the tree once;
-  `index` takes a callable returning it, so a call naming many strings walks it at most once. `OBSID_TREES` mirrors
-  `research_toolkit`'s `obsdb_catalog._domain.TREES` (HEASARC's tree per mission, or flat); the two
-  change together. `observations.obsid_mission(folder) -> str` names the mission folder of an
-  ObsID folder under either layout, or the nearest folder above it holding a `catalog.json` (the
-  HTML report's `observation <mission> <obsid>`).
-
 - `auto_research.toolkit_contract` — the toolkit contract: every fact the orchestration relies on
   about a toolkit, read from the `toolkits:` block of `orchestration.yaml` (a list of exactly one
   until Phase 3 step 2). Code reads the toolkit root, package glob, template package, authoring
@@ -157,6 +135,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `run_control.RunControl` — run-wide control shared by the agents and the HITL command channel.
   `authoring_session` is the live coding session; `unclosed_sessions` holds sessions whose close
   raised, closed again by the run's teardown (C2c).
+  `credentials` holds the run's store keys (`store.keys.RunKeys`, S4), revoked by the run's teardown
+  and a stop's cleanup once nothing holding them runs (leaf to root); a dead unit's alone through
+  `credentials.revoke(unit)`.
   Steer is cooperative (queued, delivered at the target's next ReAct turn); **stop is an
   interrupt**: `interrupt(reason, by)` flags the run and cancels the registered run task, so it
   needs no cooperation from the pipeline.
@@ -221,11 +202,12 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   standalone callers (`setup.py`'s smoke test) pass no monitor and are unaffected. A monitor
   fault is swallowed — observability never decides whether a runnable launch proceeds.
 - `setup.derive_fs_allow(values, extra_paths=None) -> list[str]` — the `agent_fs_allow` allow-list
-  derived from the answered paths (toolkit_root/obs_db_root/analyze_env/runtime_dir + domain-dep
+  derived from the answered paths (toolkit_root/analyze_env/runtime_dir + domain-dep
   `extra_paths` + `/tmp`); placeholders dropped, deduped, `auto_research` never included.
-- `setup.render_orchestration(template_text, values, fs_allow) -> str` /
-  `setup.render_observations(template_text, obs_db_root) -> str` — line-based renderers that fill the
-  `*.example` template values while preserving comments (the `agent_fs_allow` block is regenerated).
+- `setup.render_orchestration(template_text, values, fs_allow) -> str` — a line-based renderer that
+  fills the `*.example` template values while preserving comments (the `agent_fs_allow` block is
+  regenerated); `setup.write_configs(values, extra_fs_paths=None) -> Path` writes the live
+  `orchestration.yaml`.
 - `setup.seed_defaults() -> dict` — default answers: prior live-config values (upgrade) over template
   placeholders. `setup.Answers` resolves each value from the answers file → interactive prompt →
   default, else raises `SetupError` (headless fail-loud). `setup.main(argv)` is the CLI entry.
@@ -336,3 +318,10 @@ detail in git history.
 - 2026-11-09 — W10 sweep (D25): `observations.check_catalog_health` runs `obsdb_catalog.healthcheck` through `runner.call_in_jail` (`_import_healthcheck` and its `sys.path` insertion are gone). Sweep of `src` for toolkit code run in the orchestrator: `ToolkitRegistry.load`/`reload` (now read manifests as data), `react.execute_data_catalog`/`data_catalog_tool_def` (jailed call, manifest as data), `runner.run_tool` (deleted), this check (jailed). What remains is jailed by construction: the REPL script (`persistent.py`), the gate's recorder plugin (`returns.py`, inside the gate's jailed pytest), and the reproduce code `report/html.py` writes for a human (text, never run). Guard: `tests/test_toolkit_contract.py::test_the_launch_path_imports_no_toolkit_module_into_the_orchestrator`.
 - 2026-11-09 — W10 sweep re-review: `check_config_keys` words each retired key as what to do (`agent_os_jail` "is retired (every runtime process runs in the jail); delete the key") and refuses an `agent_fs_allow` naming `/`.
 - 2026-11-09 — W6 review M2: `check_toolkit_contract` refuses a toolkit missing a `README.md` at its root or in any package (the roles read them as the domain briefing; the prompts point to them).
+- 2026-11-10 — Phase 3 step 0b S1: new package `store` (`store/DOCS.md`); `preflight.build_default_preflight` registers `store_config`, `store_servers`, `store_admin`, `store_buckets`, `store_catalog` after `catalog_health`.
+- 2026-11-10 — Phase 3 step 0b S4: `RunControl.credentials` (the run's store keys, revoked at teardown); `python -m auto_research.store status|stop` (`store/DOCS.md`).
+- 2026-11-10 — Phase 3 step 0b S6: `preflight.build_default_preflight` registers `store_integrity` (`store.reconcile.check_store_integrity`) after `store_catalog` (`store/DOCS.md` ## Reconciler).
+- 2026-11-10 — Phase 3 step 0b S9: the obs-db leaves the orchestration (not backwards compatible). `observations.py` is deleted (the obs-db root loader, `check_catalog_health`, `OBSID_TREES`, `obsid_folder`/`obsid_index`/`obsid_mission`), with `config/observations.yaml(.example)` and `config_paths.observations_yaml`; preflight's `catalog_health` is gone (`store_integrity` checks the store's bytes against its catalog). `setup.py` (frozen installer, D16): only what broke is removed — the obs-db root question, `render_observations`, the observations file it wrote (`write_configs` returns the one path) and the root in `derive_fs_allow`. The lead reads a store's catalog through `catalog_query` (`store/query.py`, `agents/DOCS.md`).
+- 2026-11-11 — S12 (docs): the module table's `store` row lists every submodule built in step 0b (keys, catalog, query, records, reconcile, ci, the CLI).
+- 2026-11-11 — Phase 3 step 0b S11: `store/ingest.py` (the human's ingest of files on disk as products) and the CLI actions `start`, `ingest`, `produce` (`store/DOCS.md` `## Migration and ingest`).
+- 2026-11-11 — S7 follow-up (main's ruling 1): `build_default_preflight` registers `store_ci_leftovers` after `store_integrity`, a notice when the CI pipeline's throwaway stores left folders behind.

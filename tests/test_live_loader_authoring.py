@@ -1,30 +1,25 @@
-"""Opt-in LIVE end-to-end test of the lead-driven tool-authoring path (Phase-2 step 7).
+"""Opt-in LIVE cells of the lead-driven tool-authoring path: the lead plans a chain, and drives it.
 
 Activate with:
     pytest tests/test_live_loader_authoring.py --live -q -s
 
-Poses a missing-capability request — a joint multi-instrument spectral *loader*,
-``load_epoch_spectra`` — to the analyst lead against a **throwaway, empty from-scratch toolkit**
-scaffolded in a temp dir on a fresh ``ai`` branch (never the live ``toolkit_root``). The lead must
-author it through the whole A1 flow: one ``run_cycle`` in which it files ``author_chain`` and
-``_author_chain`` drives each link (coder -> deterministic gate -> provider-decorrelated co-lead
-review -> atomic commit), with NO
-``load_data`` source, signature, or mechanics leaked — only the capability + requirements.
+* ``test_chain_planning_returns_ordered_chain`` — A8: given a multi-step prescription against an
+  empty toolkit, the real lead plans an ordered chain of briefs up front; the coding sessions are
+  stubbed (``tests/chain_stub``), so no coder or gate is reached; the lead holds its own catalog
+  login inside the run's store launch step (the real store, made by migration item S11).
+* ``test_lead_cycle_authors_a_chain_end_to_end`` — one real lead cycle whose chain production's
+  ``_author_chain`` drives (coder → CI pipeline → decorrelated co-lead → commit) on a copy of the
+  real toolkit. The brief's validation record is a real one: the cell takes the run's store launch
+  step (``tests/live_store.run_stores``) and reads the record from the real store (migration item
+  S11), which the CI pipeline copies into its throwaway store.
 
-This is observational/live (CLAUDE.md §10): it drives the real Opus lead, the real Sonnet coder
-(``coder`` role), and the real GPT co-lead (``analyst_colead``, ``colead=None`` resolves it from
-config decorrelated from the Claude author) against real E5 data in the science env, and writes a
-monitor JSONL+MD under ``logs/dev/P2/loader-test/``. It asserts only that the path runs to a
-terminal ``AuthoringOutcome`` without crashing (``status`` in {committed, failed, needs_human});
-on ``committed`` it checks the tool landed as one commit carrying a ``TOOL_MANIFEST`` entry plus a
-test file. It does NOT assert subjective LLM quality — a human judges the authored loader from the
-logged outcome against the settled E5 rubric: 13 spectra across 7 data groups — IXPE DU1-3 = data
-groups 1-3 (I/Q/U as sources 1/2/3), NICER x2 = data groups 4-5 (merged mpu7 PHA), NuSTAR FPMA/FPMB
-= data groups 6-7 — IXPE-first, Stokes I->ARF / Q,U->MRF, per-instrument bands.
+Observational (CLAUDE.md §10): monitor JSONL+MD under ``logs/dev/P2/loader-test/``. The capability
+texts live here in the test, never in a runtime prompt, so nothing leaks into the generic prompts.
 
-The capability-only ``SCIENCE_CONTEXT`` / ``EXPECTED_BEHAVIOR`` / ``NOTES`` live here in the test,
-never in a runtime prompt — so there is no eval leak into the generic prompts. Requires the analyst
-science env (HEASoft/XSPEC) for the gate's Layer-B tests and live LLM credentials.
+The former ``test_loader_authoring_end_to_end`` (the lead authoring a joint multi-instrument loader
+into an empty scaffold toolkit, Phase-2 step 7) was deleted 2026-11-11: the capability is
+``xspec_utils.load_data``, its inputs are store records now, and the authoring path it drove is
+measured by ``tests/test_live_pressure_cells.py`` and the chain cell here.
 """
 from __future__ import annotations
 
@@ -41,17 +36,18 @@ from pathlib import Path
 import pytest
 import yaml
 
-from auto_research.graph.runtime import attach_channel, readonly_tools_for
+from auto_research.graph.runtime import attach_channel, wire_lead
 from auto_research.agents.roles import AnalystLeadAgent
 from auto_research.monitor import RunMonitor
+from auto_research.run_control import RunControl
 from auto_research.observability.costs import install_cost_meter
-from auto_research.sandbox.workspace import agent_dir, create_run_workspace, run_dir
+from auto_research.sandbox.workspace import create_run_workspace, run_dir
 from tests.chain_stub import stub_chain_driver
+from tests.live_store import STAND_IN_RECORD, product_record, run_stores
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
     HumanResponse,
-    MergeFlowResult,
 )
 from auto_research.schemas.toolspec import AnalystToolRequest, ValidationDataset
 from tests.seats import SeatOverride, from_seat, repo_config_dir, seat, seated
@@ -59,46 +55,6 @@ from tests.seats import SeatOverride, from_seat, repo_config_dir, seat, seated
 pytestmark = pytest.mark.live
 
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "P2" / "loader-test"
-
-# Capability + requirements only — NO load_data source, signature, or implementation mechanics.
-SCIENCE_CONTEXT = (
-    "Joint broadband + polarization spectral fitting of Cyg X-1 needs all of an observing epoch's "
-    "spectra loaded into a single XSPEC session as one fittable joint dataset. The toolkit has no "
-    "such loader, so the analysis cannot begin. An epoch spans three instruments: IXPE (X-ray "
-    "polarimetry — each of its detector units yields a Stokes I, a Stokes Q, and a Stokes U "
-    "spectrum), NICER, and NuSTAR (FPMA and FPMB). Each instrument has its own usable energy band "
-    "and its own response and background conventions."
-)
-EXPECTED_BEHAVIOR = (
-    "A function that, given an epoch's per-instrument observation IDs and the mission data "
-    "directories, loads every spectrum of the epoch into XSPEC as one joint dataset and returns a "
-    "structured map of the resulting XSPEC spectrum indices per instrument and detector. "
-    "Requirements (the data-group layout is SETTLED — the analyst and the human debated and fixed "
-    "it): (1) one XSPEC data group per IXPE detector unit — that DU's Stokes I, Q, U load as sources "
-    "1, 2, 3 within its data group; one data group per NICER observation (a single merged mpu7 source "
-    "PHA, no per-detector splitting); one data group per NuSTAR FPM (FPMA and FPMB each its own). IXPE "
-    "data groups lead the numbering (data groups 1..N_DU), then NICER, then NuSTAR — the leading data "
-    "groups must be the IXPE I/Q/U groups, and each detector/observation owns its group so its "
-    "cross-calibration tunes independently; (2) for EVERY loaded spectrum attach its MATCHING response "
-    "and background — the "
-    "correct RMF, the correct effective-area response (and note that IXPE's Stokes Q and U spectra "
-    "use the modulation response, not the ordinary ancillary response), and the background spectrum "
-    "wherever one exists for that instrument; (3) restrict each instrument to its usable energy band "
-    "via caller-overridable per-instrument energy-range arguments. The loaded result must match the "
-    "epoch's reference dataset spectrum-for-spectrum, including the response and background attached "
-    "to each."
-)
-NOTES = (
-    "Validation epoch (call it E5): IXPE obs 02008401, NICER obs 6643010101 and 6643010102, NuSTAR "
-    "obs 80902318002, all under the configured mission data directories. Settled E5 layout: 13 "
-    "spectra across 7 data groups — IXPE DU1/DU2/DU3 are data groups 1-3 (each carrying Stokes "
-    "I->ARF, Q,U->MRF, and its background), the two NICER observations are data groups 4-5 (the merged "
-    "mpu7 source PHA + RMF + ARF + background each), and NuSTAR FPMA/FPMB are data groups 6-7 (grouped "
-    "source PHA + RMF + ARF per FPM, background where present); IXPE leads. Suggested checks "
-    "(advisory): loading E5 reproduces that 13-spectrum / 7-data-group layout with the correct "
-    "RMF/response/background attached to each; and a re-run loads an identical dataset. Reduction "
-    "products are already on disk for this epoch."
-)
 
 # The empty from-scratch scaffold the lead authors into (standard two-halves layout, §9.2).
 _INIT_PY = '''\
@@ -164,141 +120,6 @@ def _scaffold_fake_toolkit(tmp_path: Path) -> Path:
     return root
 
 
-def _make_handler(monitor: RunMonitor):
-    """Self-contained in-process human handler: answers the lead's design questions
-    permissively-but-honestly and logs each to the monitor (no Slack/CLI human needed)."""
-
-    async def human_handler(query):
-        await monitor.record(
-            "hitl", "human.query", level=2,
-            summary=getattr(query, "headline", "human query"),
-            data={"kind": getattr(query, "kind", "?"), "message": getattr(query, "message", "")},
-        )
-        answer = (
-            "Proceed with your proposed design. Validate on epoch E5 — IXPE 02008401, NICER "
-            "6643010101 and 6643010102, NuSTAR 80902318002, under the configured mission "
-            "directories (/data/fzhou/XSPEC/Cyg_X-1/{IXPE,NICER,NuSTAR}). Attach the correct "
-            "response and background to each spectrum, IXPE first. An honest failure is an "
-            "acceptable outcome; never fabricate a loaded result."
-        )
-        return HumanResponse(query_id=query.id, answer=answer)
-
-    return human_handler
-
-
-async def _run_authoring(fake_tk: Path, ts: str):
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    jsonl = LOG_DIR / f"loader_authoring_{ts}_monitor.jsonl"
-    monitor = RunMonitor(chatter=5, jsonl_path=jsonl, stream=sys.stdout)
-    handler = _make_handler(monitor)
-    run_id = f"loadertest_{ts}"
-    create_run_workspace(run_id, ["analyst_lead"])
-
-    lead = AnalystLeadAgent(monitor=monitor)
-    # Production's own factory, not a look-alike (the 2026-09-08 seams lesson): getting one of
-    # these flags wrong does not fail, it silently measures a role the pipeline does not have.
-    # The design channel is `message(to="human")`, opened by putting the lead on a quick channel
-    # with the handler — `attach_channel`, the same seam `run_research` uses (E12).
-    lead.tools = readonly_tools_for("analyst_lead", roots=[run_dir(run_id), fake_tk])
-    lead.agent_key = "analyst_lead"
-    attach_channel([lead], run_id=run_id, run_control=lead.ensure_run_control(),
-                   human_handler=handler, monitor=monitor)
-
-    request = AnalystToolRequest(
-        request_kind="new_capability",
-        science_context=SCIENCE_CONTEXT,
-        expected_behavior=EXPECTED_BEHAVIOR,
-        proposed_tool_name="load_epoch_spectra",
-        validation_data=[
-            ValidationDataset(mission="IXPE", obsid="02008401"),
-            ValidationDataset(mission="NICER", obsid="6643010101"),
-            ValidationDataset(mission="NICER", obsid="6643010102"),
-            ValidationDataset(mission="NuSTAR", obsid="80902318002"),
-        ],
-        notes=NOTES,
-    )
-    report = AnalystReport(
-        summary="Cannot start the joint fit: no tool loads an epoch's multi-instrument spectra.",
-        findings=["No loader exists for joint IXPE+NICER+NuSTAR spectra; analysis is blocked."],
-        tool_request=request, status="failed",
-    )
-
-    await monitor.record("run", "run.start", level=1, summary="loader authoring live test",
-                         data={"toolkit_root": str(fake_tk)})
-    # ONE cycle does the whole thing: the lead triages, files `author_chain`, and drives each link
-    # through the coder + gate + co-lead review — all in its own conversation, with the coding
-    # middle dropped between links (A8; the sequencing used to live in this test's own loop).
-    outcome = await lead.run_cycle(
-        _task_for_report(report),
-        [report],
-        sources=["analyst_worker_0"],
-        rounds_left=0,
-        author_budget=3,
-        toolkit_root=fake_tk,
-        worktree_base=run_dir(run_id) / "authoring",
-        direct_branch="ai",
-        colead=None,  # resolves the GPT co-lead from config, decorrelated from the author
-        human_handler=handler,
-    )
-    await monitor.record(
-        "analyst", "analyst.lead.cycle", level=1,
-        summary=f"filed={outcome.filed} committed={outcome.committed}",
-        data={"filed": outcome.filed, "decision": outcome.decision},
-    )
-    monitor.write_markdown(jsonl.with_suffix(".md"))
-    result = outcome.authored[-1] if outcome.authored else None
-    return outcome.decision, result
-
-
-def _task_for_report(report) -> AnalysisTask:
-    """The analysis task the worker's blocked report belongs to."""
-    return AnalysisTask(
-        question=(
-            "Run the joint IXPE+NICER+NuSTAR spectro-polarimetric fit for the E5 epoch of "
-            "Cyg X-1."
-        ),
-        instructions="The worker is blocked on a missing loader; settle the toolkit question.",
-    )
-
-
-def test_loader_authoring_end_to_end(tmp_path):
-    """Drive the full lead-driven authoring path on a from-scratch toolkit and verify it reaches a
-    terminal outcome without crashing. Observational: the authored tool is judged by a human from
-    the logged JSONL/MD against the E5 rubric."""
-    from dotenv import load_dotenv
-
-    load_dotenv()  # surface live LLM credentials, as the other cells in this module do
-    fake_tk = _scaffold_fake_toolkit(tmp_path)
-    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
-
-    decision, result = asyncio.run(_run_authoring(fake_tk, ts))
-
-    assert decision is not None, "the lead ended its cycle without filing an authoring form"
-    print(f"\n=== AUTHORING DECISION === should_author={decision.should_author} "
-          f"chain={[s.proposed_tool_name for s in decision.tool_specs]}")
-    assert decision.should_author and decision.tool_specs, (
-        f"lead declined to author: {decision.rationale}"
-    )
-    assert result is not None, "author_chain was filed but no link was driven"
-
-    print(f"=== AUTHORING RESULT === status={result.status} "
-          f"sha={result.commit_sha} reason={result.reason}")
-    assert result.status in {"committed", "failed", "needs_human"}, result.status
-
-    if result.status == "committed":
-        # One atomic commit landed on ai carrying the ai-half (manifest entry) + a test file.
-        log = subprocess.run(
-            ["git", "-C", str(fake_tk), "log", "--oneline", "ai"],
-            check=True, capture_output=True, text=True,
-        ).stdout.splitlines()
-        assert len(log) >= 2, f"expected a scaffold commit + the authored commit, got: {log}"
-        assert result.commit_sha is not None
-        manifest = (fake_tk / "joint_utils" / "skills" / "__init__.py").read_text()
-        assert "load_epoch_spectra" in manifest, "TOOL_MANIFEST missing the authored tool"
-        tests = list((fake_tk / "joint_utils" / "tests").glob("test_*.py"))
-        assert tests, "no Layer-B test file committed beside the tool"
-
-
 # ── A8: chain-planning (the planning stage only — cheap, no coder/gate/science env) ──────────
 # A multi-step prescription that genuinely needs several tools the empty toolkit lacks. The
 # capability text lives here (never in a runtime prompt — no eval leak). This drives ONLY the real
@@ -321,7 +142,7 @@ _CHAIN_EXPECTED_BEHAVIOR = (
     "the previous step's product, so the missing capabilities form a chain."
 )
 _CHAIN_NOTES = (
-    "Validation ObsID 01002901 (IXPE), reduction products already on disk. The gap the worker hit "
+    "Validation ObsID 01002901 (IXPE): its raw product is in the data store. The gap the worker hit "
     "first is the broadband PCUBE reduction (STEP 1); the downstream hardness-ratio, correlation, and "
     "plotting capabilities are equally absent and needed to complete the survey."
 )
@@ -366,16 +187,13 @@ def test_chain_planning_returns_ordered_chain(tmp_path, monkeypatch):
         )
 
     lead = AnalystLeadAgent(monitor=monitor)
-    lead.tools = readonly_tools_for("analyst_lead", roots=[run_dir(run_id), fake_tk])
-    lead.agent_key = "analyst_lead"
-    attach_channel([lead], run_id=run_id, run_control=lead.ensure_run_control(),
-                   human_handler=neutral_handler, monitor=monitor)
     request = AnalystToolRequest(
         request_kind="new_capability",
         science_context=_CHAIN_SCIENCE_CONTEXT,
         expected_behavior=_CHAIN_EXPECTED_BEHAVIOR,
         proposed_tool_name="reduce_broadband_pcube",
-        validation_data=[ValidationDataset(mission="IXPE", obsid="01002901")],
+        # The coding sessions are stubbed: the record never reaches a store.
+        validation_data=[ValidationDataset(**STAND_IN_RECORD)],
         notes=_CHAIN_NOTES,
     )
     report = AnalystReport(
@@ -387,6 +205,17 @@ def test_chain_planning_returns_ordered_chain(tmp_path, monkeypatch):
     driven = stub_chain_driver(monkeypatch)
 
     async def _plan():
+        # The run's stores (the real store, made by migration item S11): the lead's tool set carries
+        # its own catalog login, as run_research gives it.
+        control = lead.ensure_run_control()
+        async with run_stores(run_id, monitor, control) as keys:
+            await wire_lead(lead, run_id=run_id, toolkit_root=fake_tk, keys=keys, run_monitor=monitor,
+                            run_control=control)
+            attach_channel([lead], run_id=run_id, run_control=control,
+                           human_handler=neutral_handler, monitor=monitor)
+            return await _cycle()
+
+    async def _cycle():
         await monitor.record("run", "run.start", level=1, summary="A8 chain-planning live test")
         outcome = await lead.run_cycle(
             AnalysisTask(
@@ -541,7 +370,7 @@ def _lead_seat() -> SeatOverride | None:
     return seat(provider.strip(), model.strip())
 
 
-def _worker_tool_request() -> AnalystToolRequest:
+def _worker_tool_request(record: dict) -> AnalystToolRequest:
     """The missing capability a worker raises. Two dependent pieces, stated as capability and
     numeric contract only — the decomposition into chain links is the lead's call (§9.3), which is
     exactly what this test leaves to it."""
@@ -572,12 +401,12 @@ def _worker_tool_request() -> AnalystToolRequest:
             "(within 1e-9)."
         ),
         proposed_tool_name="seq_weighted_mean",
-        validation_data=[ValidationDataset(mission="IXPE", obsid="01002901")],
+        validation_data=[ValidationDataset(**record)],
         notes=_UNATTENDED,
     )
 
 
-def _reports_with_request() -> list[AnalystReport]:
+def _reports_with_request(record: dict) -> list[AnalystReport]:
     """Two worker reports, one carrying the tool request. ``authoring_possible`` is derived from a
     report carrying one (`roles.run_cycle`), so this is what opens the authoring stage."""
     return [
@@ -593,7 +422,7 @@ def _reports_with_request() -> list[AnalystReport]:
             ],
             uncertainty="the combined value and its reduced chi-squared are not available",
             status="failed",
-            tool_request=_worker_tool_request(),
+            tool_request=_worker_tool_request(record),
         ),
         AnalystReport(
             summary=(
@@ -672,7 +501,6 @@ def test_lead_cycle_authors_a_chain_end_to_end(tmp_path):
     monitor = RunMonitor(chatter=5, jsonl_path=jsonl, stream=sys.stdout)
     run_id = f"chaintest_{ts}"
     create_run_workspace(run_id, ["analyst_lead"])
-    reports = _reports_with_request()
 
     async def _drive(config_dir: Path):
         # Spend is a ContextVar meter installed inside the task, exactly as `run_research` does
@@ -680,17 +508,22 @@ def test_lead_cycle_authors_a_chain_end_to_end(tmp_path):
         # no cost at all — measured on 2026-09-09, where `cost_usd_total` was null on all 1,164
         # events.
         install_cost_meter(run_id=run_id, monitor=monitor)
+        # The run's stores (the real one, made by migration item S11): the CI pipeline copies the
+        # brief's validation record from it. The tool needs no data, but xspec_utils reads the
+        # store, so its CI run has a store and the brief names a real record (an IXPE raw product).
+        control = RunControl()
+        async with run_stores(run_id, monitor, control) as keys:
+            record = await product_record("ixpe", "01002901", "raw")
+            return await _cycle(config_dir, _reports_with_request(record), keys, control)
+
+    async def _cycle(config_dir: Path, reports: list[AnalystReport], keys, control):
         lead = AnalystLeadAgent(monitor=monitor)
-        lead.tools = readonly_tools_for("analyst_lead", roots=[run_dir(run_id), tk])
-        # The two lines production sets right after building the lead (`runtime.py:570-572`).
-        # Omitting them is not cosmetic: with no `report_dir` there is no report workspace, so
-        # `edit_report` is never declared, so `submit_terminal_report` refuses with "there is no
-        # report to file yet" — and at the author stage that is one of only two open forms. On
-        # 2026-09-09 the lead spent 13 turns and 5 rejected filings looking for an exit that this
-        # test had removed, then left on a silent turn. §9.6's honest stop is only reachable if
-        # the role is wired the way the run path wires it.
-        lead.agent_key = "analyst_lead"
-        lead.report_dir = agent_dir(run_id, "analyst_lead")
+        # run_research's lead wiring (`wire_lead`): identity, report folder, receipts and read-only
+        # tools with its catalog login, web source and retrieval. A hand-wired lead once lacked its
+        # report folder, so `edit_report` was never declared and §9.6's honest stop was unreachable
+        # (2026-09-09: 13 turns, 5 rejected filings, then a silent turn).
+        await wire_lead(lead, run_id=run_id, toolkit_root=tk, keys=keys, run_monitor=monitor,
+                        run_control=control)
         await monitor.record(
             "run", "run.start", level=1, summary="lead-cycle chain authoring live test",
             data={

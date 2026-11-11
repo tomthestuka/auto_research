@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-import auto_research.agents.react as react
 from auto_research.agents.react import SandboxToolProvider
 from auto_research.agents.roles import AnalystWorkerAgent
 from auto_research.models import ModelResponse, ToolCall
@@ -35,7 +34,6 @@ def _pinned(monkeypatch, tmp_path):
     from auto_research.sandbox import fs_guard
 
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
-    monkeypatch.setattr(react, "_observation_path_args", lambda: {})
 
 
 def _tool(module, fn, args):
@@ -193,11 +191,9 @@ def test_a_failed_or_changed_result_is_refused(tmp_path):
 
 
 def test_a_synthetic_flag_travels_through_a_reference(tmp_path):
-    from auto_research.schemas.artifacts import InputFile
-
     store = ReceiptStore(tmp_path / "receipts")
     store.mint(source="analyst_worker_0", kind="result", produced_by=EXTRACT, data=json.dumps({"bins": BINS}),
-               inputs=[InputFile(path=tmp_path / "synth_injected", sha256="0" * 64)])
+               flags=["synthetic"])
     tools = _provider(tmp_path, store)
     asyncio.run(tools.execute(FIT, {"bins": {"$ref": "analyst_worker_0:r1#/bins"}}))
     assert "synthetic" in store.get("analyst_worker_0:r2").flags

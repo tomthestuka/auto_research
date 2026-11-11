@@ -61,8 +61,11 @@ carried by **reference** (`FigureRef`), never embedded
   any kind (`figure | result | data | paper | web | human | commit`). It is **minted by the
   runtime, never declared by a tool or a model**: `sha256` is computed over the stored bytes at
   `path`, and `produced_by` / `call_id` / `toolkit_commit` / `args_sha256` are stamped by the code
-  that ran the work. `inputs` are the files the call read, hashed before it ran; `parents` are the
-  receipts it derives from; `flags` (`failed`, `synthetic`) propagate to descendants. Its `handle`
+  that ran the work. `inputs` are the files the call read, hashed before it ran, and the store
+  object versions it read pinned (from the store's access log, hashed by the runtime); `writes` the
+  object versions it wrote in a store (from the store's version listing); `parents` are the
+  receipts it derives from; `flags` (`failed`, `synthetic`, `undeclared_write`, `unverified`)
+  propagate to descendants. Its `handle`
   is `<source>:<letter><n>` (letters `f r d p w h c`, one per kind), so a handle names its kind;
   the validator refuses a handle whose letter disagrees with `kind`, and a figure receipt without
   `caption`/`mime_type`. `to_figure_ref()` is the multimodal-boundary view. Minting, lookup and
@@ -90,8 +93,8 @@ carried by **reference** (`FigureRef`), never embedded
   `request_kind` (`"new_capability"`|`"fix_existing"`, default `new_capability`),
   `science_context`/`expected_behavior` (prose), a *suggested* `proposed_tool_name`,
   `observed_issue` (the symptom, for `fix_existing` defect reports — §9.3 L5),
-  `validation_data: list[ValidationDataset]` (≥1 required — the real or marked-synthetic
-  ObsID that exposed the gap), and free-text `notes` (where it may *suggest* check ideas).
+  `validation_data: list[ValidationDataset]` (≥1 required — the record in a store that
+  exposed the gap), and free-text `notes` (where it may *suggest* check ideas).
   The architectural calls — `target_domain`, `disposition`, `proposed_checks` — are **not**
   here: §9.3 makes them the lead's, and excluding them keeps the worker's `AnalystReport`
   response schema free of any open map (so a GPT-backed worker can compose it under strict
@@ -140,14 +143,22 @@ carried by **reference** (`FigureRef`), never embedded
   from one (`Receipt.to_figure_ref`); the model-input sanitiser names it in the note replacing the
   image for a text-only member (A3).
 - `Receipt(handle, kind, path, sha256, produced_by, created_at, call_id=None,
-  toolkit_commit=None, toolkit_root=None, env=None, env_untested=False, args_sha256=None, inputs=[], parents=[], flags=[], caption=None,
+  toolkit_commit=None, toolkit_root=None, env=None, env_untested=False, args_sha256=None, inputs=[], writes=[], parents=[], flags=[], caption=None,
   mime_type=None, title=None, ids={}, source_sha256=None, parser=None, commit_sha=None, returned_sha256=None)` — the
   runtime's record of one artifact (`returned_sha256`: the JSON blob of the keys a toolkit tool
   returned beside its stdout, what a `$ref` resolves against); `.source` is the handle's source; `.to_figure_ref()`.
-- `InputFile(path, sha256, basis="content"|"listing"|"obsdb", receipt=None)` — one input a call read;
-  `obsdb` is an observation the tool located from its ObsID (its folder under the mission folder,
-  flat or HEASARC's tree, `observations.obsid_folder`; hashed over
-  its catalog entry and its folder listing). `Receipt.toolkit_root` names the toolkit checkout the
+- `InputFile(path=None, object=None, sha256, basis="content"|"listing"|"object", receipt=None)` — one
+  input a call read: a file or folder (`path`), or a store object version (`object`, basis `object`,
+  its `sha256` the object's); exactly one of the two. `receipt`: the in-run receipt whose bytes these
+  are, or whose call wrote that version.
+- `StoreObject(store, bucket, key, version_id, size, sha256=None, delete_marker=False, overwrote=None,
+  declared=True)` — one object version as the runtime recorded it from the store (`store.records`):
+  `sha256` the runtime's (None for a delete marker or bytes it could not read); for a write,
+  `overwrote` the key's latest version before the call and `declared` whether the tool's manifest
+  names the store in `writes`.
+- `ReceiptFlag` — `failed`, `synthetic` (read in a bucket the store declares synthetic),
+  `undeclared_write`, `unverified`; any one makes a receipt unable to ground a number.
+- `Receipt.toolkit_root` names the toolkit checkout the
   toolkit tool ran from (stamped only on toolkit producers; the commit is stamped on every call).
 - `KIND_LETTER` / `LETTER_KIND` / `HANDLE_PATTERN` / `ArtifactKind` / `ReceiptFlag` — the handle
   scheme.
@@ -221,8 +232,10 @@ carried by **reference** (`FigureRef`), never embedded
   the run ledger (every seat's session history), and summarized into subsequent analyst task
   instructions by the consensus layer. Figures are `FigureRef` objects returned by tools.
   `exit_code=127` indicates "tool unavailable".
-- `ValidationDataset(mission: str, obsid: str, synthetic: bool = False)` — one real
-  (or marked-synthetic, §9.5) input a `ToolSpec`'s checks run against.
+- `ValidationDataset(store: str, bucket: str, key: str, version_id: str)` — one record in a data
+  store a `ToolSpec`'s checks run against: an object version, in the shape of a `record` argument
+  and of the catalog query's object rows (step 0b). All four required, non-empty; a record in one of
+  the store's `synthetic_buckets` marks every result computed on it synthetic.
 - `ProposedCheck(kind: str, description: str, tolerance: float | None = None)` — one
   *advisory* verification check; `kind` is an open free-text hint (§9.4 open menu), not an
   enum. Every field is a closed scalar (no open map) so the enclosing `ToolSpec` stays valid
@@ -253,7 +266,9 @@ carried by **reference** (`FigureRef`), never embedded
   says why it did not run.
 - `GateReport(passed: bool, jobs: tuple[GateJob, ...] = (), layer_a: list[CheckResult] = [],
   layer_b: list[CheckResult] = [], findings: list[CheckResult] = [], reason: str = "",
-  report_hash: str = "")` — the deterministic gate's verdict (§9.4); `jobs` lists every required
+  report_hash: str = "", infrastructure: "" | "passing" | "recurring" = "")` — the deterministic gate's
+  verdict (§9.4); `infrastructure` names a failure whose cause lies outside the change (S7 ruling B: the
+  CI pipeline's throwaway store did not start, `passing`; the real store did not answer, `recurring`); `jobs` lists every required
   job in order and `passed` is derived from them (a validator refuses `passed=True` the jobs do not
   give, a pass with no jobs included, and a report whose listed jobs give another verdict); `report_hash` seeds the §9.9 atomic-commit message.
   `findings` are **non-failing** observations (the literal-array landmine) the mechanical
@@ -344,3 +359,6 @@ Compacted 2026-10-07 and 2026-10-19 (every entry); detail in git history.
 - 2026-11-09 — W3 re-review: `GateJob` frozen; `GateReport.jobs` a tuple.
 - 2026-11-09 — Phase 3 step 0a W6: `ToolCall.kind` and `ToolSpec.target_domain` descriptions name no toolkit package (`<toolkit>.<package>.<tool>`; a new package named like the existing ones).
 - 2026-11-09 — W6 review: `ToolSpec.validation_data` adds that real data reaches a test through a data set the CI pipeline provides; `proposed_checks` states the grader rule positively.
+- 2026-11-10 — Phase 3 step 0b S5: `StoreObject`; `InputFile` names a file (`path`) or a store object version (`object`, basis `object`), basis `obsdb` retired (not backwards compatible); `Receipt.writes`; `ReceiptFlag` gains `undeclared_write` and `unverified`.
+- 2026-11-10 — Phase 3 step 0b S9: `ValidationDataset` is a record in a store, `{store, bucket, key, version_id}` (all required), replacing `mission`/`obsid`/`synthetic` (not backwards compatible; synthetic data is a store's synthetic bucket). `AnalystToolRequest`/`ToolSpec` field descriptions name records, not ObsIDs.
+- 2026-11-10 — S7 follow-up (ruling B): `GateReport.infrastructure` (`"" | passing | recurring`), set by the gate from its `infrastructure.*` checks; the lead's submit refunds a passing one.

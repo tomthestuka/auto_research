@@ -146,46 +146,16 @@ def test_the_audit_watch_sees_toolkit_code_run_in_this_process(tmp_path, toolkit
 
 def test_the_launch_path_imports_no_toolkit_module_into_the_orchestrator(make_toolkit, tmp_path,
                                                                         toolkit_code_watch):
-    """Preflight's toolkit and environment checks, the registry's load and reload, the catalog
-    health check and the lead's catalog read: every toolkit module they need runs in the jail.
-    Afterwards no module of this process comes from the toolkit root and the root is not on its
-    path."""
+    """Preflight's toolkit and environment checks and the registry's load and reload: every toolkit
+    module they need runs in the jail. Afterwards no module of this process comes from the toolkit
+    root and the root is not on its path."""
     import asyncio
 
-    import yaml
-
-    from auto_research.agents import react
     from auto_research.preflight import Preflight, build_default_preflight
     from auto_research.sandbox.registry import ToolkitRegistry
 
     _need_jail()
     root = make_toolkit()
-    (root / "catalog_utils" / "lib").mkdir(parents=True)
-    (root / "catalog_utils" / "skills").mkdir()
-    (root / "catalog_utils" / "__init__.py").write_text("from .skills import TOOL_MANIFEST\n")
-    (root / "catalog_utils" / "skills" / "__init__.py").write_text(
-        f"TOOL_MANIFEST = {{'{fixture.TOOLKIT_NAME}.catalog_utils.data_catalog': {{'module': "
-        "'catalog_utils.lib.catalog_read', 'fn': 'data_catalog', 'description': 'local data', "
-        "'args_schema': {'type': 'object', 'properties': {'obs_db_path': {'type': 'string', 'kind': 'path'}}}}}\n")
-    (root / "catalog_utils" / "lib" / "__init__.py").write_text("")
-    (root / "catalog_utils" / "README.md").write_text("# catalog_utils\n\nThe local data catalog.\n")
-    (root / "catalog_utils" / "lib" / "catalog_read.py").write_text(
-        "def data_catalog(obs_db_path, min_level=None):\n    return 'read ' + obs_db_path\n")
-    (root / "obsdb_catalog").mkdir()
-    (root / "obsdb_catalog" / "__init__.py").write_text("")
-    # It leaves a mark beside the catalog it checked: the check really ran (in the jail).
-    (root / "obsdb_catalog" / "healthcheck.py").write_text(
-        "import os\ndef healthcheck(path):\n    open(os.path.join(path, 'checked'), 'w').close()\n    return True\n")
-    import subprocess
-
-    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm",
-                    "catalog"], check=True, capture_output=True)
-    (tmp_path / "obsdb" / "DEMO").mkdir(parents=True)
-    (tmp_path / "obsdb" / "DEMO" / "catalog.json").write_text('{"entries": {}}')
-    from auto_research.config_paths import config_dir
-
-    (config_dir() / "observations.yaml").write_text(yaml.safe_dump({"obs_db_root": str(tmp_path / "obsdb")}))
     resolved = root.resolve()
 
     def from_toolkit() -> list[str]:
@@ -196,7 +166,7 @@ def test_the_launch_path_imports_no_toolkit_module_into_the_orchestrator(make_to
     before = from_toolkit()
     seen = toolkit_code_watch(resolved)
     checks = Preflight()
-    wanted = {"config_keys", "os_jail_available", "toolkit_contract", "toolkit_manifests", "catalog_health",
+    wanted = {"config_keys", "os_jail_available", "toolkit_contract", "toolkit_manifests",
               "human_envs", "private_variables", "analysis_probe"}
     for name, check in build_default_preflight()._checks:
         if name in wanted:
@@ -205,10 +175,7 @@ def test_the_launch_path_imports_no_toolkit_module_into_the_orchestrator(make_to
     registry = ToolkitRegistry(root)
     registry.load()
     registry.reload()
-    assert f"{fixture.TOOLKIT_NAME}.catalog_utils.data_catalog" in registry.list_tools()
-    out = asyncio.run(react.execute_data_catalog({"obs_db_path": str(tmp_path / "obsdb" / "DEMO")}))
-    assert not out.is_error and out.text == f"read {tmp_path / 'obsdb' / 'DEMO'}", out.text
-    assert (tmp_path / "obsdb" / "DEMO" / "checked").exists(), "the catalog health check never ran"
+    assert registry.list_tools(), "the fixture toolkit's tools were read"
     assert seen == [], seen
     assert from_toolkit() == before == []
     assert not any(Path(entry).resolve() == resolved for entry in sys.path if entry)
@@ -229,6 +196,7 @@ def test_the_registry_loads_every_package_with_every_argument_kind(make_toolkit)
     assert {name.split(".")[1] for name in tools} == set(PACKAGES)
     schemas = [registry.spec(name)["args_schema"] for name in tools]
     assert {kind for s in schemas for kind in declared_kinds(s).values()} == set(ARG_KINDS)
+    assert {w for name in tools for w in registry.spec(name).get("writes", [])} == {"db"}
     assert {shape for s in schemas for shape in declared_outputs(s).values()} == set(OUTPUT_SHAPES)
     assert {registry.tool_env(name) for name in tools} == {fixture.ENV_ID}
     assert {registry.call_timeout_ceiling(name) for name in tools} == {60}
@@ -434,8 +402,8 @@ _MINTING = {"_receipted": 2, "_web_receipted": None, "receipt_call": None, "mint
 _DYNAMIC_PRODUCERS = {
     ("agents/react.py", "execute", "kind"):
         "a worker's registry kind: a toolkit key (`<name>.<package>.<tool>`) or an `mcp.<server>.<tool>`",
-    ("agents/react.py", "execute", "producer"):
-        "ReadOnlyToolProvider: a `_RECEIPTED` tool name, or the catalog's toolkit kind (`_catalog_kind`)",
+    ("agents/react.py", "execute", "name"):
+        "ReadOnlyToolProvider: a `_RECEIPTED` tool name (each a harness producer, checked below)",
     ("schemas/artifacts.py", "to_figure_ref", "self.produced_by"): "copies a minted receipt's producer",
 }
 
@@ -447,7 +415,7 @@ def _scan_producers() -> tuple[set[str], set[tuple[str, str, str]]]:
     name) and each ``produced_by`` default is resolved: a literal, a module or local constant
     (also assigned then passed), either arm of a conditional, an f-string's or ``.format``'s literal
     head up to ``:``, a parameter narrowed by an enclosing ``if <param> == X`` / ``in (X, Y)``, a
-    minting wrapper's own parameter (its callers are scanned), ``_catalog_kind()`` (a toolkit kind).
+    minting wrapper's own parameter (its callers are scanned).
     What does not resolve is returned as ``(file, function, expression)``."""
     import ast
 
@@ -497,8 +465,6 @@ def _scan_producers() -> tuple[set[str], set[tuple[str, str, str]]]:
                     and isinstance(expr.func.value, ast.Constant)):
                 head = expr.func.value.value.split("{")[0]
                 return {head.split(":")[0]} if ":" in head else None
-            if isinstance(expr, ast.Call) and getattr(expr.func, "id", None) == "_catalog_kind":
-                return set()  # a toolkit kind
             if isinstance(expr, ast.Name):
                 fn = enclosing(expr)
                 if fn is not None:
@@ -547,7 +513,7 @@ def test_every_producer_the_harness_writes_is_a_listed_harness_producer():
     """L2 / #6: the list the name guard reads (``HARNESS_PRODUCERS``) covers every producer the code
     mints. The scan is closed: a producer argument that does not resolve from the syntax must be a
     listed run-time site (``_DYNAMIC_PRODUCERS``), and the one table such a site reads is checked here."""
-    from auto_research.agents.react import DATA_CATALOG_TOOL, ReadOnlyToolProvider
+    from auto_research.agents.react import ReadOnlyToolProvider
     from auto_research.provenance.store import HARNESS_PRODUCERS
 
     found, unresolved = _scan_producers()
@@ -555,8 +521,8 @@ def test_every_producer_the_harness_writes_is_a_listed_harness_producer():
             "use_env", "list_env", "read_paper", "research_request"} <= found
     assert sorted(found - HARNESS_PRODUCERS) == []
     assert unresolved == set(_DYNAMIC_PRODUCERS), sorted(unresolved ^ set(_DYNAMIC_PRODUCERS))
-    # The read-only site's names: each receipted under its own name, the catalog under its kind.
-    assert set(ReadOnlyToolProvider._RECEIPTED) - {DATA_CATALOG_TOOL} <= HARNESS_PRODUCERS
+    # The read-only site's names: each receipted under its own name, the catalog query included.
+    assert set(ReadOnlyToolProvider._RECEIPTED) <= HARNESS_PRODUCERS
 
 
 # ── the gate ─────────────────────────────────────────────────────────────────
@@ -643,7 +609,19 @@ def _add_band_totals(root: Path, *, extra_test: str = "") -> None:
         _TOTALS_TEST % {"extra": extra_test}, encoding="utf-8")
 
 
-def _gate(root: Path):
+@pytest.fixture(scope="module")
+def brief_store(tmp_path_factory):
+    """The store the fixture's configuration declares (the toolkit has store tools, so the gate checks
+    the brief's validation record there and gives store-tool test runs a throwaway copy):
+    ``{"entry", "record"}``."""
+    from tests.test_gate_store import serving_real_store
+
+    with serving_real_store(tmp_path_factory.mktemp("brief_store"), ["demo"]) as (entry, _real, put):
+        yield {"entry": entry, "record": put("demo", "counts/s1/1a2b3c4d/rows.csv", b"obsid,low,high\n")}
+
+
+def _gate(root: Path, record: dict | None = None):
+    """``run_gate`` on the change, for a brief naming ``record`` (default: one no store holds)."""
     from auto_research.sandbox.gate import run_gate
     from auto_research.schemas import ToolSpec, ValidationDataset
 
@@ -651,16 +629,17 @@ def _gate(root: Path):
         science_context="Total counts per band are the denominator of every band ratio.",
         expected_behavior="Sums each band over the rows of a product CSV and writes them as a table.",
         proposed_tool_name="band_totals", target_domain=fixture.PKG_NAME, disposition="extend_existing",
-        validation_data=[ValidationDataset(mission="IXPE", obsid="synth260817-4d1f7a", synthetic=True)],
+        validation_data=[ValidationDataset(**(record or {"store": "db", "bucket": "demo",
+                                                         "key": "counts/s1/1a2b3c4d/rows.csv", "version_id": "v1"}))],
     )
     return asyncio.run(run_gate(root, spec))
 
 
-def test_the_gate_passes_a_small_change_with_its_tests_in_the_named_environment(make_toolkit):
+def test_the_gate_passes_a_small_change_with_its_tests_in_the_named_environment(make_toolkit, brief_store):
     _need_jail()
-    root = make_toolkit()
+    root = make_toolkit(stores=[brief_store["entry"]])
     _add_band_totals(root)
-    report = _gate(root)
+    report = _gate(root, brief_store["record"])
     assert report.passed, report.reason
     checks = {c.name: c for c in (*report.layer_a, *report.layer_b)}
     for name in ("structural.changes_allowed", "structural.env_resolves", "structural.argument_kinds",
@@ -670,26 +649,26 @@ def test_the_gate_passes_a_small_change_with_its_tests_in_the_named_environment(
     assert returns and all(c.passed for c in returns), returns
 
 
-def test_the_gate_fails_a_change_that_breaks_an_earlier_fast_test(make_toolkit):
+def test_the_gate_fails_a_change_that_breaks_an_earlier_fast_test(make_toolkit, brief_store):
     """The earlier fast tests of every package naming the environment run with the change: one
     that the change breaks in ``other_utils`` fails ``layer_b.regression``, naming the test."""
     _need_jail()
-    root = make_toolkit()
+    root = make_toolkit(stores=[brief_store["entry"]])
     _add_band_totals(root)
     lib = root / fixture.OTHER_PKG / "lib" / "other_help.py"
     lib.write_text(lib.read_text(encoding="utf-8").replace("rows.extend(reader)", "rows.extend(list(reader)[:0])"),
                    encoding="utf-8")
-    report = _gate(root)
+    report = _gate(root, brief_store["record"])
     regression = next(c for c in report.layer_b if c.name == "layer_b.regression")
     assert not report.passed and not regression.passed
     assert "test_merge_keeps_every_row_in_order" in regression.detail, regression.detail
 
 
-def test_the_gate_report_lists_every_job_with_its_status(make_toolkit):
+def test_the_gate_report_lists_every_job_with_its_status(make_toolkit, brief_store):
     _need_jail()
-    root = make_toolkit()
+    root = make_toolkit(stores=[brief_store["entry"]])
     _add_band_totals(root)
-    report = _gate(root)
+    report = _gate(root, brief_store["record"])
     jobs = report.jobs
     assert jobs and report.passed
     assert all(job.status in ("pass", "skip") for job in jobs), jobs
@@ -700,15 +679,15 @@ def test_the_gate_report_lists_every_job_with_its_status(make_toolkit):
     assert {job.name: job.status for job in jobs}["regression"] == "pass"  # other_utils' earlier fast test
 
 
-def test_a_data_test_whose_data_the_gate_lacks_fails_the_commit(make_toolkit):
+def test_a_data_test_whose_data_the_gate_lacks_fails_the_commit(make_toolkit, brief_store):
     _need_jail()
-    root = make_toolkit()
+    root = make_toolkit(stores=[brief_store["entry"]])
     _add_band_totals(root, extra_test=_DATA_TEST)
-    report = _gate(root)
+    report = _gate(root, brief_store["record"])
     assert not report.passed and "demo_rows" in report.reason, report.reason
 
 
-def test_the_ci_pipeline_messages_a_failing_change_draws_state_positive_actions(make_toolkit):
+def test_the_ci_pipeline_messages_a_failing_change_draws_state_positive_actions(make_toolkit, brief_store):
     """W6: what the coder and the lead read from a failing pipeline (each failed check, the reason
     and the coder's feedback message) names the CI pipeline, states positive actions and cites no
     build-time governance. Two failing fixtures: a change that breaks an earlier fast test and names
@@ -717,14 +696,14 @@ def test_the_ci_pipeline_messages_a_failing_change_draws_state_positive_actions(
     from tests.test_prompts import model_text_problems
 
     _need_jail()
-    root = make_toolkit()
+    root = make_toolkit(stores=[brief_store["entry"]])
     _add_band_totals(root, extra_test=_DATA_TEST)
     lib = root / fixture.OTHER_PKG / "lib" / "other_help.py"
     lib.write_text(lib.read_text(encoding="utf-8").replace("rows.extend(reader)", "rows.extend(list(reader)[:0])"),
                    encoding="utf-8")
-    reports = [_gate(root)]
+    reports = [_gate(root, brief_store["record"])]
     (root / "notes.txt").write_text("a file outside every package\n", encoding="utf-8")
-    reports.append(_gate(root))
+    reports.append(_gate(root, brief_store["record"]))
     for report in reports:
         assert not report.passed
         texts = [c.detail for c in (*report.layer_a, *report.layer_b) if not c.passed]

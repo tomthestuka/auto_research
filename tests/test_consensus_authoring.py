@@ -36,7 +36,7 @@ def _tool_request(name: str = "pcube_tool") -> AnalystToolRequest:
         science_context="workers need a PCUBE polarization tool the toolkit doesn't expose",
         expected_behavior="run xpbin PCUBE on a merged event file and return the Stokes table",
         proposed_tool_name=name,
-        validation_data=[ValidationDataset(mission="IXPE", obsid="01002901")],
+        validation_data=[ValidationDataset(store="db", bucket="data", key="k/s/a.dat", version_id="v1")],
     )
 
 
@@ -48,7 +48,7 @@ def _toolspec(name: str = "pcube_tool") -> ToolSpec:
         proposed_tool_name=name,
         target_domain="xspec_utils",
         disposition="extend_existing",
-        validation_data=[ValidationDataset(mission="IXPE", obsid="01002901")],
+        validation_data=[ValidationDataset(store="db", bucket="data", key="k/s/a.dat", version_id="v1")],
     )
 
 

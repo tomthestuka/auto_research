@@ -47,7 +47,6 @@ from auto_research.provenance import check_report_fields
 from auto_research.provenance.calls import FIGURE_PATH_ARGS, resolve_call_args
 from auto_research.provenance.capture import inputs_before, parse_products, receipt_call
 from auto_research.env import coder_wait_limits_s, tool_search_config
-from auto_research.observations import load_observations_config
 from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
 from auto_research.sandbox.runner import PROTOCOL_KEYS, normalize_tool_raw, parse_tool_figures, tool_text
 
@@ -135,18 +134,6 @@ async def _run_extra_tool(
         if definition.get("name") == name:
             return await executor(arguments)
     return None
-
-
-def _environment_stamp(environment: Any) -> str | None:
-    """``environment``'s fingerprint, its lock written (as a worker's REPL stamps its receipts), or
-    ``None`` when it cannot be read: the receipt is then unstamped, never the call failed."""
-    from auto_research.env import env_lock_dir
-    from auto_research.sandbox.envs import fingerprint_and_lock
-
-    try:
-        return fingerprint_and_lock(environment, env_lock_dir())
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _sandbox_env_fingerprint(sandbox: Any) -> str | None:
@@ -313,15 +300,8 @@ def _receipted(
     *,
     kind: str = "result",
     fields: Mapping[str, Any] | None = None,
-    toolkit_root: Path | None = None,
-    state: Any = None,
-    env: str | None = None,
 ) -> ToolOutcome:
     """Mint a receipt for an in-process tool's outcome and label the text the model sees with it.
-
-    ``toolkit_root``: given for a toolkit tool the lead runs (``data_catalog``, a jailed one-shot
-    call), so its receipt names the toolkit and commit like the same tool run in a worker's sandbox;
-    ``env``: the fingerprint of the environment it ran in.
 
     The blob is the outcome text as the tool produced it, before the label, so a quote the model
     copies from the text it read is checked against exactly that text.
@@ -330,8 +310,7 @@ def _receipted(
         return outcome
     minted = receipt_call(
         receipts, source=source, produced_by=name, args=arguments, text=outcome.text,
-        failed=outcome.is_error, kind=kind, fields=fields, toolkit_root=toolkit_root, state=state,
-        **({"env": env} if env else {}),
+        failed=outcome.is_error, kind=kind, fields=fields,
     )
     return replace(outcome, text=f"{minted.header()}\n{outcome.text}",
                    receipt_call_id=minted.result.call_id)
@@ -611,9 +590,8 @@ async def execute_view_receipt(store: Any | None, arguments: Mapping[str, Any]) 
 
 def _made_from(receipt: Any) -> str:
     """What a toolkit result's call was given, as the runtime recorded it: the earlier results it
-    took by reference and the inputs it read (files its arguments named, and an observation named
-    by ObsID; a data root itself and other identifier-located inputs are not recorded, CLAUDE.md
-    §13). Other receipts carry no such line."""
+    took by reference and the inputs it read (files its arguments named, and the store object
+    versions it read, from the store's records). Other receipts carry no such line."""
     from auto_research.toolkit_contract import is_toolkit_producer
 
     if getattr(receipt, "kind", None) != "result" or not is_toolkit_producer(str(getattr(receipt, "produced_by", ""))):
@@ -621,7 +599,8 @@ def _made_from(receipt: Any) -> str:
     inputs = list(getattr(receipt, "inputs", None) or [])
     from_files = {item.receipt for item in inputs if getattr(item, "receipt", None)}
     by_ref = [p for p in (getattr(receipt, "parents", None) or []) if p not in from_files]
-    files = [Path(str(item.path)).name for item in inputs]
+    files = [Path(str(item.path)).name if item.object is None
+             else f"{item.object.bucket}/{item.object.key} (version {item.object.version_id})" for item in inputs]
     shown = lambda names: ", ".join(names[:6]) + (f" and {len(names) - 6} more" if len(names) > 6 else "")
     if not by_ref and not files:
         return "; its call took no earlier result by reference and read no recorded file"
@@ -671,172 +650,85 @@ async def execute_wait_for_reply(
 
 
 # ----------------------------------------------------------------------------
-# Local data catalog — a read-only tool for the analyst worker + lead (§9.10 step 7).
+# The store's catalog — a read-only query the runtime runs for the analyst lead (step 0b, S9).
 # ----------------------------------------------------------------------------
 
-# The local-data-catalog READ lives in research_toolkit's ``catalog_utils`` package (CLAUDE.md
-# §2: domain reads belong to the toolkit). Workers reach it through ``ToolkitRegistry`` (it runs
-# in the sandbox like any toolkit tool); the analyst lead, which has no sandbox, is handed this
-# def and runs the same pure-standard-library read in-process. Its agent-facing name is the
-# registry-sanitized manifest kind, so both paths present the identical tool.
-# The kind is the bound toolkit contract's (``<name>.catalog_utils.data_catalog``), read when used,
-# so the lead's catalog receipts are evidence under any declared toolkit name. The agent-facing name
-# stays this toolkit's until the lead's in-process path moves (Phase 3 step 3).
-DATA_CATALOG_TOOL = "research_toolkit_catalog_utils_data_catalog"
+#: The query's agent-facing name and its receipts' producer: a harness read, navigation (§7).
+CATALOG_QUERY_TOOL = "catalog_query"
 
 
-def _catalog_kind() -> str:
-    """The catalog read's registry kind under the bound toolkit contract."""
-    from auto_research.toolkit_contract import toolkit
+def catalog_query_tool_def(stores: Sequence[str]) -> dict:
+    """The provider-neutral definition of ``catalog_query`` over ``stores`` (the stores the unit
+    holds a reader login to, ``store.keys``). Domain-neutral: kind, subject, bucket and key are the
+    toolkit's names, which its README explains."""
+    from auto_research.store import query as catalog_query
 
-    return f"{toolkit().name}.catalog_utils.data_catalog"
-
-
-def _catalog_spec() -> dict:
-    """The catalog read's manifest entry, read as data from ``catalog_utils/skills/__init__.py``
-    (``registry.manifest_literal``: no toolkit code runs in the orchestrator, D25)."""
-    from auto_research.env import toolkit_root
-    from auto_research.sandbox.registry import manifest_literal
-
-    source = Path(toolkit_root()) / "catalog_utils" / "skills" / "__init__.py"
-    manifest = manifest_literal(source.read_text(encoding="utf-8"))
-    if not manifest or not isinstance(manifest.get(_catalog_kind()), dict):
-        raise ValueError(f"{source} holds no {_catalog_kind()} entry in a TOOL_MANIFEST dict literal")
-    return manifest[_catalog_kind()]
-
-
-def _jailed_catalog_read(spec: Mapping[str, Any], obs_db_path: str, min_level: int | None, *,
-                         environment: Any, timeout: int) -> str:
-    """The manifest entry's ``module``/``fn`` run once inside the analysis jail, in ``environment``
-    (``runner.call_in_jail``), within the tool's ``tool_config.yaml`` timeout; raises with the
-    read's own error when it fails."""
-    from auto_research.env import toolkit_root
-    from auto_research.sandbox.runner import call_in_jail
-
-    return str(call_in_jail(str(spec["module"]), str(spec["fn"]), [obs_db_path, min_level],
-                            toolkit_root=Path(toolkit_root()), label="data-catalog", timeout=timeout,
-                            environment=environment))
-
-
-def _toolkit_clean_head() -> str | None:
-    """The toolkit's ``HEAD`` commit when its tree holds no uncommitted change, else ``None``."""
-    from auto_research.env import toolkit_root
-    from auto_research.sandbox.merge_flow import _dirty_paths, _git_in
-
-    root = toolkit_root()
-    if _dirty_paths(root):
-        return None
-    return _git_in(root, "rev-parse", "HEAD").strip()
-
-
-def data_catalog_tool_def() -> dict | None:
-    """Provider-neutral definition for the read-only ``data_catalog`` tool.
-
-    The tool is defined in the toolkit's ``catalog_utils`` manifest; its description + args_schema
-    are read from there as data (:func:`_catalog_spec`) so orchestration never restates them.
-    Returns None when that manifest cannot be read (a misconfigured toolkit), so a role's tool set
-    still builds — the preflight is where a missing toolkit fails loudly.
-    """
-    try:
-        spec = _catalog_spec()
-    except Exception:  # noqa: BLE001 — toolkit absent/misconfigured; skip the tool, don't crash
-        return None
-    from auto_research.sandbox.registry import provider_schema
-
+    names = list(stores)
     return {
-        "name": DATA_CATALOG_TOOL,
-        "description": spec["description"],
-        "input_schema": provider_schema(spec.get("args_schema"), references=False),
+        "name": CATALOG_QUERY_TOOL,
+        "description": (
+            "Read a data store's catalog: which products the store holds, which product is current "
+            "for a bucket, kind and subject, and the exact object versions one product holds. A product is "
+            "one run of a toolkit tool's recipe (tool, algorithm version, settings, input versions), "
+            "filed in one bucket under a kind and a subject the toolkit names; its folder carries the first "
+            "8 hex digits of its recipe hash. view 'products' lists products (newest first) by bucket, kind, "
+            "subject, state or recipe hash prefix, each with its tool, settings, input count, state, "
+            "flags and whether it is current; view 'current' lists the current product per bucket, kind "
+            "and subject; view 'objects' shows one product in full (its recipe inputs included) and its "
+            "objects as records {store, bucket, key, version_id} with sha256 and size. Name those records in a tool call's record argument or in a brief's "
+            "validation_data. The answer records where you looked: cite a toolkit tool's result for "
+            "any number."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "store": {"type": "string", "enum": names,
+                          "description": (f"The store to read (the one you hold: {names[0]})." if len(names) == 1
+                                          else "The store to read.")},
+                "view": {"type": "string", "enum": list(catalog_query.VIEWS),
+                         "description": "products (default), current, or objects (needs recipe_hash)."},
+                "bucket": {"type": "string", "description": "Only products in this bucket (a product has its "
+                                                            "bucket once its objects are recorded)."},
+                "kind": {"type": "string", "description": "Only products of this kind."},
+                "subject": {"type": "string", "description": "Only products of this subject."},
+                "state": {"type": "string", "enum": list(catalog_query.STATES),
+                          "description": "Only products in this state; 'verified' products can be current."},
+                "recipe_hash": {"type": "string",
+                                "description": "A recipe hash, or its first 8 or more hex digits."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": catalog_query.MAX_LIMIT,
+                          "description": f"Rows to show (default {catalog_query.DEFAULT_LIMIT})."},
+            },
+        },
     }
 
 
-def _empty_obs_db_note() -> str | None:
-    """What ``data_catalog`` called with no mission folder answers while the obs-db root holds no
-    mission yet (H2): the root, and that ``acquire`` creates a mission's folder, with its catalog,
-    on its first observation. ``None`` once a mission exists, or when the root is not configured."""
+async def execute_catalog_query(logins: Mapping[str, Any], arguments: Mapping[str, Any]) -> ToolOutcome:
+    """Run one catalog query on the store's catalog as the unit's own reader-class login
+    (``logins``: store name → ``store.keys.Credentials``), in a read-only session of its own
+    (``store.query.run``). A malformed query or a catalog that does not answer is an error result
+    naming what to do."""
+    from auto_research.store import query as catalog_query
+
     try:
-        cfg = load_observations_config()
-    except Exception:  # noqa: BLE001 — no configured root: the ordinary argument checks answer
-        return None
-    if cfg.missions:
-        return None
-    return (
-        f"The local observation database at {cfg.obs_db_root} holds no mission yet, so nothing is "
-        "local. acquire creates a mission's folder, with its catalog, on its first observation; "
-        "list the archive's observations with the remote search tools and acquire the ones the "
-        "analysis needs."
-    )
-
-
-async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
-    """Run the ``catalog_utils`` local-data read for the sandbox-less analyst lead: a one-shot call
-    inside the analysis jail (:func:`_jailed_catalog_read`, D25), in the toolkit's default
-    environment, whose fingerprint the outcome carries (``call_context["env"]``) for its receipt.
-    The toolkit is checked clean before the read and unchanged after it.
-
-    The mission's ``obs_db_path`` is supplied by the caller — it is listed in the analyst's
-    local-observation-databases context, exactly as ``acquire`` receives it. Delegates the read
-    + listing to ``catalog_utils.lib.catalog_read`` (the single domain read); a malformed catalog
-    raises there and is surfaced as a recoverable error. (Workers run the same tool in their
-    sandbox via ``ToolkitRegistry``.)
-    """
-    obs_db_path = str(arguments.get("obs_db_path") or "").strip()
-    empty = None if obs_db_path else _empty_obs_db_note()
-    if empty is not None:  # no catalog was read: a failed result, which grounds nothing
-        return ToolOutcome(text=empty, is_error=True)
-    if not obs_db_path:
+        asked = catalog_query.check(arguments)
+    except catalog_query.QueryError as exc:
+        return ToolOutcome(text=f"catalog_query: {exc}.", is_error=True)
+    name = asked.pop("store", None) or (next(iter(logins)) if len(logins) == 1 else None)
+    login = logins.get(name) if name is not None else None
+    if login is None:
+        return ToolOutcome(text=f"catalog_query: name the store to read, one of {', '.join(logins)}.",
+                           is_error=True)
+    try:
+        answer = await catalog_query.run(login.dsn(), asked, store=name)
+    except catalog_query.QueryError as exc:
+        return ToolOutcome(text=f"catalog_query: {exc}.", is_error=True)
+    except Exception as exc:  # noqa: BLE001 — a catalog that does not answer is the call's error result
         return ToolOutcome(
-            text="data_catalog needs obs_db_path — a mission directory from your local "
-            "observation databases list (e.g. the IXPE obs-db path).",
+            text=(f"catalog_query: store {name}'s catalog did not answer ({type(exc).__name__}: {exc}). "
+                  "State the store fault in your report, or call again."),
             is_error=True,
         )
-    try:
-        # Committed code only, as a worker's sandbox would run it after a commit: its output is
-        # evidence. While the toolkit holds uncommitted changes (an authoring session's work) the
-        # read waits (B3c-1 review 31: an edited, later rejected module kept running).
-        head = _toolkit_clean_head()
-        if head is None:
-            return ToolOutcome(
-                text="data_catalog runs committed toolkit code only, and the toolkit has "
-                     "uncommitted changes (a tool is being authored). Call it again once that "
-                     "authoring has finished.",
-                is_error=True,
-            )
-        # The input validator, as on a worker's call: each argument arrives the way its kind
-        # allows (the committed manifest's kinds, read as data).
-        from auto_research.provenance.calls import resolve_call_args
-        from auto_research.provenance.inputs import RefError, check_arguments, declared_defaults, tool_values
-
-        spec = _catalog_spec()
-        schema = spec.get("args_schema")
-        problem = check_arguments(_catalog_kind(), arguments, schema)
-        if problem is not None:
-            return ToolOutcome(text=problem, is_error=True)
-        completed = resolve_call_args(arguments, {"defaults": declared_defaults(schema)})
-        try:
-            arguments = tool_values(completed, schema, None, lambda _h: False).sent
-        except RefError as exc:
-            return ToolOutcome(text=str(exc), is_error=True)
-        obs_db_path = str(arguments.get("obs_db_path") or "").strip()
-        raw_min = arguments.get("min_level")
-        from auto_research.env import analysis_environment, toolkit_root
-        from auto_research.sandbox.registry import ToolkitRegistry
-
-        environment = analysis_environment()
-        stamp = await asyncio.to_thread(_environment_stamp, environment)
-        timeout = ToolkitRegistry(Path(toolkit_root())).call_timeout_ceiling(_catalog_kind())
-        text = await asyncio.to_thread(partial(
-            _jailed_catalog_read, spec, obs_db_path, int(raw_min) if raw_min is not None else None,
-            environment=environment, timeout=timeout))
-        if _toolkit_clean_head() != head:
-            return ToolOutcome(
-                text="The toolkit changed while data_catalog read (a commit or an edit landed), so "
-                     "this answer is not from one committed version. Call it again.",
-                is_error=True,
-            )
-    except Exception as exc:  # noqa: BLE001 — malformed catalog / missing toolkit → recoverable
-        return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
-    return ToolOutcome(text=text, call_context={"env": stamp})
+    return ToolOutcome(text=json.dumps(answer, indent=1, sort_keys=True, default=str))
 
 
 WEB_SEARCH_TOOL = "web_search"
@@ -2441,6 +2333,8 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
         return unready
     session.submits_used += 1
     gate = await session.run_gate_step()
+    if not gate.passed and gate.infrastructure:
+        return _gate_infrastructure_failure(gate, session)
     if not gate.passed:
         failed = [
             f"- [{c.layer}] {c.name}: {c.detail}"
@@ -2491,6 +2385,29 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
 
 #: Passing co-lead failures a coding session refunds before they count (ruling C3c).
 COLEAD_REFUNDS = 3
+#: Passing CI-pipeline infrastructure failures a coding session refunds before they count (S7, ruling B).
+INFRA_REFUNDS = 3
+
+
+def _gate_infrastructure_failure(gate: Any, session: Any) -> ToolOutcome:
+    """A CI pipeline that could not judge the change for a cause outside it (``GateReport.infrastructure``:
+    its throwaway store did not start, or the real store did not answer), as the lead reads it. As a
+    co-lead failure (C3c): a passing one is refunded, up to ``INFRA_REFUNDS`` per session; after those,
+    and for one likely to recur, the submission counts, so the link's own caps bound the retries."""
+    cause = "; ".join(c.detail for c in gate.layer_b if c.name.startswith("infrastructure.") and not c.passed)
+    refunded = int(getattr(session, "infra_refunds", 0) or 0)
+    if gate.infrastructure == "passing" and refunded < INFRA_REFUNDS:
+        session.infra_refunds = refunded + 1
+        session.submits_used -= 1
+        return ToolOutcome(text=(
+            f"The CI pipeline could not judge the change: {cause}. This lies outside the change; nothing was "
+            "committed and this call is not counted against your budget. Call submit_for_review again."),
+            is_error=True)
+    why = ("it is likely to recur until a human acts" if gate.infrastructure == "recurring"
+           else f"after {INFRA_REFUNDS} such failures on this link were not counted")
+    return ToolOutcome(text=(
+        f"The CI pipeline could not judge the change: {cause}. This lies outside the change, and {why}, so "
+        "this call counts against your budget. Nothing was committed. Say so in your report."), is_error=True)
 
 
 def _colead_failure(
@@ -2720,6 +2637,12 @@ async def _respond_now(session: Any, message: str, cycle: "LeadCycle | None") ->
         )
     # Persuaded — re-validate the immovable gate (the tree may have changed) before committing.
     gate = await session.run_gate_step()
+    if not gate.passed and gate.infrastructure:
+        cause = "; ".join(c.detail for c in gate.layer_b if c.name.startswith("infrastructure.") and not c.passed)
+        return ToolOutcome(text=(
+            f"The co-lead is persuaded, but the CI pipeline could not judge the change again: {cause}. This "
+            "lies outside the change; nothing was committed. Call submit_for_review to run the pipeline "
+            "and the review again."), is_error=True)
     if not gate.passed:
         failed = "\n".join(
             f"- [{c.layer}] {c.name}: {c.detail}"
@@ -2916,7 +2839,8 @@ def _field_enum(model: type, name: str) -> list[str]:
 
 
 def _validation_data_schema() -> dict:
-    """The ``validation_data`` array — real inputs a tool's checks run against."""
+    """The ``validation_data`` array — records in a store a tool's checks run against."""
+    fields = list(ValidationDataset.model_fields)
     return {
         "type": "array",
         "minItems": 1,
@@ -2924,19 +2848,9 @@ def _validation_data_schema() -> dict:
         "items": {
             "type": "object",
             "properties": {
-                "mission": {
-                    "type": "string",
-                    "description": _field_desc(ValidationDataset, "mission"),
-                },
-                "obsid": {
-                    "type": "string",
-                    "description": _field_desc(ValidationDataset, "obsid"),
-                },
-                "synthetic": {
-                    "type": "boolean",
-                    "description": _field_desc(ValidationDataset, "synthetic"),
-                },
+                name: {"type": "string", "description": _field_desc(ValidationDataset, name)} for name in fields
             },
+            "required": fields,
         },
     }
 
@@ -3179,28 +3093,6 @@ async def execute_author_chain(cycle: LeadCycle, arguments: Mapping[str, Any]) -
 # Analyst science tools — the existing ToolkitRegistry + PersistentSandbox.
 # ----------------------------------------------------------------------------
 
-#: The toolkit argument the runtime fills with the configured obs-db root itself (H2): `acquire`
-#: takes it, so it works on a root that holds no mission yet.
-OBS_DB_ROOT_ARG = "obs_db_root"
-
-
-def _observation_path_args() -> dict[str, str]:
-    """Map tool path-args to configured observation folders, e.g. ``ixpe_path`` →
-    the IXPE ``obs_db_path`` from ``config/observations.yaml``, and ``obs_db_root`` → the root.
-
-    Convention: a mission folder ``<m>`` under the root fills a tool argument named
-    ``<m>_path``, and the root fills one named ``obs_db_root`` (H2). Used to auto-supply instrument
-    data paths so the model need not.
-    """
-    try:
-        cfg = load_observations_config()
-    except Exception:  # noqa: BLE001
-        return {}
-    paths = {f"{mission}_path": str(c.obs_db_path) for mission, c in cfg.missions.items()}
-    paths[OBS_DB_ROOT_ARG] = str(cfg.obs_db_root)
-    return paths
-
-
 def _toolkit_root_text() -> str:
     """The bound toolkit contract's root, resolved, as model-facing text: where a role's tool
     descriptions say the toolkit (and its README briefings) lives."""
@@ -3209,13 +3101,55 @@ def _toolkit_root_text() -> str:
     return str(Path(toolkit().root).resolve())
 
 
+def _store_location_problem(sent: Mapping[str, Any], names: Sequence[str], cwd: Path | None,
+                            records: Any | None) -> str | None:
+    """The refusal for a ``path`` argument inside a store's folders (``store.records``)."""
+    if not names:
+        return None
+    from auto_research.store.records import store_location_problem
+
+    stores = list(records.stores.values()) if records is not None else None
+    return store_location_problem(sent, names, cwd, stores)
+
+
+def _pinned_records(args: Mapping[str, Any], kinds: Mapping[str, str]) -> list[dict[str, str]]:
+    """Every record the call's (pinned) ``record`` arguments name, each with its version_id."""
+    from auto_research.provenance.inputs import record_value
+
+    found = []
+    for name, kind in kinds.items():
+        if kind != "record":
+            continue
+        value = args.get(name)
+        for item in (value if isinstance(value, list) else [value]):
+            record = record_value(item)
+            if record is not None and record.get("version_id"):
+                found.append(record)
+    return found
+
+
+def _named_version_problem(records: Any, arguments: Mapping[str, Any], schema: Any) -> str | None:
+    """Why a record the model wrote with a ``version_id`` cannot be read (``StoreRecords.version_problem``)."""
+    from auto_research.provenance.inputs import declared_records, record_value
+
+    for name in declared_records(schema):
+        value = arguments.get(name)
+        for item in (value if isinstance(value, list) else [value]):
+            record = record_value(item)
+            if record is not None and record.get("version_id"):
+                problem = records.version_problem(name, record)
+                if problem is not None:
+                    return problem
+    return None
+
+
 class SandboxToolProvider:
     """Analyst tool surface: ``ToolkitRegistry`` tools run in a ``PersistentSandbox``.
 
     Mirrors the per-call routing/argument-resolution the old ``execute_tools`` did:
     map the provider-safe function name back to the dotted ``kind``, auto-inject
-    ``cwd`` for ``bash_exec`` and instrument data paths for toolkit tools, then call
-    the sandbox. The model self-corrects on errors via the ReAct loop (it sees the
+    ``cwd`` for ``bash_exec``, pin each ``record`` argument to a store version for toolkit tools,
+    then call the sandbox. The model self-corrects on errors via the ReAct loop (it sees the
     error text and re-issues), so there is no separate retry here. Every executed
     ``ToolResult`` accumulates in ``results`` for memory/peer-summary use.
     """
@@ -3225,6 +3159,14 @@ class SandboxToolProvider:
     receipt_source: str | None = None
     extra_tools: Sequence[ExtraTool] = ()
     sandbox: Any | None = None
+    #: ``(store, bucket, key) -> version_id`` (``provenance.inputs.CurrentVersion``): pins a ``record``
+    #: argument the model wrote without a version, before the call. Supplied by the store seam;
+    #: ``None``: this provider reaches no store, so a record arrives with its version_id.
+    record_versions: Callable[[str, str, str], str] | None = None
+    #: The unit's view of the stores' records (``store.records.StoreRecords``): checks a version a
+    #: record names, and brackets every sandbox call to record what it read and wrote in a store.
+    #: ``None``: this provider reaches no store.
+    store_records: Any | None = None
 
     def __init__(
         self,
@@ -3239,9 +3181,14 @@ class SandboxToolProvider:
         receipts: Any | None = None,
         receipt_source: str | None = None,
         extra_tools: Sequence[ExtraTool] = (),
+        record_versions: Callable[[str, str, str], str] | None = None,
+        store_records: Any | None = None,
     ) -> None:
         self.registry = registry
         self.sandbox = sandbox
+        self.store_records = store_records
+        self.record_versions = record_versions or (
+            store_records.current_version if store_records is not None else None)
         self.cwd = cwd
         # Provenance (P1): the run's ReceiptStore and this agent's source key. Every tool call
         # mints receipts; the model sees each result labelled with its handle.
@@ -3262,14 +3209,11 @@ class SandboxToolProvider:
         self.timeout_s = timeout_s
         self.results: list[ToolResult] = []
         # Filesystem jail (CLAUDE.md §2/§12): the worker's builtin file tools are otherwise raw.
-        # Inactive (allow-all) when agent_fs_allow is unset. Toolkit tools take obs/data paths and
+        # Inactive (allow-all) when agent_fs_allow is unset. Toolkit tools take data paths and
         # run in the sandbox — not gated here (OS jail closes that, §12 / Loose ends).
         self._guard = PathGuard.from_config()
 
     def tool_definitions(self) -> list[dict]:
-        # ``data_catalog`` (research_toolkit.catalog_utils) is one of the registry tools, so it
-        # is already included and runs in the sandbox like any toolkit tool — no built-in add.
-        #
         # Tool search (config ``tool_search_enabled``): every *registry* tool is marked
         # ``defer_loading``, so its schema stays out of the model's context until the model
         # discovers it through the provider's search tool; the harness tools appended below
@@ -3285,7 +3229,7 @@ class SandboxToolProvider:
         # The one paged read every role has (the builtin server's 64 KB read is gone, 2026-10-17).
         defs.append(read_file_tool_def(
             f"Give a path inside the allow-list (your folder, the toolkit at {_toolkit_root_text()}, "
-            "the observation data); a relative path is read from your folder. The toolkit's "
+            "the analysis software); a relative path is read from your folder. The toolkit's "
             "README.md files (its root and each package) brief its domain. Files your shell wrote "
             "to /tmp are its own: read those with bash_exec.",
             path_hint="Path to the file: absolute, or relative to your folder.",
@@ -3311,8 +3255,6 @@ class SandboxToolProvider:
         return defs
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
-        # ``data_catalog`` is a registry tool here — it falls through to the sandbox path below,
-        # not a special in-process branch (only the sandbox-less lead runs it in-process).
         extra = await _run_extra_tool(getattr(self, "extra_tools", ()), name, arguments)
         if extra is not None:
             return extra
@@ -3348,8 +3290,7 @@ class SandboxToolProvider:
                     refused.append(True)
                     return ToolOutcome(
                         text=(f"path not permitted: {raw or '(none)'} — outside the agent filesystem "
-                              "allow-list (your folder, the toolkit, the observation data, the analysis "
-                              "software)."),
+                              "allow-list (your folder, the toolkit, the analysis software)."),
                         is_error=True,
                     )
                 if _in_host_tmp(target, guard, own=own):
@@ -3389,14 +3330,14 @@ class SandboxToolProvider:
             return ToolOutcome(
                 text=(
                     f"path not permitted: {denied} — outside the agent filesystem allow-list "
-                    f"(your folder, the toolkit, the observation data, the analysis software)."
+                    f"(your folder, the toolkit, the analysis software)."
                 ),
                 is_error=True,
             )
         # The call's id, allocated before it runs: it names the call's own products folder and is
         # the `call_id` on every receipt the call mints, so the two agree.
         call_id = uuid.uuid4().hex
-        context, shell_env = await self._call_context(kind, call_id)
+        context, shell_env = await self._call_context(kind, call_id, arguments)
         if isinstance(shell_env, ToolOutcome):
             return shell_env
         args = resolve_call_args(arguments, context)
@@ -3415,6 +3356,7 @@ class SandboxToolProvider:
         ref_parents: list[str] = []
         t0 = time.monotonic()
         state = None
+        store_io = None  # what the call read and wrote in a store (`_bracketed`)
         if not self.registry.is_known(kind):
             raw = {"exit_code": 127, "stderr": f"Tool not registered: {kind}", "stdout": ""}
         elif self.registry.is_mcp(kind):
@@ -3425,9 +3367,9 @@ class SandboxToolProvider:
                 sent["command"] = _in_environment(
                     shell_env, str(args.get("command", "")), getattr(self.registry, "_root", None),
                 )
-                raw = await self.sandbox.call_mcp_tool(kind, sent, timeout_s=call_timeout)
-            else:
-                raw = await self.sandbox.call_mcp_tool(kind, sent, timeout_s=call_timeout)
+            # The shell server holds no store key (item S4), so a shell call is not bracketed; a
+            # toolkit call's bracket would see anything a leaked key wrote meanwhile.
+            raw = await self.sandbox.call_mcp_tool(kind, sent, timeout_s=call_timeout)
         else:
             spec = self.registry.spec(kind)
             schema_props = (spec.get("args_schema") or {}).get("properties", {})
@@ -3451,11 +3393,26 @@ class SandboxToolProvider:
                 problem = _made_products_dir(Path(self.cwd), Path(context["products_dir"]))
                 if problem is not None:
                     return ToolOutcome(text=problem, is_error=True)
-            state = await self._inputs_before(sent, named=arguments, outputs=outputs)
-            raw = await self.sandbox.call_tool(
-                spec["module"], spec["fn"], sent, timeout_s=call_timeout,
-                **({"environment": routed} if routed is not None else {}),
-            )
+            from auto_research.provenance.inputs import declared_kinds
+
+            kinds = declared_kinds(spec.get("args_schema"))
+            # A store is reached through records, never by its folders (coordinator ruling a).
+            located = await asyncio.to_thread(
+                _store_location_problem, sent, [name for name, k in kinds.items() if k == "path"], self.cwd,
+                self.store_records)
+            if located is not None:
+                return ToolOutcome(text=located, is_error=True)
+            state = await self._inputs_before(
+                sent, outputs=[*outputs, *(name for name, k in kinds.items() if k == "record")])
+            raw, store_io = await self._bracketed(
+                lambda: self.sandbox.call_tool(
+                    spec["module"], spec["fn"], sent, timeout_s=call_timeout,
+                    **({"environment": routed} if routed is not None else {}),
+                ),
+                declared=spec.get("writes") or (),
+                given=_pinned_records(args, kinds))
+            if isinstance(raw, ToolOutcome):
+                return raw
             ran = True
         elapsed = time.monotonic() - t0
 
@@ -3485,11 +3442,26 @@ class SandboxToolProvider:
                 returned={k: v for k, v in raw.items() if k not in PROTOCOL_KEYS} if ran else None,
                 call_id=call_id, products=products,
                 products_dir=Path(context["products_dir"]) if "products_dir" in context else None,
+                # The commit the REPL that ran it imported (S4: the value its keyed tools hold).
+                **({"commit": self.sandbox.call_commit}
+                   if ran and not own_server and hasattr(self.sandbox, "call_commit") else {}),
+                **({"reads": store_io.reads, "writes": store_io.writes, "flags": store_io.flags,
+                    "carried": store_io.carried} if store_io is not None else {}),
             )
             figures = minted.figures
-            provenance_notes = product_notes + list(minted.notes)
+            provenance_notes = product_notes + list(minted.notes) + (store_io.notes if store_io else [])
+            if store_io is not None:
+                # The flags the call earned itself go on every product it made (the catalog's
+                # product_flag; the runtime never promotes a flagged product); what it carried is
+                # stamped only where the product's recipe inputs do not yield it through ancestry, so
+                # a human clear upstream reaches the rest. A stamp that failed earlier is retried here.
+                provenance_notes += await asyncio.to_thread(
+                    self.store_records.stamp_flags, minted.result.writes, sorted(minted.own_flags),
+                    minted.result.handle, store_io.window, sorted(minted.result.flags))
             receipt_call_id = minted.result.call_id
             header = minted.header() + "\n"
+            if store_io is not None and store_io.summary():
+                header += store_io.summary() + "\n"
             environment = getattr(self.sandbox, "call_environment", None) or getattr(self.sandbox, "environment", None)
             if env_fp is not None and environment is not None:
                 # Which environment produced this result, visible where the result is read (B2a).
@@ -3591,29 +3563,39 @@ class SandboxToolProvider:
             return dict(completed), [], str(exc)
         return values.sent, values.parents, None
 
-    async def _inputs_before(
-        self, args: Mapping[str, Any], named: Mapping[str, Any] | None = None, outputs: Iterable[str] = (),
-    ) -> Any:
-        """Hash what the call's arguments name, before it runs (data roots and outputs skipped;
-        ``outputs``: the call's ``output``-kind arguments, which name where it writes)."""
+    async def _inputs_before(self, args: Mapping[str, Any], outputs: Iterable[str] = ()) -> Any:
+        """Hash the files and folders the call's arguments name, before it runs (``outputs``: the
+        arguments that name no file the call reads: its ``output``-kind ones, which name where it
+        writes, and its ``record``-kind ones, objects in a store recorded by ``_bracketed``)."""
         if self.receipts is None or self.receipt_source is None:
             return None
-        # A mission folder argument: the configured `<mission>_path` names, and `obs_db_path` (how
-        # `data_catalog` takes its own). The folder is never hashed whole (a mission
-        # holds tens of thousands of files); the observations the call names in it are.
-        missions = set(_observation_path_args()) | {"obs_db_path"}
-        skip = missions | set(_FIGURE_PATH_ARGS) | set(outputs)
-        # The root is no mission folder: never hashed, and no ObsID is looked up in it (H2).
-        folders = {name: args[name] for name in sorted(missions - {OBS_DB_ROOT_ARG})
-                   if isinstance(args.get(name), str) and args[name]}
-        # `named`: the model's own arguments; a mission folder the runtime filled in is not one it read.
-        by_model = [name for name in folders if named is None or (named.get(name) or "")]
-        return await asyncio.to_thread(
-            partial(inputs_before, self.receipts, args, cwd=self.cwd, skip_keys=skip,
-                    observation_paths=folders, named_folders=by_model)
-        )
+        skip = {*_FIGURE_PATH_ARGS, *outputs}
+        return await asyncio.to_thread(partial(inputs_before, self.receipts, args, cwd=self.cwd, skip_keys=skip))
 
-    async def _call_context(self, kind: str, call_id: str) -> tuple[dict[str, Any], Any]:
+    async def _bracketed(
+        self, call: Callable[[], Awaitable[Any]], declared: Iterable[str] = (),
+        given: Sequence[Mapping[str, str]] = (),
+    ) -> tuple[Any, Any]:
+        """``(raw, CallIO or None)``: run one sandbox call inside the unit's store bracket
+        (``store.records.StoreRecords.bracket``: the version listing before and after, the access
+        log, the runtime's hashes), or ``(ToolOutcome, None)`` when the store cannot be listed
+        before the call, which then does not run. ``declared``: the stores the tool's manifest names
+        in ``writes``; ``given``: its pinned record arguments. Without a store view the call runs
+        alone."""
+        if self.store_records is None:
+            return await call(), None
+        from auto_research.store.records import StoreRecordError
+
+        try:
+            async with self.store_records.bracket(declared, given) as io:
+                raw = await call()
+        except StoreRecordError as exc:
+            return ToolOutcome(text=f"This call was not run: {exc}.", is_error=True), None
+        return raw, io
+
+    async def _call_context(
+        self, kind: str, call_id: str, arguments: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], Any]:
         """What the runtime decides for one call that the model does not write: ``(context, shell
         environment)``, or ``(context, ToolOutcome)`` when the worker's shell environment is gone.
 
@@ -3622,8 +3604,9 @@ class SandboxToolProvider:
         - ``cwd``: ``bash_exec`` runs in the worker's folder unless the model names one;
         - ``shell_env``: the environment the worker pointed its shell at (``use_env``), looked up
           by name on every call so a rebuilt one is the current build; ``None`` for its own;
-        - ``observation_paths``: the configured mission folders a toolkit tool's ``<mission>_path``
-          arguments take when the model leaves them empty;
+        - ``records``: each ``record`` argument of ``arguments`` (the model's) holding a record
+          without a version, pinned to the version its store holds now (``record_versions``,
+          ``provenance.inputs.record_pins``); a record that cannot be pinned refuses the call;
         - ``defaults``: the defaults the tool's manifest declares for its parameters, passed when
           the model leaves one out, so the call records the value the tool ran with;
         - ``module`` / ``fn``: where a toolkit tool's code is (the registry's manifest entry);
@@ -3665,10 +3648,46 @@ class SandboxToolProvider:
         context.update(module=spec.get("module"), fn=spec.get("fn"))
         if self.cwd is not None:
             context["workdir"] = str(self.cwd)  # the REPL's working folder (relative paths resolve there)
-        paths = {name: path for name, path in _observation_path_args().items() if name in schema_props}
-        if paths:
-            context["observation_paths"] = paths
-        from auto_research.provenance.inputs import declared_defaults
+        from auto_research.provenance.inputs import (
+            RecordPinError,
+            check_arguments,
+            declared_defaults,
+            declared_records,
+            record_pins,
+        )
+
+        if declared_records(spec.get("args_schema")) and check_arguments(
+                kind, arguments or {}, spec.get("args_schema"), runtime=frozenset({"env"})) is None:
+            # Pinned only for a call the validator accepts (a refused one reads no store), within
+            # the bound a read has: a store that does not answer is this call's error.
+            try:
+                pins = await asyncio.wait_for(asyncio.to_thread(
+                    record_pins, arguments or {}, spec.get("args_schema"), self.record_versions),
+                    timeout=_READ_TIMEOUT_S)
+            except RecordPinError as exc:
+                return context, ToolOutcome(text=f"This call was not run: {exc}.", is_error=True)
+            except asyncio.TimeoutError:
+                return context, ToolOutcome(
+                    text=(f"This call was not run: the store did not name the records' current versions "
+                          f"within {_READ_TIMEOUT_S} s; state the store fault in your report, with the "
+                          "records you needed."),
+                    is_error=True)
+            if pins:
+                context["records"] = pins
+            if self.store_records is not None:
+                # A version the model named must exist before the call (coordinator ruling d).
+                try:
+                    problem = await asyncio.wait_for(asyncio.to_thread(
+                        _named_version_problem, self.store_records, arguments or {}, spec.get("args_schema")),
+                        timeout=_READ_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    problem = (f"the store did not confirm the records' versions within {_READ_TIMEOUT_S} s; "
+                               "state the store fault in your report, with the records you needed")
+                except Exception as exc:  # noqa: BLE001 — a store fault is this call's error (§9.3.8)
+                    problem = (f"the store did not confirm the records' versions ({type(exc).__name__}); "
+                               "state the store fault in your report, with the records you needed")
+                if problem is not None:
+                    return context, ToolOutcome(text=f"This call was not run: {problem}.", is_error=True)
 
         defaults = declared_defaults(spec.get("args_schema"))
         if defaults:
@@ -4291,7 +4310,7 @@ class ReadOnlyToolProvider:
         web_source: Any | None = None,
         include_text_search: bool = True,
         include_open_paper: bool = True,
-        include_data_catalog: bool = False,
+        catalog: Mapping[str, Any] | None = None,
         authoring_session: Any | None = None,
         cycle: LeadCycle | None = None,
         report_workspace: ReportWorkspace | None = None,
@@ -4337,9 +4356,10 @@ class ReadOnlyToolProvider:
         # first session. None ⇒ the pre-forms surface (every other role, and the lead's own
         # single-action calls).
         self.cycle = cycle
-        # The analyst lead (not the reviewer) gets the read-only data_catalog tool so it can
-        # check local data availability before deciding to author an acquire tool (§9.10).
-        self.include_data_catalog = include_data_catalog
+        # The analyst lead (not the reviewer) reads the stores' catalogs (``catalog_query``) to see
+        # what data the stores hold before it briefs a tool: store name → its own reader-class login
+        # (``store.keys.Credentials``, step 0b S9). Empty or None ⇒ the tool is not declared.
+        self.catalog = dict(catalog or {})
         # Optional Tavily/web QuerySource — when supplied (analyst lead), exposes a
         # web_search tool so the lead can consult authoritative documentation (mission
         # threads, calibration memos) before triaging a tool request or answering the
@@ -4439,10 +4459,8 @@ class ReadOnlyToolProvider:
         if self.web_source is not None:
             definitions.append(web_search_tool_def())
             definitions.append(web_fetch_tool_def())
-        if self.include_data_catalog:
-            catalog_def = data_catalog_tool_def()  # sourced from research_toolkit.catalog_utils
-            if catalog_def is not None:
-                definitions.append(catalog_def)
+        if self.catalog:
+            definitions.append(catalog_query_tool_def(sorted(self.catalog)))
         if self.authoring_session is not None or self._authoring_declared():
             definitions.append(wait_for_reply_tool_def())
             definitions.append(submit_tool_def())
@@ -4498,10 +4516,10 @@ class ReadOnlyToolProvider:
             return False
         return any(resolved == root or root in resolved.parents for root in self.roots)
 
-    #: What a read-only role reads is evidence it may cite; its harness tools are not.
+    #: What a read-only role reads, receipted as the record of where it looked (never evidence).
     _RECEIPTED: dict[str, str] = {
         "read_file": "result", "list_dir": "result", "text_search": "result",
-        DATA_CATALOG_TOOL: "result", WEB_SEARCH_TOOL: "result", WEB_FETCH_TOOL: "web",
+        CATALOG_QUERY_TOOL: "result", WEB_SEARCH_TOOL: "result", WEB_FETCH_TOOL: "web",
     }
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
@@ -4519,22 +4537,9 @@ class ReadOnlyToolProvider:
             return outcome
         if kind == "web":
             return await _web_receipted(self.receipts, self.receipt_source, arguments, outcome)
-        # A toolkit tool the lead runs in-process is receipted under its registry kind, so it is
-        # evidence like the same tool run in a worker's sandbox (`provenance.store.is_evidence`).
-        producer = _catalog_kind() if name == DATA_CATALOG_TOOL else name
-        root = state = None
-        if name == DATA_CATALOG_TOOL and self.receipts is not None:
-            from auto_research.env import toolkit_root
-
-            root = toolkit_root() if str(toolkit_root()) not in ("", ".") else None
-            # Recorded after the read: the catalog the call read is unchanged by it.
-            state = await asyncio.to_thread(
-                partial(inputs_before, self.receipts, arguments, skip_keys={"obs_db_path"},
-                        observation_paths={"obs_db_path": arguments.get("obs_db_path")})
-            )
-        env = (outcome.call_context or {}).get("env") if name == DATA_CATALOG_TOOL else None
-        return _receipted(self.receipts, self.receipt_source, producer, arguments, outcome, kind=kind,
-                          toolkit_root=root, state=state, env=env)
+        # Every read here, the catalog query included, is receipted under its own harness name: the
+        # record of where the role looked, never evidence (`provenance.store.is_evidence`).
+        return _receipted(self.receipts, self.receipt_source, name, arguments, outcome, kind=kind)
 
     def _commit_receipted(self, session: Any, before: str | None, outcome: ToolOutcome) -> ToolOutcome:
         """A submit that committed becomes a ``commit`` receipt the runtime writes from the session.
@@ -4570,8 +4575,8 @@ class ReadOnlyToolProvider:
         return replace(outcome, text=f"[receipt {minted.handle}] (commit)\n{outcome.text}")
 
     async def _execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
-        if name == DATA_CATALOG_TOOL:
-            return await execute_data_catalog(arguments)
+        if name == CATALOG_QUERY_TOOL and self.catalog:
+            return await execute_catalog_query(self.catalog, arguments)
         if name in (WAIT_FOR_REPLY_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL):
             if self.authoring_session is None:
                 return ToolOutcome(text=self._no_session_text(), is_error=True)

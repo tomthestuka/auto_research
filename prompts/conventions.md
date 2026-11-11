@@ -115,6 +115,35 @@ and formal.
   not already know.
 - Join clauses with a comma, a colon or a new sentence in place of a dash.
 
+## Working with the data store
+
+The team's data, and every product made from it, lives in a data store. The toolkit's
+`README.md` files say what its buckets, kinds and subjects mean.
+
+- Tools are your one way into the store: the analysts' toolkit tools read and write it, and their
+  catalog listings show what it holds. A member without those tools asks the analysts.
+- A store file is named by a **record**, `{"store", "bucket", "key", "version_id"}`. Pass the
+  record a tool or the catalog gave you, copied exactly. A product's record is the record of its
+  `recipe.json`, which names the whole product; any other record names one file.
+- Every read is pinned to one version: a record without its `version_id` is pinned to the version
+  the store holds when the call runs, and your receipt names the version the tool read.
+- A tool writes each product once, under a name built from its recipe (the tool, its algorithm
+  version, its settings and the versions it read). A repeated recipe returns the stored product;
+  other settings make a new product beside the old one.
+- When the store refuses a write, read the refusal, look again at what the store holds, and decide
+  again.
+- When a tool reports that a peer is making the same product, take other work meanwhile and read
+  the catalog again later; once the product is listed, call the tool again and it returns that
+  product.
+- The catalog can name one **current** product for each bucket, kind and subject: the default
+  choice when a task names no particular product. The runtime moves it at the start of a run, to
+  the newest product it has verified. A product you name by record stays exactly the version you
+  cited.
+- A result computed on a flagged product (failed, synthetic, unverified) carries the flag on its
+  receipt.
+- A tool keeps its scratch files in a temporary folder of its own; the store holds the products
+  tools declare.
+
 ## The team channel
 
 - `message` sends a short text to a team member, or to the human when one is attending, and returns

@@ -13,7 +13,6 @@ from auto_research.agents.roles import ModelCallFailed
 from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLike, WorkerLike
 from auto_research.graph.state import ResearchState
 from auto_research.monitor import RunMonitor
-from auto_research.observations import ObservationsConfig, load_observations_config
 from auto_research.provenance import ReceiptStore
 from auto_research.provenance.store import INPUT_SOURCE
 from auto_research.report import publish_report
@@ -73,7 +72,6 @@ def _build_task(
     state: ResearchState,
     *,
     extra_instructions: Sequence[str] = (),
-    obs_config: ObservationsConfig | None = None,
     tool_catalogue: str | None = None,
 ) -> AnalysisTask:
     """Reconstruct the current AnalysisTask from graph state."""
@@ -85,17 +83,6 @@ def _build_task(
     if prior and prior.follow_up:
         label = "Reviewer feedback for revision" if state.get("report") else "Reviewer dispatch"
         instructions_parts.append(f"{label}: {prior.follow_up}")
-    if obs_config and obs_config.missions:
-        obs_lines = ["Local observation databases (check these before querying remote archives):"]
-        for mission, cfg in obs_config.missions.items():
-            obs_lines.append(f"  {mission}: {cfg.obs_db_path}")
-        instructions_parts.append("\n".join(obs_lines))
-    elif obs_config is not None:
-        # An empty root (H2): the analysts learn where data will go and how it gets there.
-        instructions_parts.append(
-            f"Local observation database: {obs_config.obs_db_root}, which holds no mission yet. "
-            "acquire creates a mission's folder, with its catalog, on its first observation."
-        )
     if tool_catalogue:
         instructions_parts.append(f"Available sandbox tools:\n{tool_catalogue}")
     instructions_parts.extend(extra_instructions)
@@ -149,11 +136,6 @@ def build_graph(
     consensus_strategy = consensus or DebateToConverge(
         max_rounds=max_iterations, monitor=monitor, registry=_registry
     )
-    try:
-        _obs_config: ObservationsConfig | None = load_observations_config()
-    except Exception:
-        _obs_config = None
-
     _run_id = run_id or uuid.uuid4().hex
     _report_formats: list[str] = report_formats if report_formats is not None else ["jsonl", "tex"]
 
@@ -294,7 +276,6 @@ def build_graph(
     async def analysis_node(state: ResearchState) -> dict[str, Any]:
         task = _build_task(
             state,
-            obs_config=_obs_config,
             tool_catalogue=_registry.tool_catalogue(),
         )
         await _record(

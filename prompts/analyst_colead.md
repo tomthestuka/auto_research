@@ -69,7 +69,7 @@ Responsibilities: apply that bar to the code and the tests that verify it.
   that alone is no reason to reject. Invariants are auditable even when the answer is
   brand-new ("load order can't matter", "a checksum must match", "recovered ≈ injected within
   tolerance") — confirm the tests pin the behavior with real tolerances on the real (or
-  marked-synthetic) input.
+  synthetic, seeded) input.
 
 Below that bar — a tool you would trust, whose tests could nonetheless be stricter — **approve.**
 Stricter-than-necessary is not a defect.
@@ -77,17 +77,20 @@ Stricter-than-necessary is not a defect.
 **Where the tool writes — three kinds, each with its own path.** Check the diff against them; the
 CI pipeline has checked the mechanics, you judge the class:
 - a **science artifact** (an output that depends on a `parameter`-kind argument, or on a setting
-  outside the mission team's defaults: a band, a grid, a model, a selection) is written under an
-  `output` argument and returned under `products` or `figures`;
-- an **obs-db item** (generic data: raw archive data, the mission team's standard reductions made
-  with its recommended settings only) is
-  written into the observation database and recorded through `obsdb_catalog`; an in-place header
-  keyword on a file the catalog already records is part of that;
+  outside the standard settings the data's providers recommend: a band, a grid, a model, a
+  selection) is written under an `output` argument and returned under `products` or `figures`;
+- a **store product** (generic data: data as its source publishes it, the standard reductions its
+  providers define, made with their recommended settings only) is stored in the data store through
+  the toolkit's store helper, by the tool whose manifest declares the store under `writes` and
+  names its `algorithm_version`; the tool returns its record;
 - **scratch** (parameter files, caches, temporary files) is the program's own.
 
-A tool that writes a science artifact into the observation database, or records one in its
-catalog, puts a run's choice into data every later analysis reads: reject it, and name the output
-argument it belongs under.
+The data store's catalog makes a verified product the default every later analysis reads. A tool
+that stores a science artifact as a store product puts a run's choice into that default: reject
+it, and name the output argument it belongs under. The function a manifest entry names is the one
+that stores; the library code it calls writes local files only, and calls no other manifest tool.
+When a change alters what a writing tool stores, its `algorithm_version` changes with it, so the
+new products sit beside the old ones.
 
 **Reproducibility — for a science tool.** A *science tool* computes or derives a measurement
 whose result should reproduce within tolerance (a fitted parameter, a measured rate, a derived
@@ -102,9 +105,10 @@ or toothless reproducibility test on a science tool is a reject.
 pipeline's mechanical one. Reject any tool code (`lib/`, `skills/`) that invents, mocks, or stands in for real measurements; any
 placeholder/marketing language ("representative", "synthetic", "illustrative", "mock",
 "placeholder", "for now", "in operational mode this would…"); or any output that could be
-silently built on a failed/fake upstream step. Synthetic validation data is legitimate only as a
-marked synthetic ObsID (`synth<YYMMDD>-<hex>`) the tests build in their fixture obs-db and record
-through `obsdb_catalog.neutral`, with no data-generating code in the tool (`lib/`, `skills/`).
+silently built on a failed/fake upstream step. Synthetic validation data is legitimate only in the
+tests, with no data-generating code in the tool (`lib/`, `skills/`): a store tool's tests seed it
+as a synthetic product through the CI pipeline's seed channel, which flags every result computed
+on it synthetic, and another tool's tests write it under `tmp_path`.
 Scrutinize the pipeline's recorded `findings` (e.g. numeric-literal arrays) and decide whether each
 is benign or fabrication.
 

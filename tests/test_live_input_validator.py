@@ -2,9 +2,11 @@
 
     pytest tests/test_live_input_validator.py --live -s
 
-* ``test_every_configured_vendor_accepts_the_kind_schemas`` — each configured worker and lead member is sent
+* ``test_every_configured_vendor_accepts_the_kind_schemas`` — each configured worker member is sent
   the real toolkit's tool definitions, as the registry rewrites them (``provider_schema``: data and
-  parameter arguments untyped, ``kind``/``default`` removed), and must answer without a refusal.
+  parameter arguments untyped, record arguments as the store's record shape, ``kind``/``default``
+  removed), and each lead member its own tool set as ``readonly_tools_for`` builds it, which carries
+  ``catalog_query`` (the lead reads the store's catalog, step 0b); each must answer without a refusal.
 * ``test_a_worker_passes_data_by_reference_and_types_a_parameter_with_its_reason`` — a worker,
   wired by ``graph.runtime.attach_worker_runtime`` over a throwaway toolkit with declared kinds,
   makes bins and fits a limit at a confidence level of its choosing, and files its report. The
@@ -31,10 +33,11 @@ pytestmark = pytest.mark.live
 load_dotenv()
 
 LOG = Path(__file__).resolve().parents[1] / "logs" / "dev" / "input-validator"
-#: The roles a toolkit's tool definitions reach: the workers (every tool) and the lead (data_catalog).
-#: (Gemini, seated only in the reviewer and librarian groups, refuses `load_data`'s `epoch` object
-#: with `additionalProperties`, which predates argument kinds: Google is not an active seat, §13.)
-ROLES = ("analyst_lead", "analyst_worker")
+#: The roles a toolkit's tool definitions reach: the workers (every tool). The lead reads the store's
+#: catalog through `catalog_query` instead (step 0b). (Gemini, seated only in the reviewer and
+#: librarian groups, refuses `load_data`'s `epoch` object with `additionalProperties`, which predates
+#: argument kinds: Google is not an active seat, §13.)
+ROLES = ("analyst_worker",)
 
 
 def _record(cell: str, payload: dict) -> Path:
@@ -46,7 +49,10 @@ def _record(cell: str, payload: dict) -> Path:
 
 
 def test_every_configured_vendor_accepts_the_kind_schemas():
+    from auto_research.agents.react import CATALOG_QUERY_TOOL
     from auto_research.env import toolkit_root
+    from auto_research.graph.runtime import readonly_tools_for
+    from auto_research.store.config import DEFAULT_STORE
     from auto_research.models import ModelMessage
     from auto_research.models.registry import resolve
     from auto_research.sandbox.registry import ToolkitRegistry
@@ -58,24 +64,32 @@ def test_every_configured_vendor_accepts_the_kind_schemas():
     for role in ROLES:
         for handle in resolve(role).handles:
             seen.setdefault((handle.config.provider, handle.config.model), handle)
+    # The lead's tool set as production builds it (`readonly_tools_for`), over the default store's
+    # catalog: the login is read only when a query runs, and these probes run none.
+    lead = {(h.config.provider, h.config.model): h for h in resolve("analyst_lead").handles}
+    catalog = readonly_tools_for("analyst_lead", roots=[toolkit_root()],
+                                 catalog={DEFAULT_STORE: None}).tool_definitions()
+    assert CATALOG_QUERY_TOOL in {d["name"] for d in catalog}, "the lead was given no catalog_query"
     results: dict[str, str] = {}
 
-    async def probe(key, handle):
+    async def probe(key, handle, tools):
         try:
             response = await handle.call(
                 [ModelMessage(role="system", content="You are testing tool definitions."),
                  ModelMessage(role="user", content="Reply with the single word OK. Call no tool.")],
                 tools=tools, tool_choice="auto",
             )
-            results[f"{key[0]}:{key[1]}"] = "ok: " + str(getattr(response, "content", "") or "")[:40]
+            results[":".join(key)] = "ok: " + str(getattr(response, "content", "") or "")[:40]
         except Exception as exc:  # noqa: BLE001 — the refusal is the finding
-            results[f"{key[0]}:{key[1]}"] = f"REFUSED {type(exc).__name__}: {exc}"[:400]
+            results[":".join(key)] = f"REFUSED {type(exc).__name__}: {exc}"[:400]
 
     async def main():
-        await asyncio.gather(*(probe(k, h) for k, h in seen.items()))
+        await asyncio.gather(*(probe(("worker",) + k, h, tools) for k, h in seen.items()),
+                             *(probe(("lead",) + k, h, catalog) for k, h in lead.items()))
 
     asyncio.run(main())
-    _record("vendor_schemas", {"tools": [t["name"] for t in tools], "results": results})
+    _record("vendor_schemas", {"tools": [t["name"] for t in tools], "lead_tools": [t["name"] for t in catalog],
+                               "results": results})
     refused = {k: v for k, v in results.items() if v.startswith("REFUSED")}
     assert not refused, refused
 

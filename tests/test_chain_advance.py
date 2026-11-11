@@ -213,7 +213,7 @@ def _cycle(tmp_path, monkeypatch, script, verdicts, submit_cap=None, broken_disc
         setup(lead, model)
     worker = AnalystReport(summary="w0", tool_request=AnalystToolRequest(
         science_context="c", expected_behavior="b", proposed_tool_name="t",
-        validation_data=[{"mission": "IXPE", "obsid": "01002901"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
     ))
     try:
         outcome = asyncio.run(lead.run_cycle(

@@ -20,7 +20,6 @@ from auto_research.setup import (
     init_toolkit_git,
     package_specs,
     render_analyst_env,
-    render_observations,
     render_orchestration,
     render_repl_init,
     scaffold_toolkit_package,
@@ -31,19 +30,18 @@ from auto_research.setup import (
 def test_derive_fs_allow_from_paths():
     vals = {
         "toolkit_root": "/x/research_toolkit",
-        "obs_db_root": "/x/obs",
         "analyze_env": "/x/envs/analyze",
         "runtime_dir": "/x/ar_runtime",
     }
     got = derive_fs_allow(vals)
-    assert got == ["/x/research_toolkit", "/x/obs", "/x/envs/analyze", "/x/ar_runtime", "/tmp"]
+    assert got == ["/x/research_toolkit", "/x/envs/analyze", "/x/ar_runtime", "/tmp"]
 
 
 def test_derive_fs_allow_skips_placeholders_and_dedups_and_adds_extra():
-    vals = {"toolkit_root": "/path/to/research_toolkit", "obs_db_root": "/x/obs", "runtime_dir": "/x/obs"}
-    got = derive_fs_allow(vals, extra_paths=["/opt/heasoft", "/x/obs"])
-    # placeholder toolkit_root dropped; /x/obs deduped; extra path included; /tmp appended
-    assert got == ["/x/obs", "/opt/heasoft", "/tmp"]
+    vals = {"toolkit_root": "/path/to/research_toolkit", "analyze_env": "/x/rt", "runtime_dir": "/x/rt"}
+    got = derive_fs_allow(vals, extra_paths=["/opt/heasoft", "/x/rt"])
+    # placeholder toolkit_root dropped; /x/rt deduped; extra path included; /tmp appended
+    assert got == ["/x/rt", "/opt/heasoft", "/tmp"]
     assert not any("research_toolkit" in p for p in got)
 
 
@@ -69,13 +67,6 @@ def test_render_orchestration_substitutes_and_preserves_comments():
     assert "  - /real/tk\n  - /real/rt\n  - /tmp\n" in out  # fs_allow block regenerated
     assert "research_toolkit" not in out  # old fs_allow item gone
     assert "report_formats: [tex]" in out  # trailing content after the block preserved
-
-
-def test_render_observations_substitutes_root():
-    template = "# header\nobs_db_root: /path/to/obs_db_root\n"
-    out = render_observations(template, "/real/obs")
-    assert "obs_db_root: /real/obs" in out
-    assert "# header" in out
 
 
 def test_render_analyst_env_boot_commands():
@@ -135,7 +126,7 @@ def test_answers_preset_and_default_and_missing():
     assert a.path("runtime_dir", "?", "/default") == "/preset"  # preset wins
     assert a.path("papers_dir", "?", "/default") == "/default"  # falls back to default
     with pytest.raises(SetupError, match="missing answer"):
-        a.path("obs_db_root", "?")  # no preset, no default, non-interactive → fail loud
+        a.path("toolkit_root", "?")  # no preset, no default, non-interactive → fail loud
 
 
 def test_scaffold_toolkit_package_mirrors_layout_and_imports(tmp_path):

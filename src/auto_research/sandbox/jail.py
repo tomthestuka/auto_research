@@ -392,7 +392,12 @@ def write_launcher(path: Path, target: str, policy: JailPolicy) -> Path:
 
     # Every other field carried over, the mask included (a field added later is never dropped).
     policy = replace(policy, ro=(*policy.ro, target_dir) if target_dir not in policy.ro else policy.ro)
-    command = [*jail_argv(policy), "--", resolved_target]
+    # No store admin secret enters the jail, whatever environment the SDK spawns the launcher with
+    # (the Claude SDK's version check passes this process's whole environment).
+    from auto_research.store.config import admin_env_names
+
+    unset = [part for name in sorted(admin_env_names()) for part in ("--unsetenv", name)]
+    command = [*jail_argv(policy), *unset, "--", resolved_target]
     body = "#!/bin/sh\nexec " + " ".join(_quote(part) for part in command)
     # Not through a symlink: the launcher's folder can be writable to the author it launches, which
     # could plant one there and have this write (and chmod 755) land on a host file of its choice.

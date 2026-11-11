@@ -66,7 +66,6 @@ gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run
 # Governance basenames (CLAUDE.md/DOCS.md/AGENTS.md) are denied even inside an allowed root.
 agent_fs_allow:
   - /data/fzhou/research_toolkit          # the toolkit root (coder's worktree)
-  - /xray02/fzhou_obsdb                  # obs_db_root (observations.yaml)
   - /data/fzhou/XSPEC/relxill             # relxill local models (envs/xspec/boot.py lmod)
   - /grad/fzhou/.conda/envs/astropy       # human_envs.astropy (the analysis env's base)
   - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS
@@ -89,6 +88,20 @@ agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-on
 test_data:                    # data sets the toolkit's data("<name>") tests read; bound read-only into the gate's test run only
   cygx1_ixpe: /data/fzhou/XSPEC/Cyg_X-1/IXPE
   cygx1_nustar: /data/fzhou/XSPEC/Cyg_X-1/NuSTAR
+
+# ── Data stores (step 0b): objects over S3 + a Postgres catalog; config/DOCS.md `stores` ──
+stores:
+  - name: db                               # the store's name (receipts and unit definitions name it); `db` is the default
+    kind: local                            # the runtime starts versitygw (+ its IAM) and Postgres
+    root: /xray02/fzhou_db                 # the objects folder served as S3 (renamed from fzhou_obsdb at migration, S11)
+    state_dir: /xray02/fzhou_db.d          # postgres/, versions/, iam/, logs/ (user xattrs: /xray02 takes them)
+    socket_dir: /scratch/fzhou_db.run      # local disk, outside every jail mount, never aged out like /tmp
+    ports: {s3: 18070, iam: 18076, catalog: 18432}   # 127.0.0.1 ports: S3 gateway, IAM API, Postgres
+    buckets: [ixpe, nicer, nustar]         # opaque names the toolkit chooses (its README says what each holds)
+    synthetic_buckets: []                  # buckets (listed above too) holding synthetic data: a result that read an object there is marked synthetic
+    catalog: {database: db, admin_user: ar_admin}
+    roles: {producer: [analyst_worker_*]}   # unit name patterns holding the producer role (writes); every other unit reads, the lead included (until unit definitions name it, Phase 3 step 3)
+    admin_env: {s3_access_key: AR_DB_S3_KEY_ID, s3_secret_key: AR_DB_S3_KEY_SECRET, catalog_password: AR_DB_S3_CATALOG_SECRET}  # .env variable NAMES
 
 # ── Tool discovery ──
 disabled_tools: []   # tool names to hide from the catalogue regardless of what the toolkit exposes

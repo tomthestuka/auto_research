@@ -45,7 +45,7 @@ def _spec():
         proposed_tool_name="fit_retbb_hss",
         target_domain="xspec_utils",
         disposition="extend_existing",
-        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
     )
 
 
@@ -155,6 +155,8 @@ def test_structure_context_states_absolute_cwd_and_paths(tmp_path):
     for line in ctx.splitlines():
         if line.endswith(".py") and "/" in line and not line.startswith("#"):
             assert line.startswith(str(tmp_path)), line
+    # Step 0b: a tool names records, never a store's location, so the seed lists no store folder.
+    assert "observation" not in ctx.lower()
 
 
 def test_the_coder_seed_names_the_data_sets_the_ci_pipeline_provides(tmp_path, monkeypatch):

@@ -37,7 +37,7 @@ the cost record too (``cost.call`` events + an accumulated total on every line) 
 :func:`test_b_run_evidence`, which can be re-run against a finished run without spending anything.
 
 **Preconditions** (all fail loudly here rather than halfway through a paid run): a clean toolkit
-branch, a drift-free data catalog, and ``human_channel='telegram'`` reachable.
+branch, a ready data store, and ``human_channel='telegram'`` reachable.
 """
 
 from __future__ import annotations
@@ -177,7 +177,7 @@ def _kill_backend_tree(run_directory: Path) -> int:
 
     The group, not the pid: sandbox REPL subprocesses share the backend's process group (they are
     spawned without ``start_new_session``), so killing the pid alone orphans live XSPEC children
-    that keep writing into the obs-db (§12, the interim hard-kill contract). This deliberately
+    that keep writing into the run's folders (§12, the interim hard-kill contract). This deliberately
     skips the in-process ``finally``, which is the point — it is what leaves the `ai` branch dirty
     for B3 to heal.
     """
@@ -214,15 +214,21 @@ def _toolkit_dirty() -> bool:
 def test_b_run_preconditions() -> None:
     """Every no-LLM precondition, before a paid run starts.
 
-    `run_preflight` already covers the checklist (clean toolkit branch, catalog health, channel
-    ping, checkpointer); running it here surfaces a blocker in seconds instead of after the
-    launch has begun spending.
+    `run_preflight` already covers the checklist (clean toolkit branch, the stores, channel ping,
+    checkpointer); running it here, after the run's store launch step as `run_research` takes it
+    (`tests/live_store.run_stores`: the real store, made by migration item S11), surfaces a blocker
+    in seconds instead of after the launch has begun spending.
     """
     import asyncio
 
     from auto_research.preflight import run_preflight
+    from tests.live_store import run_stores
 
-    asyncio.run(run_preflight())
+    async def check() -> None:
+        async with run_stores(f"{RUN_ID}-preconditions", None):
+            await run_preflight()
+
+    asyncio.run(check())
     assert not _toolkit_dirty(), (
         "toolkit tree is dirty before launch — commit or clean it, otherwise B3 cannot "
         "distinguish the dirt this test creates from pre-existing edits"
@@ -257,6 +263,10 @@ def test_b_run_drills() -> None:
             "AUTO_RESEARCH_B_RUN_OVERWRITE=1 to replace it, or set AUTO_RESEARCH_B_RUN_ID to a "
             "fresh id. (test_b_run_evidence works against the existing one as-is.)"
         )
+
+    from tests.live_store import require_store
+
+    require_store()  # a store that is not ready skips the drills with its own refusal
 
     async def launch(**kwargs):
         from auto_research.graph.detached import run_research_nohup
@@ -329,6 +339,9 @@ def test_b_run_midauthoring_kill_heals() -> None:
         "nothing about the heal"
     )
 
+    from tests.live_store import require_store
+
+    require_store()  # a store that is not ready skips the heal leg with its own refusal
     before = len(_events(jsonl))
     asyncio.run(run_research_nohup(
         request, chatter=7, human_channel="telegram", run_id=RUN_ID, resume=True

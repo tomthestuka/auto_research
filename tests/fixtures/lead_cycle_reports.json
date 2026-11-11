@@ -1,5 +1,5 @@
 {
-  "provenance": "verbatim from monitor.jsonl (analyst.worker.initial_report)",
+  "provenance": "verbatim from monitor.jsonl (analyst.worker.initial_report); tool_request.validation_data rewritten 2026-11-11 (step 0b) from the retired {mission, obsid} form to store records with stand-in key and version (the only cell reading it stubs the coding session, so no record reaches a store); every other field is verbatim, kept as a recorded artifact (main's ruling 2026-11-11): its prose predates the 2026-11-03 citation form, so its numbers stand uncited, as the run recorded them",
   "reports": [
     {
       "actor": "worker-1",
@@ -31,14 +31,16 @@
           "science_context": "Reproducing Krawczynski et al. (2022) Table S1/S2 requires (a) per-detector (DU1/DU2/DU3 separately, not merged) 2-8 keV background-subtracted PCUBE polarization cubes to compare against the paper's per-DU Q/I,U/I,PD,PA,significance columns, and (b) a native multi-ObsID PCUBE combination (passing all 6 May+June source event files to one xpbin call and all 6 background event files to a second, then one native background subtraction) to get a genuine Combined PD/PA without hand-summing Stokes parameters, which the task explicitly forbids. Neither is available: ixpe_pcube_timeseg always merges exactly the 3 DUs of exactly one ObsID.",
           "validation_data": [
             {
-              "mission": "ixpe",
-              "obsid": "01002901",
-              "synthetic": false
+              "store": "db",
+              "bucket": "ixpe",
+              "key": "raw/01002901/stand-in/recipe.json",
+              "version_id": "stand-in"
             },
             {
-              "mission": "ixpe",
-              "obsid": "01250101",
-              "synthetic": false
+              "store": "db",
+              "bucket": "ixpe",
+              "key": "raw/01250101/stand-in/recipe.json",
+              "version_id": "stand-in"
             }
           ]
         },
@@ -67,14 +69,16 @@
           "science_context": "Complete an independent standard IXPE polarimetry reproduction for Cyg X-1 from existing local Level-2 events. The required measurements are native-background-subtracted PCUBE results for individual DUs, individual observations, and the all-six-event May+June combination; four and eleven energy bins with weighted PD(E)/PA(E) fits; and a source/background Stokes-I/Q/U XSPEC fit with correct BACKSCAL values. The existing `ixpe_pcube_timeseg` is intentionally single-ObsID/single-bin/time-resolved and cannot provide these products; the exposed XSPEC tools do not provide the requested generic model or Q/U spectrum production.",
           "validation_data": [
             {
-              "mission": "ixpe",
-              "obsid": "01002901",
-              "synthetic": false
+              "store": "db",
+              "bucket": "ixpe",
+              "key": "raw/01002901/stand-in/recipe.json",
+              "version_id": "stand-in"
             },
             {
-              "mission": "ixpe",
-              "obsid": "01250101",
-              "synthetic": false
+              "store": "db",
+              "bucket": "ixpe",
+              "key": "raw/01250101/stand-in/recipe.json",
+              "version_id": "stand-in"
             }
           ]
         },

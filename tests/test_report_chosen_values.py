@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-import auto_research.agents.react as react
 from auto_research.agents.react import SandboxToolProvider
 from auto_research.agents.roles import AnalystWorkerAgent
 from auto_research.models import ModelResponse, ToolCall
@@ -58,7 +57,6 @@ def run(tmp_path, monkeypatch):
     from auto_research.sandbox import fs_guard
 
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
-    monkeypatch.setattr(react, "_observation_path_args", lambda: {})
     def tool(module, fn, args):
         if "d" not in args:  # make: writes into its own folder and declares the file
             made = Path(args["o"]) / "spec.pha"

@@ -69,7 +69,7 @@ ANALYST_BLOCKS: tuple[Block, ...] = (
     Block("tool_request", "tool_request", "keyvalue",
           "only for a capability the toolkit lacks or a tool that misbehaves: 'key: value' lines "
           "(request_kind, proposed_tool_name, science_context, expected_behavior, observed_issue, "
-          "notes) and one 'validation_data: MISSION OBSID' line per dataset"),
+          "notes) and one 'validation_data: STORE | BUCKET | KEY | VERSION_ID' line per record"),
 )
 
 REVIEWER_BLOCKS: tuple[Block, ...] = (
@@ -110,8 +110,8 @@ TOOLSPEC_BLOCKS: tuple[Block, ...] = (
           "the brief itself: signature, inputs, outputs and the procedure, at algorithm level"),
     Block("observed_issue", "observed_issue", "text", "for fix_existing: the symptom observed"),
     Block("validation_data", "validation_data", "datasets",
-          "one '- MISSION | OBSID' line per input the checks run on; add ' | synthetic' for a marked "
-          "synth<YYMMDD>-<hex> ObsID the coder's tests build in their fixture obs-db"),
+          "one '- STORE | BUCKET | KEY | VERSION_ID' line per record the checks run on, as the catalog "
+          "query lists it"),
     Block("proposed_checks", "proposed_checks", "checks",
           "one '- kind: description' item per must-have test; an indented 'tolerance: x' line when one applies"),
     Block("replication_tolerance", "replication_tolerance", "value", "a number, when a numeric tolerance applies"),
@@ -126,6 +126,30 @@ _HEADER_LIKE = re.compile(r"^#\s+[A-Za-z_][A-Za-z0-9_ ]*$")
 _HEADER_WORD = re.compile(r"^#(?!#)\s*([A-Za-z_]+)")
 _FIGURE_LINE = re.compile(r"^\[?\s*([A-Za-z0-9_.\-]+)\s*:\s*(\d+)\s*\]?$")
 _CONTEXT = 3
+#: A record's line form (``ValidationDataset``): '|' separates the parts, so a key holding spaces
+#: stays whole.
+_RECORD_FIELDS = ("store", "bucket", "key", "version_id")
+_RECORD_FORM = " | ".join(f.upper() for f in _RECORD_FIELDS)
+
+
+def _record_line(entry: Mapping[str, Any]) -> str:
+    return " | ".join(str(entry.get(f, "")) for f in _RECORD_FIELDS)
+
+
+def _record_parts(text: str) -> dict[str, str] | None:
+    """One record from its line form, or None when a part is empty or missing. Store, bucket and
+    version id hold no '|', so the key is everything between the second and the last separator
+    (a key may hold '|' and spaces); only the one space of padding beside each separator is
+    removed from it."""
+    parts = text.split("|")
+    if len(parts) < len(_RECORD_FIELDS):
+        return None
+    key = "|".join(parts[2:-1])
+    key = key[1:] if key.startswith(" ") else key
+    key = key[:-1] if key.endswith(" ") else key
+    record = {"store": parts[0].strip(), "bucket": parts[1].strip(), "key": key,
+              "version_id": parts[-1].strip()}
+    return record if all(record.values()) else None
 
 
 def blocks_for(fields: Sequence[str], master: Sequence[Block], *, always: Sequence[str] = ()) -> tuple[Block, ...]:
@@ -169,17 +193,10 @@ def _block_body(block: Block, value: Any) -> list[str]:
                 out.append(f"{key}: {lines[0]}")
                 out.extend(("  " + line) if line.strip() else "" for line in lines[1:])
         for entry in value.get("validation_data") or []:
-            out.append(
-                f"validation_data: {entry.get('mission', '')} {entry.get('obsid', '')}"
-                + (" synthetic" if entry.get("synthetic") else "")
-            )
+            out.append(f"validation_data: {_record_line(entry)}")
         return out
     if kind == "datasets":
-        return [
-            f"- {entry.get('mission', '')} | {entry.get('obsid', '')}"
-            + (" | synthetic" if entry.get("synthetic") else "")
-            for entry in value
-        ]
+        return [f"- {_record_line(entry)}" for entry in value]
     if kind == "checks":
         out = []
         for check in value:
@@ -319,12 +336,11 @@ def _parse_block(block: Block, lines: list[str], problems: list[str]) -> tuple[b
                 problems.append(f"# {name}: {stripped[:60]!r} is not a 'key: value' line.")
                 continue
             if head == "validation_data":
-                parts = rest.split()
-                if len(parts) < 2:
-                    problems.append(f"# {name}: validation_data takes 'MISSION OBSID'; it reads {rest.strip()!r}.")
+                record = _record_parts(rest)
+                if record is None:
+                    problems.append(f"# {name}: validation_data takes '{_RECORD_FORM}'; it reads {rest.strip()!r}.")
                 else:
-                    datasets.append({"mission": parts[0], "obsid": parts[1],
-                                     "synthetic": "synthetic" in (p.lower() for p in parts[2:])})
+                    datasets.append(record)
                 key = None
             elif head in _TOOL_REQUEST_KEYS:
                 request[head] = rest.strip()
@@ -343,14 +359,11 @@ def _parse_block(block: Block, lines: list[str], problems: list[str]) -> tuple[b
         datasets: list[dict] = []
         for item in _items(lines, name, problems):
             text = _joined(item)
-            # '|' separates the parts, so a mission named with spaces ('Cyg X-1') is kept whole;
-            # a line without one is read word by word.
-            parts = [p.strip() for p in text.split("|")] if "|" in text else text.split()
-            if len(parts) < 2 or not parts[0] or not parts[1]:
-                problems.append(f"# {name}: each line is '- MISSION | OBSID'; one reads {text[:60]!r}.")
+            record = _record_parts(text)
+            if record is None:
+                problems.append(f"# {name}: each line is '- {_RECORD_FORM}'; one reads {text[:60]!r}.")
                 continue
-            datasets.append({"mission": parts[0], "obsid": parts[1],
-                             "synthetic": "synthetic" in (p.lower() for p in parts[2:])})
+            datasets.append(record)
         return True, datasets
     if kind == "checks":
         checks: list[dict] = []

@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-import auto_research.agents.react as react
 from auto_research.agents.react import SandboxToolProvider
 from auto_research.agents.roles import AnalystWorkerAgent
 from auto_research.models import ModelResponse, ToolCall
@@ -29,8 +28,6 @@ def _pinned(monkeypatch, tmp_path):
     from auto_research.sandbox import fs_guard
 
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
-    monkeypatch.setattr(react, "_observation_path_args",
-                        lambda: {"ixpe_path": "/obs/IXPE", "nicer_path": "/obs/NICER"})
 
 
 class _ScriptedModel:
@@ -47,7 +44,9 @@ class _ScriptedModel:
 
 SCHEMA = {"properties": {"obsid": {"kind": "setting"}, "ixpe_path": {"kind": "path"},
                         "save_path": {"kind": "path"}, "out_path": {"kind": "path"},
-                        "note": {"kind": "setting"}}}
+                        "note": {"kind": "setting"}, "events": {"kind": "record"}}}
+#: The store's current versions, as the store seam would name them (``provenance.inputs.CurrentVersion``).
+CURRENT = {("db", "ixpe", "01002901/evt2.fits"): "v7"}
 
 
 def _run(tmp_path, calls, sandbox=None, known=(TOOL, BASH), action="analyze", store=None, schema=SCHEMA):
@@ -56,7 +55,8 @@ def _run(tmp_path, calls, sandbox=None, known=(TOOL, BASH), action="analyze", st
     sandbox = sandbox or _FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "PD=3.4", "stderr": ""})
     registry = _FakeRegistry(known=set(known), mcp={BASH}, schema=schema)
     tools = SandboxToolProvider(registry, sandbox, cwd=tmp_path / "w0", receipts=store,
-                                receipt_source="analyst_worker_0")
+                                receipt_source="analyst_worker_0",
+                                record_versions=lambda store, bucket, key: CURRENT[(store, bucket, key)])
     worker = AnalystWorkerAgent(model=_ScriptedModel(calls), prompt="p",
                                 monitor=RunMonitor(chatter=10, jsonl_path=ledger))
     worker.agent_key = "analyst_worker_0"
@@ -70,12 +70,13 @@ def test_every_call_rebuilds_from_the_ledger_to_its_receipt_and_to_what_the_tool
         ToolCall(id="c2", name=TOOL, arguments={"obsid": "01002901"}),  # unnamed figure: stamped
         ToolCall(id="c3", name=TOOL, arguments={"obsid": "01002901", "save_path": "/tmp/q.png", "note": LONG}),
         ToolCall(id="c4", name=TOOL, arguments={"obsid": "02001", "ixpe_path": "/mine", "env": "ar-x"}),
-        ToolCall(id="c5", name=BASH, arguments={"command": "echo hi", "shell_env": "planted"}),
+        ToolCall(id="c5", name=TOOL, arguments={"events": {"store": "db", "bucket": "ixpe", "key": "01002901/evt2.fits"}}),
+        ToolCall(id="c6", name=BASH, arguments={"command": "echo hi", "shell_env": "planted"}),
     ]
     store, ledger, sandbox = _run(tmp_path, calls)
 
     rebuilt = ledger_calls(ledger)
-    assert [c.tool_call_id for c in rebuilt] == ["c1", "c2", "c3", "c4", "c5"]
+    assert [c.tool_call_id for c in rebuilt] == ["c1", "c2", "c3", "c4", "c5", "c6"]
     # What the tool process actually received, call by call, is what the ledger rebuilds.
     received = [args for _, _, args in sandbox.tool_calls] + [args for _, args in sandbox.mcp_calls]
     assert [c.sent_args for c in rebuilt] == received
@@ -84,15 +85,19 @@ def test_every_call_rebuilds_from_the_ledger_to_its_receipt_and_to_what_the_tool
     own = [tmp_path / "w0" / "products" / "fn" / c.call_id for c in rebuilt]
     assert rebuilt[0].ran_args["save_path"] == str(own[0] / "q.png")
     assert rebuilt[2].ran_args["save_path"] == str(own[2] / "q.png") != rebuilt[0].ran_args["save_path"]
-    assert rebuilt[0].ran_args["ixpe_path"] == "/obs/IXPE"
+    assert "ixpe_path" not in rebuilt[0].ran_args  # the runtime fills no store location (step 0b)
     assert rebuilt[1].ran_args["save_path"] == str(own[1] / "fn.png")
     assert rebuilt[3].ran_args["ixpe_path"] == "/mine"
-    assert "shell_env" not in rebuilt[4].ran_args and rebuilt[4].ran_args["cwd"] == str(tmp_path / "w0")
+    assert "shell_env" not in rebuilt[5].ran_args and rebuilt[5].ran_args["cwd"] == str(tmp_path / "w0")
+    # A record the model named without its version ran pinned to the store's current one, and the
+    # ledger rebuilds the pin: the call's arguments name the version it read.
+    assert rebuilt[4].ran_args["events"] == rebuilt[4].sent_args["events"] == \
+        {"store": "db", "bucket": "ixpe", "key": "01002901/evt2.fits", "version_id": "v7"}
 
     # Every receipt finds its call; identical calls pair in order.
     results = store.receipts(source="analyst_worker_0", kind="result")
     matched = calls_by_receipt(rebuilt, store.receipts())
-    assert [matched[r.handle].tool_call_id for r in results] == ["c1", "c2", "c3", "c4", "c5"]
+    assert [matched[r.handle].tool_call_id for r in results] == ["c1", "c2", "c3", "c4", "c5", "c6"]
     assert all(matched[r.handle].args_sha256 == r.args_sha256 for r in results)
 
 

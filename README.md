@@ -11,7 +11,9 @@ authors the tool itself — through a deterministic gate run as the toolkit's CI
 required jobs, each reported pass, fail or skip with its reason: change scope, environment
 definitions, a no-fabrication scan, structure, the minting checks that keep every result citable,
 the tool's own tests run twice, and the toolkit's earlier fast tests; a test of the `data` class
-runs on a data set the host names, and one the gate skips fails the change)
+runs on a data set the host names, and one the gate skips fails the change; a toolkit with store
+tools gets a fresh throwaway store in each test run, and what a new tool writes there must be
+create-only, carry the store helper's metadata and end with its `recipe.json`)
 plus a provider-decorrelated code review, landing
 one atomic commit per tool on a working branch. The design goal is **verifiability, not
 trust**: every authored tool ships a human-runnable interface and tests a human can
@@ -24,7 +26,9 @@ truth for how this project is built — current status, the phase spec, and the 
 order live there, not here. **Phase 3 (active):** generalizing the agent unit inside this
 repository (per-unit toolkit and sandbox, subagent grants). Its first step (done 2026-11-10)
 decoupled the orchestration from `research_toolkit`: every coupling is removed or written into one
-toolkit contract, so any toolkit that meets it pairs with the orchestration; next is the data store. Its software-environment stream is
+toolkit contract, so any toolkit that meets it pairs with the orchestration. Its second, the data store (S3 bytes plus a
+Postgres catalog, reached only through toolkit tools), is built; the migration of the live store and its live cells
+remain. Its software-environment stream is
 built and live-verified: the coding pipeline defines and builds environments, and each toolkit call
 runs in its package's own. The Phase 2 spec is archived in `CLAUDE_p2.md`.
 
@@ -48,13 +52,13 @@ the `auto_research` orchestration env from `environment.yml`, then runs the inte
 stage (`python -m auto_research.setup`). That stage walks you, page by page, through: **conda**,
 the **analysis env** (from `environment-analyst.yml`), your **domain dependencies** (init
 scripts / env vars / conda-pip packages / a REPL session hook / **licensed vendor tools**), the
-machine **paths** (runtime dir, data root), and the **`research_toolkit`** checkout — then writes
-the machine-local `config/orchestration.yaml` + `config/observations.yaml` (deriving
+machine **paths** (runtime dir, papers dir), and the **`research_toolkit`** checkout — then writes
+the machine-local `config/orchestration.yaml` (deriving
 `agent_fs_allow` for you), copies the sandbox hooks, and runs the launch preflight as a smoke
 test. A re-run is an **upgrade**: it seeds every prompt from your existing config.
 
-Machine-local files (`config/orchestration.yaml`, `config/observations.yaml`) are **gitignored**; the repo tracks a
-`*.example` template for each. The installer writes the live copies; a fresh clone that skips the
+The machine-local `config/orchestration.yaml` is **gitignored**; the repo tracks a
+`*.example` template for it. The installer writes the live copies; a fresh clone that skips the
 installer must copy each `*.example` by hand.
 
 Headless (CI / an agent): `bash install.sh --answers answers.yaml` (a YAML/JSON file of the
@@ -68,7 +72,7 @@ pytest -q          # ~477 deterministic tests; no API keys needed
 ```
 
 The suite is **portable**: tests that need a fully-provisioned machine (a real analysis
-environment, `obsdb_catalog` in the toolkit, a populated data root) **skip** gracefully when those
+environment, versitygw and Postgres for the throwaway stores) **skip** gracefully when those
 are absent, rather than failing — so a fresh clone reports passes + skips, not errors. Live/XSPEC
 tests are opt-in: marked `live`, skipped unless `--live` is passed.
 
@@ -105,9 +109,8 @@ the allow-list. The first launch builds `ar-xspec`
 Everything the installer does, by hand:
 
 1. **Orchestration env** — `conda env create -f environment.yml && conda activate auto_research`.
-2. **Config** — `cp config/orchestration.yaml.example config/orchestration.yaml` and
-   `cp config/observations.yaml.example config/observations.yaml`; edit the paths. Keep
-   `agent_fs_allow` in sync with them (the installer derives it).
+2. **Config** — `cp config/orchestration.yaml.example config/orchestration.yaml`; edit the paths.
+   Keep `agent_fs_allow` in sync with them (the installer derives it).
 3. **HEASoft (incl. PyXSPEC)** — install HEASoft and CALDB; declare them in `env_externals`. The
    toolkit's `envs/*/activate.sh` source them (absolute paths; `research_toolkit` CLAUDE.md §6b).
 4. **Analysis Python env** — `conda env create -f environment-analyst.yml -p <prefix>`; declare it
@@ -118,8 +121,28 @@ Everything the installer does, by hand:
    commits authored tools onto), ensure a git `user.name`/`user.email`, and fill the `toolkits:`
    block (the toolkit contract: its `name`, `root`, `package_glob`, `template_package`,
    `authoring_branch`, `default_env`, `test_classes`; `config/DOCS.md`).
-6. **Observation data** — put data under one folder with a `<MISSION>` subdirectory per mission;
-   set `obs_db_root`. Missions are discovered from disk (a subdir with a `catalog.json` is a mission).
+6. **Data store** (step 0b, built; the live store is not yet migrated) — fill the `stores:` block (`config/DOCS.md`): a `local`
+   store names its objects folder (`root`), its state folder (`state_dir`, on a file system that takes
+   `user.` xattrs), a short `socket_dir` no jail mounts, and three free 127.0.0.1 ports; put the admin
+   secrets in `.env` under the variable names its `admin_env` gives. A run starts versitygw and
+   Postgres (both from `environment.yml`) before its launch preflight checks them, and leaves them
+   running; each listed bucket must exist with versioning Enabled (`python -m auto_research.store start
+   --create-buckets` starts a new store and creates them). Each unit gets its own store keys
+   for the run (`roles` names the producers; every other unit reads); a run's launch revokes the keys
+   of dead runs on this host. `python -m auto_research.store status` shows the servers and live keys,
+   `stop` stops them, `revoke --run ID` revokes one run's keys; `human-password` sets your own catalog login
+   (`ar_human`, its password typed at a prompt, never in `.env`), as which `clear-flag` clears a product's flag and
+   `move-current` overrides a `current` pointer. `ingest --mapping FILE` stores files already on disk as
+   products of your own (as `ar_human`; a tool reads them by record), and `produce --unit U --env E -- CMD`
+   runs one command as a producer job the way a run runs a toolkit tool (jailed, its own keys, revoked
+   when it ends; the toolkit committed). At each launch the runtime reconciles
+   every store: it verifies committed products, adopts complete uploads whose claim expired, fails products whose files
+   changed on disk, and moves each `current` pointer to the newest qualifying product. The preflight item
+   `store_integrity` then checks for edits on disk. `python -m auto_research.store.reconcile` runs that
+   pass by hand. The CI pipeline never reaches this store: each of its test runs starts a throwaway
+   one with the same name and buckets (versitygw and Postgres in `/var/tmp/ar-ci-<uid>/`), stopped when
+   the run ends. `python -m auto_research.store ci-sweep` is the way
+   to clean what a killed gate process left there (every throwaway start also runs it).
 
 If you only care about the literature/reviewer loop, you still need `research_toolkit` present on
 its `ai` branch (the launch preflight checks it); a default environment whose `env.yaml` names no
@@ -134,15 +157,15 @@ its `ai` branch (the launch preflight checks it); a default environment whose `e
 | `.env` | API keys and optional tracing flags. Loaded automatically. Never committed (`cp .env.example .env`). |
 | `config/models.yaml` | Role → model-group mapping (OpenAI/Anthropic/Google/DeepSeek/Z.AI/Qwen). No model IDs in code. |
 | `config/model_capabilities.yaml` | What each model takes (images, PDF): the one capability source; every configured member's model needs an entry. |
-| `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkits` (the toolkit contract: name, root, package glob, template package, authoring branch, fast-test selection, default environment), `human_envs`, `env_externals`, `conda_exe`, `disabled_tools`, `agent_fs_allow` (the per-agent filesystem allow-list), the internet-stability retry policy (`provider_retry_*` — transient provider failures waited out with growing cooldowns instead of killing the run), report formats, report retry cap, and Phase-2 authoring caps. |
-| `config/observations.yaml` | `obs_db_root` — the single obs-db folder; it may start empty, and `acquire` creates a mission's folder, laid out as HEASARC's archive tree, on its first observation. Missions are its subdirs holding a `catalog.json`. |
-| `AUTO_RESEARCH_CONFIG_DIR` | Optional. Names a directory holding all five files below, and every reader honours it, so one process can be run against a whole different configuration — other model seats, another toolkit checkout, another runtime and obs root — without editing anything here. Unset (the normal case) is `config/`. An environment variable because the readers include subprocesses that inherit it and are not all Python. The `.example` templates and `.env` stay with the repo either way. |
-| `config/code_gate.yaml` | The Phase-2 gate's no-fabrication scan lists (banned vocabulary, hard-fail vs finding-tier code patterns — which list a pattern sits in decides its severity; RNG is finding-tier since Monte-Carlo tools need randomness — literal-array findings, ObsID allowlist). A Tier-1 word inside an explicit negation is demoted to the finding tier, so prose stating the no-fabrication discipline is not rejected for stating it. Human-tunable; no scan constant in code. |
+| `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkits` (the toolkit contract: name, root, package glob, template package, authoring branch, fast-test selection, default environment), `human_envs`, `env_externals`, `test_data` (the data sets the CI pipeline provides), `stores` (the data stores: S3 objects plus a Postgres catalog, the per-unit `roles`), `conda_exe`, `disabled_tools`, `agent_fs_allow` (the per-agent filesystem allow-list), the internet-stability retry policy (`provider_retry_*` — transient provider failures waited out with growing cooldowns instead of killing the run), report formats, report retry cap, and Phase-2 authoring caps. |
+| `AUTO_RESEARCH_CONFIG_DIR` | Optional. Names a directory holding all four files below, and every reader honours it, so one process can be run against a whole different configuration — other model seats, another toolkit checkout, another runtime and data stores — without editing anything here. Unset (the normal case) is `config/`. An environment variable because the readers include subprocesses that inherit it and are not all Python. The `.example` templates and `.env` stay with the repo either way. |
+| `config/code_gate.yaml` | The Phase-2 gate's no-fabrication scan lists (banned vocabulary, hard-fail vs finding-tier code patterns — which list a pattern sits in decides its severity; RNG is finding-tier since Monte-Carlo tools need randomness — literal-array findings). A Tier-1 word inside an explicit negation is demoted to the finding tier, so prose stating the no-fabrication discipline is not rejected for stating it. Human-tunable; no scan constant in code. |
 
 **Keys** (the provider SDKs read these directly; see `.env.example` for the full template):
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
 `DASHSCOPE_API_KEY`, `ADS_DEV_KEY` (NASA ADS),
-`TAVILY_API_KEY`; optional LangSmith tracing (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`);
+`TAVILY_API_KEY`; the data store's admin secrets under the names its `admin_env` gives (`AR_DB_S3_KEY_ID`,
+`AR_DB_S3_KEY_SECRET`, `AR_DB_S3_CATALOG_SECRET` for the store `db`; never handed to an agent); optional LangSmith tracing (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`);
 optional raise-to-human connectors (only when selected) — **Telegram** (recommended; questions render
 as rich messages with tables and math, and carry figures and files both ways: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`), Slack (not recommended:
 Socket Mode can stop delivering after idle)
@@ -493,8 +516,8 @@ Current role/tool surfaces:
 |---|---|---|
 | Librarian | `LibrarianToolProvider`: arXiv/ADS/web search, full-text reading of papers and pages (each minted as a receipt), local text search, `write_report`/`edit_report`/`turn_end`. | One research pass: a `LiteratureReport` whose findings cite, by handle, the documents it read. |
 | Local retrieval | Pure-Python `text_search()`/`vector_search()` (stub) over SQLite, reached through the **reviewer's** `text_search` and the shared `read_paper` (which attaches the PDF) — not a graph node. | Returns local paper paths and attaches chosen PDFs; no standalone LLM role. |
-| Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools (including `catalog_utils`'s read-only `data_catalog`) + MCP tools in a persistent sandbox — each toolkit call in its package's tested environment, or another chosen with `env` (marked untested) — plus `list_env`/`use_env` (its shell), `web_search`, `web_fetch`, and the report tools `write_report`/`edit_report` (the report is one text document, written like a file and edited by exact match; each figure's label arrives with the tool result that made it). | `analyze()` chains load→fit→run→plot or other tools, passing each result on by `{"$ref": …}` so the next call records it as a parent, self-corrects in-loop, then **writes its report via `write_report`/`edit_report`**, citing figures from its catalog. |
-| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers dir, full `research_toolkit` source, the `data_catalog` tool (from `research_toolkit`'s `catalog_utils`, run in-process for the sandbox-less lead), `web_search` + `web_fetch` (`include_text_search=False` — knowledge-base search is the reviewer's), `write_report`/`edit_report` (each worker figure labelled in its task), the three authoring tools, `author_chain`, and `turn_end`. | **One cycle** (`run_cycle`): one ReAct loop with **no stages** — investigate, brief a coding chain if the analysts hit a missing capability, drive and submit each link, write the report, end on `turn_end`. **The report is the decision**: `rework=true` sends the analysts back with a probe, `rework=false` makes it the analysis result. `author_chain` is a *brief*, not a terminal — a finished link advances the chain on a tool result, so a dead link is a sentence in the conversation rather than the end of the turn. A cycle that commits anything ends before judging, so the committed tools are reloaded and the workers rerun on them first. Also answers author clarifications. |
+| Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools + MCP tools in a persistent sandbox — each toolkit call in its package's tested environment, or another chosen with `env` (marked untested) — plus `list_env`/`use_env` (its shell), `web_search`, `web_fetch`, and the report tools `write_report`/`edit_report` (the report is one text document, written like a file and edited by exact match; each figure's label arrives with the tool result that made it). | `analyze()` chains load→fit→run→plot or other tools, passing each result on by `{"$ref": …}` so the next call records it as a parent, self-corrects in-loop, then **writes its report via `write_report`/`edit_report`**, citing figures from its catalog. |
+| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers dir, full `research_toolkit` source, `catalog_query` (the stores' catalogs, read as the lead's own reader login: products, the current product per bucket, kind and subject, a product's objects as records; navigation, never evidence), `web_search` + `web_fetch` (`include_text_search=False` — knowledge-base search is the reviewer's), `write_report`/`edit_report` (each worker figure labelled in its task), the three authoring tools, `author_chain`, and `turn_end`. | **One cycle** (`run_cycle`): one ReAct loop with **no stages** — investigate, brief a coding chain if the analysts hit a missing capability, drive and submit each link, write the report, end on `turn_end`. **The report is the decision**: `rework=true` sends the analysts back with a probe, `rework=false` makes it the analysis result. `author_chain` is a *brief*, not a terminal — a finished link advances the chain on a tool result, so a dead link is a sentence in the conversation rather than the end of the turn. A cycle that commits anything ends before judging, so the committed tools are reloaded and the workers rerun on them first. Also answers author clarifications. |
 | Analyst co-lead | `ReadOnlyToolProvider`: the authored toolkit worktree + `web_search` + `web_fetch` (`include_text_search=False`). | Provider-decorrelated **code review** of one authored tool — brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs → `ToolReviewVerdict`. |
 | Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, memory, `web_search` + `web_fetch`, `text_search`, and the shared `read_paper` (attaches the PDF itself; papers are cited by handle and never text-matched, each paper value attributed with its place in the paper and listed for verification), `write_report`/`edit_report`, `turn_end` (which typesets the report and names what it cannot typeset). | The sole I/O: scopes and plans each request, then files one `ReviewerReport` per turn whose `assign_to` routes the graph (librarian, analysts, or the human). A report to the human is rendered by the harness (its PDF carries a "values to verify against the PDFs" appendix) and sent as a PDF; the human's reply returns as a nudge. |
 

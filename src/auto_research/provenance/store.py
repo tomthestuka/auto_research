@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import json
 import os
 import uuid
-import re
 import stat
 import threading
 from collections.abc import Callable, Iterable, Sequence
@@ -25,10 +23,6 @@ from pathlib import Path
 from auto_research.schemas.artifacts import KIND_LETTER, InputFile, Receipt
 from auto_research.provenance.calls import args_digest
 from auto_research.toolkit_contract import is_toolkit_producer
-
-#: A marked synthetic ObsID (§9.5): ``…/synth<YYMMDD>-<sha>/…``.
-#: Also the hand-authored validation fixtures in an obs-db (``synth_pa_pd_constant``, 2026-10-17).
-_SYNTH_RE = re.compile(r"^synth(?:\d{6}-[0-9a-f]+|_[A-Za-z0-9_]+)$")
 
 #: The source of every input a unit is handed: the research request and each dispatched task.
 #: Every unit may cite it, since what a role was asked is part of what it may repeat.
@@ -72,7 +66,7 @@ NOT_EVIDENCE_NAMES = {
     "toolspec": "a tool brief",
     "human_reply": "a file the human sent", "report_renderer": "an earlier published report",
     "search_literature": "a search result",
-    "list_env": "an environment listing",
+    "list_env": "an environment listing", "catalog_query": "a catalog listing",
 }
 
 #: Every producer the runtime mints that is not a toolkit tool. ``mcp`` stands for every MCP kind
@@ -239,10 +233,6 @@ def _alert(note: str, path: Path | str, expected: str | None, actual: str | None
             pass
 
 
-def is_synthetic_path(path: Path) -> bool:
-    return any(_SYNTH_RE.match(part) for part in Path(path).parts)
-
-
 _STORES: dict[Path, "ReceiptStore"] = {}
 _REGISTRY_LOCK = threading.Lock()
 
@@ -286,15 +276,6 @@ def _listing(target: Path) -> bytes:
     return "\n".join(sorted(listing)).encode("utf-8", "surrogateescape")
 
 
-def _catalog_entries(catalog: Path) -> dict:
-    """``{obsid: entry}`` from a mission's ``catalog.json``; empty when absent or unreadable."""
-    try:
-        entries = json.loads(catalog.read_text(encoding="utf-8")).get("entries")
-    except (OSError, ValueError, AttributeError):
-        return {}
-    return entries if isinstance(entries, dict) else {}
-
-
 class ReceiptStore:
     """Append-only receipts for one run, keyed by handle."""
 
@@ -310,6 +291,8 @@ class ReceiptStore:
         self._counts: dict[tuple[str, str], int] = {}
         self._by_sha: dict[str, str] = {}
         self._input_cache: dict[tuple[str, int, int], InputFile] = {}
+        #: (store, bucket, key, version_id) -> the handle of the result receipt whose call wrote it.
+        self._by_object: dict[tuple[str, str, str, str], str] = {}
         if self.ledger.is_file():
             for line in self.ledger.read_text(encoding="utf-8").splitlines():
                 if line.strip():
@@ -355,13 +338,16 @@ class ReceiptStore:
         inputs: Sequence[InputFile] = (),
         parents: Iterable[str] = (),
         failed: bool = False,
+        flags: Iterable[str] = (),
         **fields: object,
     ) -> Receipt:
         """Store ``data`` as a blob (or hash the file at ``path``) and record its receipt.
 
         Exactly one of ``data`` / ``path``. ``args`` is hashed as canonical JSON. Parents are the
-        given handles plus the receipts that produced any input's bytes; flags are this artifact's
-        own (``failed``, a synthetic-marked input) plus every parent's.
+        given handles plus the receipts that produced any input's bytes (or wrote an object version
+        it read); flags are this artifact's own (``failed``, and ``flags``: what the caller found,
+        e.g. ``store.records``' ``synthetic``, ``undeclared_write``, ``unverified``) plus every
+        parent's.
         """
         if (data is None) == (path is None):
             raise ValueError("mint takes exactly one of data= or path=")
@@ -372,16 +358,14 @@ class ReceiptStore:
             digest = sha256_file(stored)
         args_sha = args_digest(args) if args is not None else None
         parent_set = list(dict.fromkeys([*parents, *(i.receipt for i in inputs if i.receipt)]))
-        flags: set[str] = set()
+        marks: set[str] = set(flags)
         if failed:
-            flags.add("failed")
-        if any(is_synthetic_path(i.path) for i in inputs):
-            flags.add("synthetic")
+            marks.add("failed")
         with self._lock:
             for parent in parent_set:
                 known = self._receipts.get(parent)
                 if known is not None:
-                    flags.update(known.flags)
+                    marks.update(known.flags)
             key = (source, kind)
             n = self._counts.get(key, 0) + 1
             receipt = Receipt(
@@ -399,7 +383,7 @@ class ReceiptStore:
                 args_sha256=args_sha,
                 inputs=list(inputs),
                 parents=parent_set,
-                flags=sorted(flags),
+                flags=sorted(marks),
                 **fields,
             )
             self.root.mkdir(parents=True, exist_ok=True)
@@ -447,6 +431,10 @@ class ReceiptStore:
         n = int(receipt.handle.split(":", 1)[1][1:])
         self._counts[key] = max(self._counts.get(key, 0), n)
         self._by_sha.setdefault(receipt.sha256, receipt.handle)
+        for written in receipt.writes:
+            if not written.delete_marker:
+                self._by_object.setdefault(
+                    (written.store, written.bucket, written.key, written.version_id), receipt.handle)
 
     # -- inputs ------------------------------------------------------------------------------
 
@@ -466,43 +454,16 @@ class ReceiptStore:
         self._input_cache[key] = entry
         return entry
 
-    def hash_obsdb_entry(
-        self, mission_dir: Path, obsid: str, *, entries: dict | None = None,
-        mission: str | None = None, index: Callable[[], dict] | None = None,
-    ) -> InputFile | None:
-        """An observation a tool locates itself from its ObsID (user ruling 2026-10-16: record what
-        it is and a hash, never a copy): its folder under ``mission_dir``
-        (:func:`auto_research.observations.obsid_folder`: the catalog entry's record, then the
-        mission's HEASARC tree rule), hashed over its catalog entry
-        (``catalog.json``) and the listing of its folder (name, size, mtime), basis ``obsdb``. An
-        ObsID-like name (it holds a digit) the catalog does not list but that names a folder there
-        is that folder's ``listing``; a mission folder (one holding a catalog) never is. ``None``
-        otherwise. Read fresh on every call: a reduction can add products to the folder mid-run.
-        ``entries``: the mission's catalog entries, when the caller already read them; ``mission``:
-        the mission the folder holds (default its name: a resolved symlink names its target);
-        ``index``: the folder's tree index, built once for every name a call holds
-        (``obsid_folder``).
-        """
-        from auto_research.observations import CATALOG_FILENAME, obsid_folder
-
-        if entries is None:
-            entries = _catalog_entries(Path(mission_dir) / CATALOG_FILENAME)
-        entry = entries.get(obsid)
-        if entry is None and not re.search(r"\d", obsid):
-            return None  # no ObsID: nothing to look up
-        folder = obsid_folder(Path(mission_dir).resolve(), obsid, entry, mission=mission, index=index)
-        if entry is None:
-            if not folder.is_dir() or (folder / CATALOG_FILENAME).exists():
-                return None
-            return InputFile(path=folder, sha256=sha256_bytes(_listing(folder)), basis="listing")
-        listing = _listing(folder) if folder.is_dir() else b""
-        record = json.dumps(entry, sort_keys=True, default=str).encode("utf-8")
-        return InputFile(path=folder, sha256=sha256_bytes(record + b"\n" + listing), basis="obsdb")
-
     # -- lookup ------------------------------------------------------------------------------
 
     def get(self, handle: str) -> Receipt | None:
         return self._receipts.get(handle)
+
+    def object_writer(self, store: str, bucket: str, key: str, version_id: str) -> Receipt | None:
+        """The result receipt of the in-run call that wrote this object version (``Receipt.writes``),
+        or ``None`` when no call of the run wrote it."""
+        handle = self._by_object.get((store, bucket, key, version_id))
+        return self._receipts.get(handle) if handle else None
 
     def text(self, handle: str) -> str | None:
         """The text a quote in this receipt is checked against, or ``None`` for binary kinds."""

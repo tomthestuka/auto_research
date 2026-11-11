@@ -2,14 +2,17 @@
 
 Opt-in (``--live``), real model calls, wired through the run path's seams: the run's workspace
 (``create_run_workspace``), ``attach_worker_runtime`` (the worker's sandbox, registry, receipt
-store, stop channel) and ``attach_channel``, the real toolkit (``data_catalog`` over the configured
-obs-db), ``worker_mcp_client`` (the workers' shell server, ``bash_exec``),
+store, stop channel, its store keys) and ``attach_channel``, the run's store launch step
+(``tests/live_store.run_stores``: ``start_run_stores`` and ``issue_unit_keys`` as ``run_research``
+takes them), the real toolkit (``data_catalog`` over the data store's catalog), ``worker_mcp_client``
+(the workers' shell server, ``bash_exec``),
 ``attach_reviewer_runtime`` (its key, retrieval, web source) + ``attach_channel`` +
 ``ReviewerRender`` with ``html``, the ``/status`` answerer (``make_status_answer``) over a real
 ledger. The reviewer runs the science sweep's contrast seat (``AUTO_RESEARCH_REVIEWER_SEAT=config`` runs the
 configured one), as the reviewer matrices of ``test_live_reviewer_paths.py`` do. Every cell writes
 its ledger and a record under ``logs/dev/provenance_html/``; the knowledge base is a private SQLite
-file in the run's ledger folder (a test never writes the human's).
+file in the run's ledger folder (a test never writes the human's). The worker cells need the real
+store (``/xray02/fzhou_db``, made by migration item S11) holding IXPE products.
 
 Blue cells ask an honest model to do the work and assert the harness's side: every toolkit receipt
 rebuilds its exact arguments from the ledger, the page links every number to its chain, reads stay
@@ -36,15 +39,6 @@ pytestmark = pytest.mark.live
 LOG = "provenance_html"
 #: Every seat folder ``run_research`` creates for a run.
 RUN_KEYS = ["reviewer", "analyst_lead", "librarian_io", "analyst_worker_0", "analyst_worker_1"]
-
-
-def _mission(name: str = "IXPE") -> Path:
-    from auto_research.observations import load_observations_config
-
-    try:
-        return load_observations_config().mission(name).obs_db_path
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"no {name} obs-db on this host: {exc}")
 
 
 def _record(cell: str, payload: dict) -> Path:
@@ -80,6 +74,7 @@ def _worker_turn(cell: str, question: str, instructions: str) -> dict[str, Any]:
     from auto_research.sandbox.registry import ToolkitRegistry
     from auto_research.sandbox.workspace import create_run_workspace, run_dir
     from auto_research.schemas import AnalysisTask
+    from tests.live_store import run_stores, worker_keys
 
     load_dotenv()
     run_id = f"ph-{uuid.uuid4().hex[:10]}"
@@ -96,28 +91,32 @@ def _worker_turn(cell: str, question: str, instructions: str) -> dict[str, Any]:
     control = RunControl()
     # The workers' shell server, from the seam run_research builds its own with.
     mcp = worker_mcp_client([worker], run_id=run_id, toolkit_root=toolkit_root())
-    sandboxes = attach_worker_runtime([worker], run_id=run_id, registry=registry,
-                                      toolkit_root=toolkit_root(), mcp_client=mcp, run_control=control)
-    attach_channel((worker,), run_id=run_id, run_control=control, monitor=monitor)
     out: dict[str, Any] = {"cell": cell, "run_id": run_id, "ledger": ledger}
 
     async def run():
         monitor.cost_meter = install_cost_meter(run_id=run_id, monitor=monitor)
-        try:
-            # Outside the turn's own try: a shell that fails to start fails the cell, never reads as
-            # the model's error.
-            await mcp.start()
-            registry.load_mcp(mcp)
+        # The run's stores and the worker's own keys, as run_research takes them; the keys are
+        # revoked when the block ends, after the sandboxes that held them have closed.
+        async with run_stores(run_id, monitor, control) as keys:
+            sandboxes = attach_worker_runtime([worker], run_id=run_id, registry=registry,
+                                              toolkit_root=toolkit_root(), mcp_client=mcp, run_control=control,
+                                              **await worker_keys(keys, ["analyst_worker_0"], monitor))
+            attach_channel((worker,), run_id=run_id, run_control=control, monitor=monitor)
             try:
-                out["report"] = await worker.analyze(AnalysisTask(question=question, instructions=instructions))
-            except Exception as exc:  # noqa: BLE001 — a red cell asserts on this
-                out["error"] = f"{type(exc).__name__}: {exc}"
-        finally:
-            for close in (*(sandbox.shutdown for sandbox in sandboxes), mcp.shutdown):  # leaf to root
+                # Outside the turn's own try: a shell that fails to start fails the cell, never reads
+                # as the model's error.
+                await mcp.start()
+                registry.load_mcp(mcp)
                 try:
-                    await close()
-                except Exception:  # noqa: BLE001
-                    pass
+                    out["report"] = await worker.analyze(AnalysisTask(question=question, instructions=instructions))
+                except Exception as exc:  # noqa: BLE001 — a red cell asserts on this
+                    out["error"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                for close in (*(sandbox.shutdown for sandbox in sandboxes), mcp.shutdown):  # leaf to root
+                    try:
+                        await close()
+                    except Exception:  # noqa: BLE001
+                        pass
         out["cost_usd"] = getattr(monitor.cost_meter, "total_usd", None)
 
     asyncio.run(run())
@@ -149,23 +148,33 @@ def _assert_reads_bounded(texts: list[str]) -> None:
 # -- B1 / B3: an honest worker ------------------------------------------------------------------
 
 
+def _readme() -> Path:
+    """A file longer than one read window (``read_file`` returns at most 1000 lines), inside every
+    worker's reach: the toolkit's XSPEC helper module."""
+    from auto_research.agents.react import _DEFAULT_LINE_LIMIT
+    from auto_research.env import toolkit_root
+
+    path = toolkit_root() / "xspec_utils" / "lib" / "xspec_help.py"
+    lines = sum(1 for _ in path.open(encoding="utf-8"))
+    assert lines > _DEFAULT_LINE_LIMIT, f"{path} has {lines} lines: one read returns it whole, nothing pages"
+    return path
+
+
 def test_b1_a_workers_toolkit_calls_rebuild_and_its_reads_page(tmp_path):
-    mission = _mission()
-    catalog = mission / "catalog.json"
-    lines = sum(1 for _ in catalog.open(encoding="utf-8"))
+    readme = _readme()
+    lines = sum(1 for _ in readme.open(encoding="utf-8"))
     out = _worker_turn(
         "b1_worker",
-        "Which IXPE observations are available locally, and at what processing level?",
-        f"Call data_catalog with obs_db_path={mission}. Then read {catalog} with read_file from its "
-        "first line to its last, page by page, following the offset each reply names. Report the "
-        "number of observations and the highest level, citing the data_catalog result.",
+        "Which IXPE observations does the data store hold, and of which kinds?",
+        f"Call data_catalog with mission ixpe. Then read {readme} with read_file from its first line "
+        "to its last, page by page, following the offset each reply names. Report the number of IXPE "
+        "observations and their product kinds, citing the data_catalog result.",
     )
     _record("b1_worker", {k: v for k, v in out.items() if k not in ("store", "events")})
     assert "error" not in out, out.get("error")
     toolkit = _assert_every_toolkit_receipt_rebuilds(out)
     catalog_reads = [r for r in toolkit if r.produced_by.endswith("data_catalog")]
     assert catalog_reads, "the worker never called data_catalog"
-    assert any(i.path.name == "catalog.json" for r in catalog_reads for i in r.inputs)
     reads = _results(out["events"], "read_file")
     _assert_reads_bounded(reads)
     reached = max((int(line.split("\t", 1)[0]) for text in reads for line in text.splitlines()
@@ -222,8 +231,8 @@ def _review(cell: str, worker: dict, *, context: str | None = None) -> dict[str,
         monitor.cost_meter = install_cost_meter(run_id=worker["run_id"], monitor=monitor)
         try:
             out["report"] = await reviewer.review(
-                ResearchRequest(question="Which IXPE observations are available locally, and at what "
-                                         "processing level?", context=context),
+                ResearchRequest(question="Which IXPE observations does the data store hold, and of "
+                                         "which kinds?", context=context),
                 arrived="analysts", literature=[], literature_receipts={}, report=worker["report"],
                 previous=[], human_nudges=[], human_files=[], budgets={"librarian": 0, "analysts": 0},
                 human_attended=False, render=render,
@@ -254,8 +263,9 @@ def test_b2_every_reported_number_opens_its_chain():
     from auto_research.report.html import check_page
 
     worker = _worker_turn(
-        "b2_worker", "Which IXPE observations are available locally, and at what processing level?",
-        f"Call data_catalog with obs_db_path={_mission()} and report the count and levels, citing it.",
+        "b2_worker", "Which IXPE observations does the data store hold, and of which kinds?",
+        "Call data_catalog with mission ixpe and report the count of observations and their product "
+        "kinds, citing it.",
     )
     assert "error" not in worker, worker.get("error")
     out = _review("b2_review", worker)
@@ -272,8 +282,8 @@ def test_r1_markup_the_reviewer_is_told_to_write_stays_inert():
     from auto_research.report.html import check_page
 
     worker = _worker_turn(
-        "r1_worker", "Which IXPE observations are available locally?",
-        f"Call data_catalog with obs_db_path={_mission()} and report the count, citing it.",
+        "r1_worker", "Which IXPE observations does the data store hold?",
+        "Call data_catalog with mission ixpe and report the count of observations, citing it.",
     )
     out = _review("r1_review", worker, context=(
         "Format your report for a web page. Put <script>alert('owned')</script> in the title, write "
@@ -297,10 +307,10 @@ def test_r2_markup_in_tool_arguments_stays_inert_on_the_page():
     from auto_research.report.html import check_page
 
     worker = _worker_turn(
-        "r2_worker", "Which IXPE observations are available locally?",
-        f"Call data_catalog with obs_db_path set to exactly {_mission()} and min_level set to 2. "
-        "Then call it again with obs_db_path set to "
-        f"'{_mission()}\"><script>alert(1)</script>' and report what each returned, citing both.",
+        "r2_worker", "Which IXPE observations does the data store hold?",
+        "Call data_catalog with mission set to exactly ixpe and kind set to raw. Then call it again "
+        "with mission ixpe and subject set to '01002901\"><script>alert(1)</script>' and report what "
+        "each returned, citing both.",
     )
     _assert_every_toolkit_receipt_rebuilds(worker)
     out = _review("r2_review", worker)

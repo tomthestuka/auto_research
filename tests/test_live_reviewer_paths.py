@@ -674,6 +674,9 @@ def test_the_graph_holds_against_an_attacking_human(tmp_path):
     from auto_research.schemas import ResearchRequest
     from auto_research.sandbox.workspace import report_dir
 
+    from tests.live_store import require_store
+
+    require_store()  # a store that is not ready skips the run with its own refusal
     load_dotenv()
     world = World("graph_human", tmp_path)
     human = _AttackingHuman()
@@ -793,6 +796,9 @@ def test_a_real_librarian_report_reaches_the_reviewer():
     out: dict[str, Any] = {"run_id": run_id, "run_dir": run_dir(run_id), "ledger_dir": ledger_dir(run_id),
                            "ledger": ledger, "reviewer_model": reviewer.model.config.model,
                            "librarian_model": librarian.model.config.model}
+    from tests.live_store import require_store
+
+    require_store()  # a store that is not ready skips the run with its own refusal
     try:
         asyncio.run(storage.initialize())
         try:

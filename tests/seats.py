@@ -70,7 +70,7 @@ SEATS_ENV = "AUTO_RESEARCH_SEATS"
 #: The configuration files a directory must hold to configure a process. ``models.yaml`` is the
 #: one an override rewrites; the rest are copied so nothing else about the run differs.
 _CONFIG_FILES = (
-    "orchestration.yaml", "models.yaml", "observations.yaml", "code_gate.yaml", "model_capabilities.yaml",
+    "orchestration.yaml", "models.yaml", "code_gate.yaml", "model_capabilities.yaml",
 )
 
 

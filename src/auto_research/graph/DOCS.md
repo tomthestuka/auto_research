@@ -281,6 +281,60 @@ the published artifact paths and handles (`report_artifacts`).
   toolkit's default environment (`env.analysis_environment`), the environments a unit may list
   (`env_catalogue`) and the default environment's `env.yaml` probe (the `bash_exec` description's
   example). One definition: the REPL and the shell of every caller come from it.
+- `bind_run_stores(orch, run_id)` / `release_run_stores(run_id)` — the same for the `stores:` block
+  (`store.config.bind`): bound before the preflight from the configuration the run read once, held for
+  the run; a run declaring other stores (or an invalid block) while one holds them is refused; with none
+  holding them an absent or invalid block binds nothing (the preflight's `store_config` refuses it).
+- `async start_run_stores(run_id, keys, monitor)` — the run's store launch step (S4, ruling B), before the
+  preflight, per bound store: started when local and `store_config` accepts it (`store.health.refusals`;
+  `store.launch.start` on a thread, a running set shared; recorded `store.launch`); required ready
+  (`store.health.ready_problems`, in the preflight items' words); the dead runs' keys swept
+  (`sweep_dead_runs`); then reconciled (`store.reconcile.reconcile(store, run=, conn=, s3=)`, recorded
+  `store.reconcile`) as the run's own reconciler login (`keys.issue(store, RECONCILER_UNIT, "reconciler")`,
+  S3 reader policy, its key signing the pass). A failure is recorded (`store.launch.error`) and raised.
+  `RECONCILER_UNIT = "reconciler"`.
+- `RunLaunch(run_id, monitor)` — the run's launch step and its end as one seam (S13a, main's ruling 4),
+  used by `run_research` and by live cells driving roles outside the graph (`tests/live_store.run_stores`).
+  `.keys` (`store.keys.RunKeys`), `.orch` (the configuration read once by `start`). `async start()` →
+  the configuration: `record_run_process`, `load_orchestration_config`, `bind_run_contract`,
+  `bind_run_stores`, `start_run_stores(run_id, keys, monitor)`. `hold(control)` sets
+  `control.credentials = keys` (a stop's cleanup revokes them in its order). `async revoke()` (recorded
+  through `_closed("credentials", …)`, never raised, idempotent); `release()` (`release_run_contract`,
+  `release_run_stores`); `async end()` = revoke, then release. As an async context manager it starts on
+  entry, ends at once when the start fails, and ends on exit. `run_research` calls `start` before its
+  preflight, `end` when the launch fails, `hold` once its `RunControl` exists, `revoke` in the setup's
+  stack and the graph teardown, `release` when the setup fails, and `end` in its outermost `finally`
+  (the teardown order unchanged, except that a failed launch now revokes before it releases). Tests:
+  `tests/test_run_launch.py`.
+- `StoreNotReady(RuntimeError)` — a store's servers are not running here: `start_run_stores` raises
+  it, with the store's own words, when `store.launch.start` refuses or `store.health.ready_problems`
+  names its `store_servers` item; every other failure of the launch step (a refused admin key, a
+  missing bucket, another catalog schema, sweep, keys, reconciler) is raised as itself. The live
+  cells skip on it, and on a store absent from the host (admin variables unset, its folders
+  missing), and fail on everything else, configuration defects first (`store.health.config_defects`;
+  `tests/live_store.run_stores`, `require_store`).
+- `async wire_lead(lead, *, run_id, toolkit_root, keys, run_monitor=None, run_control=None,
+  retrieval=None, web_source=None)` — the analyst lead's wiring as `run_research`
+  gives it, one call for the run path and for live cells driving a real lead: the lead's own login
+  to the default store, issued into `keys` (`issue_unit_keys`), then `attach_lead_runtime` with that
+  catalog, `retrieval` (default `SqliteRetrievalBackend()`) and `web_source` (default `WebSource()`);
+  the lead reaches the human through the quick channel and `run_cycle(human_handler=)`, never this
+  wiring. `run_research` wires its
+  lead only through it. Tests: `tests/test_run_launch.py`.
+- `record_run_process(run_id)` — writes `ledgers/<run>/runtime.json` (`RUN_PROCESS_FILE`: host, pid, the
+  pid's start time), first thing in `run_research`'s launch; a resumed run overwrites it.
+  `run_process_record(run_id)` → the record or None. `run_process_alive(run_id)` → True/False only for a
+  well-formed record of this host (string host, integer pid and start time), None when unknown here (no
+  record in this runtime dir, a malformed one, another host); nothing reads None as dead. `async sweep_dead_runs(store, run_id, monitor)` → the runs
+  revoked: every other run with live keys in the store whose process is known gone, liveness checked
+  again before each principal (`store.credentials.sweep`; a failed revoke `store.credentials.sweep_error`, level 2, the launch goes on).
+- `async issue_unit_keys(keys, units, monitor) -> {unit: Credentials}` — each unit's keys to the
+  default store (`store.config.DEFAULT_STORE`), of the role the store gives it (`roles`), recorded per
+  unit (`store.credentials.issue`: role, principal, key id; never a secret); `{}` when the run binds
+  no store; raises `RuntimeError` naming the stores when it binds stores without the default one
+  (`store_config` refuses that at the preflight). `run_research` issues the workers' (the units with
+  jailed tool processes today) and the lead's (a reader by the default `roles`: the runtime runs its
+  catalog queries; it runs no tool process, step 0b S9).
 - `bind_run_contract(orch, run_id)` / `release_run_contract(run_id)` — binds the process to `orch`'s
   toolkit contract (`toolkit_contract.bind`) and holds it for the run; `run_research` binds with the
   configuration it read once, before its preflight, and releases when it ends however it ends, so
@@ -303,19 +357,29 @@ the published artifact paths and handles (`report_artifacts`).
   wiring (its key, its report folder, its stop channel, the run's one `ReceiptStore`; a pre-wired
   field stays; a store that cannot open raises), called by `run_research` and by live cells so
   they drive the same librarian (`tests/test_live_librarian.py`).
-- `readonly_tools_for(role, *, roots, retrieval=None, web_source=None) -> ReadOnlyToolProvider` — the read-only inspection loop production gives the
-  `reviewer` or the `analyst_lead`. The two differ on purpose: the lead gets the data catalog and,
-  when a human is reachable, the budget-free design channel, and is denied the paper knowledge
-  base, because it investigates toolkit source and the archive rather than literature. Any other
-  role raises rather than receiving a default loop.
+- `readonly_tools_for(role, *, roots, retrieval=None, web_source=None, catalog=None) -> ReadOnlyToolProvider` — the read-only inspection loop production gives the
+  `reviewer` or the `analyst_lead`. The two differ on purpose: the lead gets the stores' catalogs
+  (`catalog`: store name → its own reader-class login; `catalog_query`) and, when a human is
+  reachable, the budget-free design channel, and is denied the paper knowledge base, because it
+  investigates toolkit source and the data rather than literature; the reviewer is given no catalog
+  whatever `catalog` holds. Any other role raises rather than receiving a default loop.
+- `attach_lead_runtime(lead, *, run_id, toolkit_root, run_monitor=None, run_control=None,
+  retrieval=None, web_source=None, catalog=None)` — the lead's production wiring:
+  key, report folder, receipt store, monitor, stop channel and `readonly_tools_for("analyst_lead",
+  catalog=catalog)` (a pre-wired `tools` stays). `run_research` passes the lead's login to the
+  default store (`issue_unit_keys`), revoked with the run's keys.
 - `readonly_roots_for(run_id, toolkit_root) -> list[Path]` — the three roots those two roles may
   read: the run directory, the papers directory, the toolkit. Report files are not in it: they
   live beside the ledger.
 - `attach_worker_runtime(workers, *, run_id, registry, toolkit_root, sandbox_settings=None,
-  mcp_client=None, run_control=None) -> list[PersistentSandbox]` — gives each `AnalystWorkerAgent` its stable key,
+  mcp_client=None, run_control=None, credentials=None, reconciler=None) -> list[PersistentSandbox]` — gives each `AnalystWorkerAgent` its stable key,
   report directory, one persistent sandbox and the registry, and registers the sandbox's aborter
   so a human stop cancels an in-flight tool call. Returns the sandboxes for the caller to shut
-  down. **Without it a worker has no tool loop**: `analyze()` runs its inner ReAct loop only when
+  down. With `credentials` (`issue_unit_keys`), each worker's REPLs get its store keys
+  (`PersistentSandbox(store_env=)`, never the shared shell) and the worker its view of the store's
+  records (`worker.store_records`, `store.records.StoreRecords` with its principal and run; writable: the
+  store's buckets for a producer, none for a reader), passed to its `SandboxToolProvider`.
+  **Without it a worker has no tool loop**: `analyze()` runs its inner ReAct loop only when
   a sandbox and a registry are both attached, and otherwise falls back to a plain structured call.
 - `build_graph(..., human_handler=None)` — constructs and compiles the six-node state graph
   (`review`, `literature`, `analysis`, `finalize_run`, `compose_report`, `human`).
@@ -442,3 +506,31 @@ and 2026-10-19 (every entry); detail in git history.
 - 2026-11-09 — W4 review L3: `bind_run_contract(orch, run_id)` holds the bound contract for the run (`_CONTRACT_RUNS`, released by `release_run_contract` on every exit); a concurrent in-process run declaring another contract is refused, a finished run's binding is replaced. Test: `test_role_wiring_seams::test_a_run_started_while_another_holds_the_contract_cannot_change_it`.
 - 2026-11-09 — Phase 3 step 0a W10 (ruling D25): `_builtin_server_config` always jails the shell server (no unjailed fallback; the `"jailed"` server-config flag is gone); `worker_mcp_client` loses `orch` and the `mcp_servers` key (a configured server ran unjailed): the workers' shell is the builtin server. `_reconcile_environments` drops the `unjailed`/`tainted` build causes and the `env.tainted` event.
 - 2026-11-10 — Phase 3 step 0a W9f (human ruling: drive the real graph, record the route): the reviewer's live dispatch cell `test_adequate_literature_dispatches_the_analysts` (a hand-written one-paper literature report, route asserted) is replaced by `tests/test_live_reviewer_paths.py::test_a_real_librarian_report_reaches_the_reviewer`: `run_research` with a stub analysis, the reviewer scopes the request, a real librarian files, and the reviewer's next turn reads it; the cell stops the run at that verdict through `RunControl.interrupt` (the `/stop` path). Asserted: every turn filed through `turn_end`, the second reviewer turn admitted every receipt `_literature_cited` hands on, its report passes its own check under `review_node`'s budgets, the route is within its cap. Routes recorded, not asserted. No code change here.
+- 2026-11-10 — Phase 3 step 0b S4 (store keys and lifecycle; ruling B): `run_research` binds the stores
+  with the toolkit contract (`bind_run_stores`), runs `start_run_stores` before the preflight (start each
+  local store, reconcile as the run's reconciler login), issues each worker's keys (`issue_unit_keys`) and
+  hands them to `attach_worker_runtime(credentials=)`; the keys are revoked (`RunKeys.revoke_all`) after
+  the MCP client and before the connector in the run's teardown, in the setup's teardown, on a failed
+  launch, and in a stop's cleanup (`_interrupt_cleanup` step `revoke_store_keys`, "store keys revoked",
+  skipped with its reason when none are held), through `run_control.credentials`. Tests:
+  `tests/test_store_keys.py`; `tests/test_stop_teardown.py`'s checklist gains the step.
+- 2026-11-10 — S4 review: `run_research`'s outermost `finally` revokes the store keys once more
+  (idempotent), so a teardown cut short leaves none; the stop's `revoke_store_keys` step has the reset's
+  budget (`_INTERRUPT_RESET_TIMEOUT_S`) and runs while any issue is pending. Test:
+  `tests/test_store_keys.py::test_run_research_revokes_every_key_it_issued_however_it_ends`.
+- 2026-11-10 — S4: a setup that fails releases the run's toolkit contract and stores
+  (`release_run_contract`/`release_run_stores` were not called on that path, so a process whose setup
+  failed held the contract for good); a run reads only the stores it bound (`_bound_stores`), never a
+  block read afresh from the file when its own configuration declares none.
+- 2026-11-10 — S4 follow-up (coordinator rulings 1, 2, 4): `record_run_process`, `run_process_alive`,
+  `sweep_dead_runs`; `start_run_stores` checks the store ready (`health.ready_problems`) and sweeps dead
+  runs' keys before it reconciles with the reconciler's own S3 key (`s3=`).
+- 2026-11-10 — S4 follow-up review: `run_process_record`; `run_process_alive` returns None for a malformed
+  record; `sweep_dead_runs` re-checks liveness per principal.
+- 2026-11-10 — S5 follow-up: `attach_worker_runtime(reconciler=)` and `_store_records(credentials, reconciler=None)`: each worker's `StoreRecords` reads the catalog and stamps flags through the runtime's reconciler login, found by `run_reconciler(keys, store)` among the run's keys (`start_run_stores` issued it); the setup passes the default store's.
+- 2026-11-10 — Phase 3 step 0b S9: the obs-db leaves the graph. `_build_task` loses `obs_config` (no observation-database lines in the analysts' task; `observations.py` is deleted). The lead reads the stores' catalogs as itself: `run_research` issues it a reader-class login (`issue_unit_keys(..., role_class="reader")`, new parameter) and passes it to `attach_lead_runtime(catalog=)` → `readonly_tools_for(catalog=)` (`include_data_catalog` is gone); the reviewer gets no catalog. Test: `tests/test_store_query.py`.
+- 2026-11-10 — S9 follow-up (main rulings 5-6): `issue_unit_keys` loses `role_class` (the store's `roles` decide; their default makes the lead a reader) and raises when the run binds stores without the default one, so the lead's `catalog_query` binds the default store or the run stops, never silently storeless.
+- 2026-11-11 — S13a follow-up (main's ruling 4): `RunLaunch`, the launch step and its end as one seam; `run_research` takes its launch, key hand-over and revocations through it (two harmless changes: a failed launch revokes its keys before it releases the contract and stores, and the run's last `finally` releases even when its revoke is cancelled), and `tests/live_store.run_stores` calls it instead of restating the order. Tests: `tests/test_run_launch.py`.
+- 2026-11-11 — S13a follow-up 2 (main's rulings): `wire_lead`, the lead's wiring as `run_research` gives it (catalog login, web source, retrieval), used by `run_research` and by every live cell that drives a real lead; `StoreNotReady` (raised by `start_run_stores` for a store that cannot serve) is what the live cells skip on. Tests: `tests/test_run_launch.py`.
+- 2026-11-11 — S13a follow-up 3 (main's ruling 3): `attach_lead_runtime` loses its unused `human_handler` parameter (no caller passed one since `wire_lead`; the lead reaches the human through the quick channel and `run_cycle(human_handler=)`).
+- 2026-11-11 — S13a follow-up 3 (main's ruling 1): `StoreNotReady` narrows to servers that do not start or answer (`store.launch.start` refused, or the `store_servers` item of `ready_problems`); a running store's other readiness problems are plain `RuntimeError`s, which fail a live cell.

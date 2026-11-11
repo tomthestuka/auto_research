@@ -1,17 +1,15 @@
-"""Opt-in live sandbox tests.
+"""Opt-in live run: the analysts acquire archive data into the data store.
 
 Activate with: pytest tests/test_live_sandbox.py --live
 
-Test 1 — xspec_utils on local Cyg X-1 observations:
-  Analyst agents self-direct to use xspec_utils from research_toolkit,
-  run it against /data/fzhou/XSPEC/Cyg_X-1/, and produce an AnalystReport.
-  Scope: one self-selected simultaneous epoch; continuum characterization only.
+HEASARC retrieval (agent self-corrects): a full ``run_research`` on the default configuration in
+which the analysts call the toolkit's archive tool (``heasarc_utils.acquire``), which stores each
+download as a product in the data store; when their first arguments are wrong, the error-feedback
+loop corrects them. Scope: NICER observations of Cyg X-1 since 2024-01-01. Needs the real store
+(the run's launch step starts it; migration item S11 makes it).
 
-Test 2 — HEASARC retrieval tool (agent self-corrects):
-  Analyst agents self-direct to call the human-authored HEASARC retrieval
-  tool. If initial arguments are wrong the error-feedback loop self-corrects.
-  Scope: NICER observations of Cyg X-1 since 2024-01-01.
-  Requires the HEASARC retrieval tool to be registered in TOOL_MANIFEST.
+The former ``test_xspec_local`` (a full run fitting one self-selected Cyg X-1 epoch) was deleted
+2026-11-11; the full-run fit is exercised by the per-role live cells and the end-to-end live runs.
 
 Logs: logs/dev/step-11/
 """
@@ -51,47 +49,11 @@ def _monitor_paths(name: str) -> tuple[Path, Path]:
     return jsonl, jsonl.with_suffix(".md")
 
 
-def test_xspec_local() -> None:
-    """Analyst agents fit the Cyg X-1 X-ray continuum for one self-selected epoch.
-
-    No LLM guidance: agents self-direct based on the tool catalogue
-    injected by tool_dispatch_node from ToolkitRegistry.
-    """
-    import asyncio
-    from auto_research.graph.runtime import run_research
-    from auto_research.schemas import ResearchRequest
-
-    request = ResearchRequest(
-        question=(
-            "Select one simultaneous IXPE, NuSTAR, and NICER observation epoch of Cyg X-1, "
-            "fit the broadband X-ray continuum, and compare the fitted parameters with "
-            "published literature values."
-        )
-    )
-
-    monitor_jsonl, monitor_md = _monitor_paths("test_xspec_local")
-    run = asyncio.run(run_research(request, chatter=10, monitor_jsonl=monitor_jsonl))
-    verdict = run.verdict
-    run.monitor.write_markdown(monitor_md)
-
-    log_data = {
-        "request": request.question,
-        "accepted": verdict.accepted,
-        "rationale": verdict.rationale,
-        "assign_to": verdict.assign_to,
-        "monitor_jsonl": str(monitor_jsonl),
-        "monitor_markdown": str(monitor_md),
-    }
-    _log("test_xspec_local", log_data)
-
-    assert verdict is not None, "Expected a ReviewVerdict"
-
-
 def test_heasarc_selfcorrect() -> None:
     """Analyst agents retrieve NICER Cyg X-1 observations from HEASARC since 2024-01-01.
 
-    Requires the HEASARC retrieval tool to be registered in research_toolkit.
-    If initial arguments are wrong, the error-feedback loop self-corrects.
+    The acquire tool stores each download in the data store. If initial arguments are wrong, the
+    error-feedback loop self-corrects.
     No LLM guidance: agents self-direct using the tool catalogue.
     """
     import asyncio
@@ -101,11 +63,14 @@ def test_heasarc_selfcorrect() -> None:
     request = ResearchRequest(
         question=(
             "Retrieve NICER monitoring observations of Cyg X-1 from the HEASARC public "
-            "archive since 2024-01-01, identify which are absent from the local database, "
+            "archive since 2024-01-01, identify which are absent from the data store, "
             "and characterize the long-term timing behavior."
         )
     )
 
+    from tests.live_store import require_store
+
+    require_store()  # a store that is not ready skips the run with its own refusal
     monitor_jsonl, monitor_md = _monitor_paths("test_heasarc_selfcorrect")
     run = asyncio.run(run_research(request, chatter=10, monitor_jsonl=monitor_jsonl))
     verdict = run.verdict

@@ -115,7 +115,8 @@ private_folders = _builtin_function("private_folders")
 
 def run_in_environment(
     environment, command: str, *, toolkit_root: Path, label: str, timeout: int = 300,
-    toolkit_on_path: bool = True,
+    toolkit_on_path: bool = True, store_env: dict[str, str] | None = None,
+    readonly: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess:
     """Run one shell ``command`` in ``environment`` the way a unit's REPL and shell start: the
     shared launcher (``envs.in_environment``: a clean start, the activation sourced there, the
@@ -123,84 +124,108 @@ def run_in_environment(
     prefix, activation and boot file bound read-only). A pipeline environment's
     activation is never sourced in this process. Used by the launch checks (the probe, the private
     variables) and the coder's shell variables. ``toolkit_on_path=False``: the toolkit is bound but
-    left off ``PYTHONPATH``."""
+    left off ``PYTHONPATH``. ``store_env``: the calling unit's store credentials
+    (``store.keys.Credentials.env``), with the toolkit's commit and the environment's stamped
+    fingerprint beside them (:func:`keyed_env`), exported to ``command`` after the activation from a
+    file in the jail's private ``/tmp`` (:func:`write_store_env`), never on a command line.
+    ``readonly``: further folders bound read-only (the human's producer job reads its sources there,
+    ``python -m auto_research.store produce``)."""
     from auto_research.sandbox.envs import in_environment
     from auto_research.sandbox.jail import analysis_policy, jail_home, private_tmp, wrap
 
+    label = _keyed_label(label, store_env)
     home = jail_home(label)
     tmp = private_tmp(label, home)
-    script = in_environment(environment, command, toolkit_root if toolkit_on_path else None)
-    readonly = tuple(str(p) for p in (environment.prefix, environment.activate, environment.boot) if p is not None)
-    argv = wrap(["/bin/bash", "--noprofile", "--norc", "-c", script],
-                analysis_policy(label=label, toolkit_root=toolkit_root, tmp=tmp, home=home,
-                                readonly=readonly))
-    env = {name: os.environ[name] for name in _INI_BASE_VARS if name in os.environ}
-    env.update(PATH=_INI_BASE_PATH, HOME=str(home), TMPDIR="/tmp")
-    return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout, cwd=str(home),
-                          stdin=subprocess.DEVNULL)
+    if store_env:
+        from auto_research.provenance.capture import toolkit_commit
+
+        store_env = keyed_env(store_env, commit=toolkit_commit(Path(toolkit_root)),
+                              fingerprint=_call_stamp(environment))
+    secrets_file = write_store_env(store_env, tmp, shell=True)
+    try:
+        if secrets_file is not None:
+            command = (f"builtin set -a; builtin source /tmp/{secrets_file.name}; builtin set +a; "
+                       f"/usr/bin/rm -f /tmp/{secrets_file.name}; {command}")
+        script = in_environment(environment, command, toolkit_root if toolkit_on_path else None)
+        readonly = tuple(str(p) for p in (environment.prefix, environment.activate, environment.boot)
+                         if p is not None) + tuple(str(p) for p in readonly)
+        argv = wrap(["/bin/bash", "--noprofile", "--norc", "-c", script],
+                    analysis_policy(label=label, toolkit_root=toolkit_root, tmp=tmp, home=home,
+                                    readonly=readonly))
+        env = {name: os.environ[name] for name in _INI_BASE_VARS if name in os.environ}
+        env.update(PATH=_INI_BASE_PATH, HOME=str(home), TMPDIR="/tmp")
+        return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout, cwd=str(home),
+                              stdin=subprocess.DEVNULL)
+    finally:
+        if secrets_file is not None:
+            secrets_file.unlink(missing_ok=True)
 
 
-#: The jailed one-shot call: ``argv[1]`` a JSON ``[module, fn, args, result file]``; the return is
-#: written as JSON to the result file, in the jail's private ``/tmp`` (stdout stays the activation's).
-_CALL_SCRIPT = (
-    "import importlib, json, sys\n"
-    "module, fn, args, out = json.loads(sys.argv[1])\n"
-    "value = getattr(importlib.import_module(module), fn)(*args)\n"
-    "with open(out, 'w', encoding='utf-8') as handle:\n"
-    "    json.dump(value, handle, default=str)\n"
-)
+def _keyed_label(label: str, store_env: dict[str, str] | None) -> str:
+    """``label``, made the keys' own when a call carries store keys: a one-shot jail's home and
+    private ``/tmp`` are one per label, so two units' calls of one label never share the folder their
+    keys pass through."""
+    if not store_env:
+        return label
+    import hashlib
+
+    digest = hashlib.sha256(json.dumps(sorted(store_env.items())).encode()).hexdigest()[:12]
+    return f"{label}-{digest}"
 
 
-#: The largest return a jailed one-shot call may hand back.
-_CALL_RESULT_CAP = 64 * 1024 * 1024
+#: The commit a keyed tool process runs the toolkit at, and the environment state its receipts stamp:
+#: the toolkit's store helper writes both onto what it produces, and produces nothing without them.
+TOOLKIT_COMMIT_VARIABLE = "AR_TOOLKIT_COMMIT"
+ENV_FINGERPRINT_VARIABLE = "AR_ENV_FINGERPRINT"
 
 
-def call_in_jail(module: str, fn: str, args: list, *, toolkit_root: Path, label: str, timeout: int = 300,
-                 environment=None):
-    """``module.fn(*args)`` from the toolkit at ``toolkit_root``, run once inside the analysis jail in
-    ``environment`` (default: the toolkit's default one; :func:`run_in_environment`, ``python -P``,
-    bytecode in the jail's private ``/tmp``), and its JSON-decoded return, written by the call to a
-    file in that private ``/tmp`` and read here. The orchestrator never imports toolkit code (D25):
-    the lead's catalog read and the launch's catalog health check come here. Raises
-    ``RuntimeError`` naming the call when it fails or its return does not decode."""
+def keyed_env(store_env: dict[str, str], *, commit: str | None, fingerprint: str | None) -> dict[str, str]:
+    """A unit's store keys with :data:`TOOLKIT_COMMIT_VARIABLE` and :data:`ENV_FINGERPRINT_VARIABLE`
+    beside them: the values the runtime stamps on that process's receipts. One left out when unknown
+    (no commit, an environment with no lock), so the helper refuses rather than writing a guess."""
+    out = dict(store_env)
+    out.update({name: value for name, value in ((TOOLKIT_COMMIT_VARIABLE, commit),
+                                                 (ENV_FINGERPRINT_VARIABLE, fingerprint)) if value})
+    return out
+
+
+def _call_stamp(environment) -> str | None:
+    """The environment state a one-shot call's receipt stamps: its fingerprint with the lock written
+    (``envs.fingerprint_and_lock``), None when that cannot be read."""
+    from auto_research.env import env_lock_dir
+    from auto_research.sandbox.envs import fingerprint_and_lock
+
+    try:
+        return fingerprint_and_lock(environment, env_lock_dir())
+    except Exception:  # noqa: BLE001 - unknown: left out, never guessed
+        return None
+
+
+#: The REPL reads its unit's store credentials from the file this variable names (in its private
+#: ``/tmp``), sets them in its environment and removes the file (``persistent._REPL_SCRIPT``).
+STORE_ENV_VARIABLE = "AR_STORE_ENV"
+
+
+def write_store_env(store_env: dict[str, str] | None, private_dir: Path, *, shell: bool = False) -> Path | None:
+    """Write a unit's store credentials into ``private_dir`` (a jail's private ``/tmp``, mode 0700,
+    local disk) as a fresh mode-0600 file: JSON for the REPL, ``NAME='value'`` lines for a shell
+    (``shell``). The way credentials reach a jailed process without a command line (world-readable
+    in ``/proc``) or the launcher's clean start. None when there are none."""
     import shlex
     import uuid
 
-    from auto_research.env import analysis_environment
-    from auto_research.sandbox.jail import jail_home, private_tmp
-
-    environment = environment if environment is not None else analysis_environment()
-    name = f"ar-call-{uuid.uuid4().hex}.json"
-    command = ("PYTHONPYCACHEPREFIX=/tmp/ar-pycache "  # never a planted in-tree `.pyc`
-               + " ".join(shlex.quote(part) for part in (
-                   str(environment.python), "-P", "-c", _CALL_SCRIPT,
-                   json.dumps([module, fn, list(args), f"/tmp/{name}"]))))
-    completed = run_in_environment(environment, command, toolkit_root=Path(toolkit_root), label=label,
-                                   timeout=timeout)
-    # The host side of the jail's /tmp (run_in_environment's own: the label's private folder).
-    result = private_tmp(label, jail_home(label)) / name
-    call = f"{module}.{fn}"
-    try:
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-            raise RuntimeError(f"{call} failed in the jail: "
-                               + (detail[-1] if detail else f"exit {completed.returncode}"))
-        try:
-            # Written by toolkit code: opened without following a link, a regular file, capped.
-            import stat
-
-            fd = os.open(result, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(fd, "rb") as handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                    raise ValueError("not a regular file")
-                data = handle.read(_CALL_RESULT_CAP + 1)
-            if len(data) > _CALL_RESULT_CAP:
-                raise ValueError(f"larger than {_CALL_RESULT_CAP} bytes")
-            return json.loads(data.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
-            raise RuntimeError(f"{call} returned no readable JSON from the jail: {exc}") from None
-    finally:
-        result.unlink(missing_ok=True)
+    if not store_env:
+        return None
+    bad = [name for name in store_env if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name)]
+    if bad:
+        raise ValueError(f"not variable names: {bad}")
+    path = Path(private_dir) / f"ar-store-{uuid.uuid4().hex}.env"
+    text = ("".join(f"{name}={shlex.quote(value)}\n" for name, value in store_env.items()) if shell
+            else json.dumps(store_env))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return path
 
 
 def analysis_activation_env(orch: dict, *, home: str | None = None) -> dict[str, str]:

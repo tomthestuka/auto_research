@@ -1,20 +1,20 @@
 """Opt-in LIVE test: the coder's structure context actually conveys the absolute toolkit
-root + the obsdb validation-data paths, so a real Claude Agent SDK author can ``ls`` them
-cleanly on the first try — no wrong-root guessing, no ``find /`` hunting (todo #2).
+root, so a real Claude Agent SDK author can ``ls`` it cleanly on the first try — no wrong-root
+guessing, no ``find /`` hunting (todo #2). Since step 0b the context names no store location: a
+tool reaches stored data through ``record`` arguments.
 
 Activate with:
     pytest tests/test_live_path_hints.py --live -q
 
 What it proves: we build the **real** ``_build_structure_context`` (the exact block the runtime
-injects into the author's first turn) and ask the coder to ``ls`` (a) its research_toolkit
-working directory and (b) every mission observation directory — WITHOUT repeating any absolute
-path in the task prompt. The coder must read the paths out of the structure context. We then
+injects into the author's first turn) and ask the coder to ``ls`` its toolkit working
+directory — WITHOUT repeating its absolute path in the task prompt. The coder must read the paths out of the structure context. We then
 assert on the recorded tool stream (``ToolUseBlock`` commands + their ``ToolResultBlock``
-outcomes), not the model's narration: each target was ``ls``'d at its absolute path and the
+outcomes), not the model's narration: the root was ``ls``'d at its absolute path and the
 result was clean (no error), and the author never hunted (no ``find /``, no ``/root/`` guess).
 
-Read-only by construction: the coder is told not to author/edit anything, runs against a
-throwaway clone of ``toolkit_root`` (never the live checkout), and the obsdb is only listed.
+Read-only by construction: the coder is told not to author/edit anything and runs against a
+throwaway clone of ``toolkit_root`` (never the live checkout).
 Requires the Claude Agent SDK CLI + a resolvable coder model + the analyst env.
 """
 
@@ -29,7 +29,6 @@ from auto_research.graph.runtime import load_orchestration_config
 from auto_research.sandbox.merge_flow import (
     _author_env,
     _build_structure_context,
-    _observation_paths,
     _resolve_coder_model,
 )
 
@@ -50,7 +49,7 @@ def _scratch_clone(tmp_path) -> Path:
     return clone
 
 
-def test_live_coder_knows_toolkit_and_obsdb_paths(tmp_path):
+def test_live_coder_knows_the_toolkit_root(tmp_path):
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,
@@ -61,27 +60,20 @@ def test_live_coder_knows_toolkit_and_obsdb_paths(tmp_path):
     )
 
     clone = _scratch_clone(tmp_path)
-    obs = _observation_paths()
-    if not obs:
-        pytest.skip("no mission observation paths configured (config/observations.yaml)")
 
     # The exact structure context the runtime injects — built for the clone as the author's cwd.
     structure_context = _build_structure_context(clone)
-    # The paths the coder must discover from that context (NOT restated in the task below).
+    # The path the coder must discover from that context (NOT restated in the task below).
     toolkit_abs = str(clone)
-    obs_abs = sorted({str(p) for p in obs.values()})
 
     message = (
         "## Local structure context\n" + structure_context + "\n\n"
         "## Task (read-only locate check — author/edit nothing, run only the probes below)\n"
-        "Confirm you can locate your workspace and validation data using ONLY the absolute "
-        "paths given in the structure context above. Run these Bash probes IN ORDER, attempting "
-        "each even if one errors, and use each absolute path VERBATIM from the context — do not "
-        "search or guess:\n"
-        "1. `ls -la` your research_toolkit working directory (your cwd / toolkit root).\n"
-        "2. `ls -la` each mission observation directory where your validation ObsIDs live "
-        f"({len(obs_abs)} of them).\n"
-        "After the last probe, reply DONE. Author nothing."
+        "Confirm you can locate your workspace using ONLY the absolute path given in the "
+        "structure context above. Run this Bash probe, using the absolute path VERBATIM from the "
+        "context — do not search or guess:\n"
+        "1. `ls -la` your toolkit working directory (your cwd / toolkit root).\n"
+        "After the probe, reply DONE. Author nothing."
     )
 
     options = ClaudeAgentOptions(
@@ -131,9 +123,6 @@ def test_live_coder_knows_toolkit_and_obsdb_paths(tmp_path):
     assert cleanly_listed(toolkit_abs), (
         f"coder did not cleanly `ls` the toolkit root {toolkit_abs!r}; bash={bash}"
     )
-    # 2. Clean ls of every mission observation directory at its absolute path.
-    missed = [p for p in obs_abs if not cleanly_listed(p)]
-    assert not missed, f"coder did not cleanly `ls` obsdb path(s) {missed}; bash={bash}"
-    # 3. No hunting: it used the given paths instead of searching for the checkout.
+    # 2. No hunting: it used the given paths instead of searching for the checkout.
     hunted = [cmd for cmd, _ in bash if "find /" in cmd or "/root/" in cmd]
     assert not hunted, f"coder hunted for paths instead of using the hints: {hunted}"

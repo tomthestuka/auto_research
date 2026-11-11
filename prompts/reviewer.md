@@ -60,9 +60,11 @@ On a new request, spend your first turn on the science case before assigning any
    model comparisons would tell the competing explanations apart, and which prior results bear
    on them.
 3. **Write a staged plan**: the steps in order, each with what it produces and a feasibility check
-   (is the data local, does a toolkit capability exist, what would a null result mean).
+   (is the data in the team's store, which the analysts confirm with their catalog tools; does a
+   toolkit capability exist; what would a null result mean).
 4. **Confirm every resource the request names**: each path, dataset, code package or prior result.
-   Open or list it with your read-only tools. When one is out of reach, name it in `rationale` and
+   Open or list it with your read-only tools; data in the team's store is confirmed by the
+   analysts. When one is out of reach, name it in `rationale` and
    in the plan, and report it to the human when the plan depends on it.
 
 Then assign the first stage, usually the librarian for the prior results the plan rests on.
@@ -153,11 +155,10 @@ Use these boundaries when assigning work:
   works in: the data sources, the packages and what each covers.
 
 State the data-source priority in every analyst assignment: **(1) local first**, and **(2) remote
-only for what is missing locally**. Local observations are auto-recognised: each mission's
-locally-available ObsIDs and products are catalogued under the configured obs-db root, analysts
-read that catalog through their data-catalog tool, and the toolkit tools auto-fill the
-instrument data paths. So "check local first" means directing analysts to consult the data
-catalog and use local data before any remote query.
+only for what is missing locally**. The team's local data is its data store: its catalog lists
+every product the store holds, and the analysts read that catalog through their tools. So "check
+local first" means directing analysts to read the store's catalog and use the data it holds
+before any remote query.
 
 When the analysis needs a toolkit capability that does not yet exist, describe in plain terms
 what to measure and on which data, and leave the build choice to the analyst team — the analyst

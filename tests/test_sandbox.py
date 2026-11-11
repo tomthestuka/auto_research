@@ -259,31 +259,17 @@ class TestSandboxToolProvider:
         assert out.is_error and "boom" in out.text
         assert prov.results[-1].exit_code == 1
 
-    def test_instrument_paths_autofilled_from_config(self, monkeypatch) -> None:
-        import auto_research.agents.react as react
+    def test_no_path_argument_is_filled_by_the_runtime(self) -> None:
+        """Step 0b: a tool names records, never a store's location, so the runtime fills no
+        observation folder into a path argument the model left out."""
         from auto_research.agents.react import SandboxToolProvider
-        monkeypatch.setattr(react, "_observation_path_args",
-                            lambda: {"ixpe_path": "/cfg/IXPE", "nustar_path": "/cfg/NuSTAR"})
         sb = _FakeSandbox()
         reg = _FakeRegistry(known={"tk.load_data"}, mcp=set(),
                             schema={"properties": {"epoch": {"kind": "setting"}, "ixpe_path": {"kind": "path"}}})
         prov = SandboxToolProvider(reg, sb)
         asyncio.run(prov.execute("tk.load_data", {"epoch": "{}"}))
         _, _, args = sb.tool_calls[0]
-        assert args["ixpe_path"] == "/cfg/IXPE"   # injected from config
-        assert "nustar_path" not in args           # not declared by tool → not injected
-
-    def test_model_supplied_path_not_overridden(self, monkeypatch) -> None:
-        import auto_research.agents.react as react
-        from auto_research.agents.react import SandboxToolProvider
-        monkeypatch.setattr(react, "_observation_path_args", lambda: {"ixpe_path": "/cfg/IXPE"})
-        sb = _FakeSandbox()
-        reg = _FakeRegistry(known={"tk.load_data"}, mcp=set(),
-                            schema={"properties": {"ixpe_path": {"kind": "path"}}})
-        prov = SandboxToolProvider(reg, sb)
-        asyncio.run(prov.execute("tk.load_data", {"ixpe_path": "/custom/IXPE"}))
-        _, _, args = sb.tool_calls[0]
-        assert args["ixpe_path"] == "/custom/IXPE"
+        assert args == {"epoch": "{}"}
 
     def test_malformed_figure_dropped_not_fatal(self) -> None:
         """A bad figure dict is dropped with a note, never raised — the whole run must

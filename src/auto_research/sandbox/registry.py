@@ -9,6 +9,9 @@ where ToolSpec is a TypedDict with keys:
   fn          – callable name within the module (str)
   description – human-readable description shown to analyst workers (str)
   args_schema – JSON Schema object describing the args dict (dict)
+  writes      – optional: the stores the tool creates products in (list of store names)
+  algorithm_version – the version of the tool's algorithm, part of a product's identity (str);
+                required with ``writes`` (``provenance.inputs.spec_problems``)
 
 The registry reads each manifest **statically**: ``<package>/skills/__init__.py`` is parsed and its
 one ``TOOL_MANIFEST = {...}`` dict literal evaluated as data (:func:`manifest_literal`; the gate's
@@ -28,7 +31,7 @@ import ast
 import logging
 import re
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import yaml
 
@@ -40,6 +43,8 @@ class ToolSpec(TypedDict):
     fn: str
     description: str
     args_schema: dict
+    writes: NotRequired[list[str]]
+    algorithm_version: NotRequired[str]
 
 
 # Sandbox per-tool-call timeout. A tool's call is SIGTERM-killed by the sandbox at this many
@@ -62,6 +67,11 @@ REF_NOTE = (
     'value>, "reason": "<why this value>"}, and the call records both.'
 )
 
+#: What a ``record`` argument adds to its description: an object in a named store.
+_RECORD_NOTE = (' Pass {"store": "<store name>", "bucket": "<bucket>", "key": "<object key>"} for '
+                'the version the store holds now, adding "version_id": "<version id>" to read an '
+                'earlier one (a list passes several); the call records the version it read.')
+
 #: What each kind adds to an argument's description, after the toolkit's own words.
 _KIND_NOTES = {
     "data": (' Pass {"$ref": "<handle>#/<key>"}, the result of your own call that produced it '
@@ -71,6 +81,7 @@ _KIND_NOTES = {
         '"reason": "<why this value>"}'
     ),
     "path": ' A path as text, or {"$ref": "<handle>"} of a file a tool of yours returned.',
+    "record": _RECORD_NOTE,
 }
 #: What an ``output`` argument adds, by its shape: the runtime places it in the call's own folder.
 _OUTPUT_NOTES = {
@@ -80,18 +91,15 @@ _OUTPUT_NOTES = {
     "prefix": (" A file-name prefix: the runtime places it in this call's own folder, keeping the "
                "name alone (leave it out for {default})."),
 }
-#: The same, for a call path that takes typed values only (the lead's in-process catalog read).
-_TYPED_NOTES = {"path": " A path as text."}
 
 
-def provider_schema(schema: dict | None, *, references: bool = True) -> dict:
+def provider_schema(schema: dict | None) -> dict:
     """An ``args_schema`` as a provider receives it: ``kind`` and ``default`` taken out (the
     runtime's keys, which some vendors' strict schemas refuse) and said in each description; a data
     argument takes no type (a reference, or a list of them), nor does a parameter (a reference,
     or a value with its reason, whose shape the schema keeps under ``value``), nor a path (text,
-    or a reference to a file). An ``output`` argument loses its ``shape`` key and leaves ``required``:
-    the runtime fills it in the call's own folder, and its description says so. ``references=False``: a call path that takes typed values only, so
-    no description offers a reference (the lead's in-process ``data_catalog``)."""
+    or a reference to a file), nor a record (one ``{"store", "bucket", "key"[, "version_id"]}``, or a list). An ``output`` argument loses its ``shape`` key and leaves ``required``:
+    the runtime fills it in the call's own folder, and its description says so."""
     import copy
     import json
 
@@ -106,7 +114,7 @@ def provider_schema(schema: dict | None, *, references: bool = True) -> dict:
         kind = prop.pop("kind", None)
         shape = prop.pop(OUTPUT_SHAPE_KEY, None) if kind == "output" else None
         has_default, default = "default" in prop, prop.pop("default", None)
-        note = (_KIND_NOTES if references else _TYPED_NOTES).get(kind, "")
+        note = _KIND_NOTES.get(kind, "")
         if kind == "output":
             named = output_name(default) if has_default else ""
             fallback = json.dumps(named) if named else ("the argument's name" if shape == "file" else "the tool's name")
@@ -118,13 +126,13 @@ def provider_schema(schema: dict | None, *, references: bool = True) -> dict:
         elif has_default:
             note += f" Default: {json.dumps(default)}."
         description = (str(prop.get("description") or "").rstrip() + note).strip()
-        if kind == "data":  # a reference, or a list or dict of references: no type
+        if kind in ("data", "record"):  # a reference or a record, or a list of them: no type
             prop = {"description": description}
         elif kind == "parameter":
             value = {k: v for k, v in prop.items() if k != "description"}
             # No type: a reference, a value with its reason, or a list of references.
             prop = {"properties": {"value": value, "reason": {"type": "string"}}, "description": description}
-        elif kind == "path" and references:  # text, or a reference object: no type
+        elif kind == "path":  # text, or a reference object: no type
             prop = {k: v for k, v in prop.items() if k != "type"} | {"description": description}
         elif description:
             prop["description"] = description
@@ -233,7 +241,7 @@ class ToolkitRegistry:
         self._manifest_packages: list[str] = []
         #: package → why it exposed no tools on the last load (an import error, no TOOL_MANIFEST).
         self.import_errors: dict[str, str] = {}
-        #: why a loaded tool's arguments cannot be validated (``provenance.inputs.manifest_problems``).
+        #: why a loaded tool's entry cannot be validated (``provenance.inputs.spec_problems``).
         self.manifest_errors: list[str] = []
         #: manifest keys outside ``<toolkit name>.<package>.<tool>`` (``ToolkitContract.key_problem``);
         #: their tools are not served.
@@ -288,11 +296,10 @@ class ToolkitRegistry:
             self._load_tool_config(pkg, list(manifest.keys()))
         for name in self._disabled:
             self._tools.pop(name, None)
-        from auto_research.provenance.inputs import manifest_problems
+        from auto_research.provenance.inputs import spec_problems
 
         self.manifest_errors = [problem for name, spec in self._tools.items()
-                                for problem in manifest_problems(
-                                    name, spec.get("args_schema") if isinstance(spec, dict) else None)]
+                                for problem in spec_problems(name, spec)]
         self._loaded = True
 
     def reload(self) -> None:
@@ -339,6 +346,17 @@ class ToolkitRegistry:
         if tool_name not in self._tools:
             raise KeyError(f"unknown tool: {tool_name!r}")
         return self._tools[tool_name]
+
+    def writes(self, tool_name: str) -> list[str]:
+        """The stores ``tool_name`` creates products in (its manifest ``writes``; ``[]`` for none)."""
+        writes = self.spec(tool_name).get("writes")
+        return list(writes) if isinstance(writes, list) else []
+
+    def algorithm_version(self, tool_name: str) -> str | None:
+        """The version of ``tool_name``'s algorithm (its manifest ``algorithm_version``), part of
+        the identity of every product it writes; ``None`` when it declares none."""
+        version = self.spec(tool_name).get("algorithm_version")
+        return version if isinstance(version, str) else None
 
     def _load_tool_config(self, pkg: str, tool_names: list[str]) -> None:
         """Read ``<pkg>/tool_config.yaml`` (optional) for per-tool sandbox call-timeout ceilings.
@@ -497,6 +515,7 @@ def check_toolkit_manifests(root: Path | None = None) -> None:
         )
     if registry.manifest_errors:
         raise RuntimeError(
-            "toolkit arguments the input validator cannot check: " + "; ".join(registry.manifest_errors)
-            + f". Declare each argument's kind (and each optional parameter's default) in {root}."
+            "toolkit manifest entries the input validator cannot check: " + "; ".join(registry.manifest_errors)
+            + f". Declare each argument's kind (and each optional parameter's default), and each "
+            f"writing tool's writes and algorithm_version, in {root}."
         )

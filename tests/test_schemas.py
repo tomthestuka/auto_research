@@ -168,7 +168,7 @@ def test_tool_spec_round_trips_and_auto_ids():
         proposed_tool_name="fit_retbb_hss",
         target_domain="xspec_utils",
         disposition="extend_existing",
-        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
         proposed_checks=[
             {"kind": "metamorphic", "description": "Load-order independent", "tolerance": 0.01},
             {"kind": "sanity-bound", "description": "pol <= 1; chi2/dof finite"},
@@ -181,7 +181,7 @@ def test_tool_spec_round_trips_and_auto_ids():
     assert restored == spec
     assert restored.id.startswith("toolspec-")  # auto-generated when omitted
     assert restored.disposition == "extend_existing"
-    assert restored.validation_data[0].synthetic is False
+    assert restored.validation_data[0].version_id == "v1"  # a record, pinned to its version
     assert restored.replication_tolerance is None  # optional, lead-finalised
 
 
@@ -194,7 +194,7 @@ def test_authoring_decision_round_trips():
         proposed_tool_name="pcube",
         target_domain="xspec_utils",
         disposition="extend_existing",
-        validation_data=[{"mission": "IXPE", "obsid": "01002901"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
     )
     spec2 = spec.model_copy(update={"proposed_tool_name": "pcube_plot"})
     # A8: an ordered dependency chain (data tool → companion plotter), not a single tool.
@@ -226,6 +226,18 @@ def test_tool_spec_requires_a_validation_dataset():
         )
 
 
+@pytest.mark.parametrize("record", [
+    {"store": "db", "bucket": "data", "key": "k/s/a.dat"},  # no version: a brief names the version read
+    {"store": "db", "bucket": "data", "key": "", "version_id": "v1"},
+    {"mission": "M", "obsid": "1"},  # the retired observation form
+])
+def test_a_validation_dataset_is_a_whole_record_in_a_store(record):
+    from auto_research.schemas import ValidationDataset
+
+    with pytest.raises(ValidationError):
+        ValidationDataset.model_validate(record)
+
+
 def test_tool_spec_rejects_unknown_disposition():
     with pytest.raises(ValidationError):
         ToolSpec(
@@ -234,7 +246,7 @@ def test_tool_spec_rejects_unknown_disposition():
             proposed_tool_name="z",
             target_domain="xspec_utils",
             disposition="rewrite_everything",
-            validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+            validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
         )
 
 
@@ -247,7 +259,7 @@ def test_analyst_report_carries_tool_request():
             "science_context": "Need retBB.",
             "expected_behavior": "add_retbb(indices).",
             "proposed_tool_name": "fit_retbb_hss",
-            "validation_data": [{"mission": "IXPE", "obsid": "02008401"}],
+            "validation_data": [{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
         },
     )
 
@@ -262,7 +274,7 @@ def test_analyst_tool_request_round_trips_and_requires_validation_data():
         expected_behavior="add_retbb(indices) should leave gain untied unless asked.",
         proposed_tool_name="fit_retbb_hss",
         observed_issue="On obsid 02008401 the gain came back tied; chi2/dof inflated.",
-        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
         notes="maybe a metamorphic load-order check would catch this.",
     )
     restored = AnalystToolRequest.model_validate(req.model_dump(mode="json"))
@@ -274,7 +286,7 @@ def test_analyst_tool_request_round_trips_and_requires_validation_data():
         science_context="x",
         expected_behavior="y",
         proposed_tool_name="z",
-        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
     )
     assert nc.request_kind == "new_capability"
     assert nc.observed_issue is None
@@ -402,7 +414,7 @@ def test_tool_spec_fix_existing_round_trips():
         target_domain="xspec_utils",
         disposition="extend_existing",
         observed_issue="On obsid 02008401 the gain came back tied; chi2/dof inflated.",
-        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
     )
 
     restored = ToolSpec.model_validate(spec.model_dump(mode="json"))
@@ -416,7 +428,7 @@ def test_tool_spec_fix_existing_round_trips():
         proposed_tool_name="z",
         target_domain="xspec_utils",
         disposition="new_package",
-        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
     )
     assert nc.request_kind == "new_capability"
     assert nc.observed_issue is None
@@ -431,7 +443,7 @@ def test_tool_spec_rejects_unknown_request_kind():
             proposed_tool_name="z",
             target_domain="xspec_utils",
             disposition="extend_existing",
-            validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+            validation_data=[{"store": "db", "bucket": "data", "key": "k/s/a.dat", "version_id": "v1"}],
         )
 
 

@@ -30,41 +30,9 @@ _MANIFEST = (
     '    "description": "d", "args_schema": {"properties": {\n'
     '        "out_dir": {"kind": "output", "shape": "folder"},\n'
     '        "out_path": {"kind": "output", "shape": "file"},\n'
-    '        "obs_db_path": {"kind": "path"}, "save_path": {"kind": "path"},\n'
+    '        "data_path": {"kind": "path"}, "save_path": {"kind": "path"},\n'
     '        "log_path": {"kind": "path"}}}}}\n'
 )
-#: The catalog writer the opt-out cases record through: the toolkit's own, copied in read-only.
-def _obsdb_catalog() -> Path:
-    from auto_research.sandbox.merge_flow import _resolve_toolkit_root
-
-    return Path(_resolve_toolkit_root()) / "obsdb_catalog"
-#: A fixture obs-db the opt-out tests build (the real one is read-only to Layer B): one IXPE ObsID at
-#: level 2, its catalog seeded through the writer, so it is healthy before the call.
-def _fixture(call="res = my_tool(str(root))", name="IXPE"):
-    return _FIXTURE.replace("tmp_path / 'IXPE'", f"tmp_path / {name!r}").replace("res = my_tool(str(root))", call)
-
-
-_FIXTURE = (
-    "    import obsdb_catalog.neutral as neutral\n"
-    "    root = tmp_path / 'IXPE'\n"
-    "    evt = root / '01002901' / 'event_l2'\n"
-    "    evt.mkdir(parents=True)\n"
-    "    (evt / 'ixpe01002901_det1_evt2_v01.fits').write_bytes(b'EVT')\n"
-    "    neutral.new(str(root), 'ixpe', '01002901', products=[{'kind': 'level2_evt', 'produced_by': 'heasarc',\n"
-    "                'path': '01002901/event_l2/ixpe01002901_det1_evt2_v01.fits'}])\n"
-    "    res = my_tool(str(root))\n"
-)
-_EVT = "os.path.join('01002901', 'event_l2', 'ixpe01002901_det1_evt2_v01"
-_REDUCE = (  # writes the level-3 PCUBE the mission layout names, and records it
-    "def my_tool(obs_db_path):\n"
-    "    from obsdb_catalog import neutral\n"
-    f"    rel = {_EVT}_rej_src_pcube.fits')\n"
-    "    open(os.path.join(obs_db_path, rel), 'wb').write(b'PCUBE')\n"
-    "    neutral.advance(obs_db_path, 'ixpe', '01002901', level=3,\n"
-    "                    products=[{'kind': 'pcube', 'path': rel, 'produced_by': 'demo'}])\n"
-    "    return {'stdout': 'reduced to level 3'}\n"
-)
-
 _FIG = ('{"path": png, "caption": "c", "mime_type": "image/png", "produced_by": "t", '
         '"created_at": "2026-01-01T00:00:00Z", "sha256": hashlib.sha256(open(png, "rb").read()).hexdigest()}')
 
@@ -94,8 +62,8 @@ CLEAN = {
         "    res = my_tool(tmp_path)\n",
     ),
     "an_input_staged_into_the_output_by_a_link": (  # staging (toolkit e1c21f8): no product, no write
-        "def my_tool(out_dir, obs_db_path):\n"
-        "    os.symlink(os.path.join(str(obs_db_path), 'evt.fits'), os.path.join(str(out_dir), 'evt.fits'))\n"
+        "def my_tool(out_dir, data_path):\n"
+        "    os.symlink(os.path.join(str(data_path), 'evt.fits'), os.path.join(str(out_dir), 'evt.fits'))\n"
         "    return {'stdout': 'done: pd=0.0412', 'pd': 0.0412}\n",
         "    (tmp_path / 'data').mkdir()\n    (tmp_path / 'data' / 'evt.fits').write_bytes(b'EVT')\n"
         "    (tmp_path / 'out').mkdir()\n    res = my_tool(tmp_path / 'out', tmp_path / 'data')\n",
@@ -136,37 +104,6 @@ CLEAN = {
         "def my_tool(out_dir):\n    return {'pd': 0.0412, 'n': 17}\n",
         "    res = my_tool(tmp_path)\n",
     ),
-    "opt_out_reduction_records_and_stays_healthy": (_REDUCE, _FIXTURE),
-    "opt_out_on_a_synthetic_obsid_in_the_fixture": (  # ruling: a marked synthetic ObsID is an obs-db item
-        _REDUCE.replace("01002901", "synth261104-ab12cd"),
-        _FIXTURE.replace("01002901", "synth261104-ab12cd"),
-    ),
-    "opt_out_for_a_mission_no_scanner_knows": (  # ruling H1(2): a healthy catalog is enough
-        _REDUCE, _fixture(name="xmm"),
-    ),
-    "opt_out_re_acquire_leaves_the_catalog_regressed": (  # ruling H1(1): `regressed` is a designed state
-        "def my_tool(obs_db_path):\n"
-        "    from obsdb_catalog import neutral\n"
-        f"    rel = {_EVT}.fits')\n"
-        "    neutral.new(obs_db_path, 'ixpe', '01002901', products=[{'kind': 'level2_evt', 'path': rel, 'produced_by': 'heasarc'}])\n"
-        "    return {'stdout': 're-acquired'}\n",
-        _FIXTURE.replace("    res = my_tool(str(root))\n",
-                         "    pcube = evt / 'ixpe01002901_det1_evt2_v01_rej_src_pcube.fits'\n"
-                         "    pcube.write_bytes(b'PCUBE')\n"
-                         "    neutral.advance(str(root), 'ixpe', '01002901', level=3, products=[{'kind': 'pcube', "
-                         "'produced_by': 'demo', 'path': '01002901/event_l2/' + pcube.name}])\n"
-                         "    res = my_tool(str(root))\n"
-                         "    from obsdb_catalog.healthcheck import healthcheck\n"
-                         "    assert 'regressed' in healthcheck(str(root))\n"),
-    ),
-    "opt_out_in_place_tag_on_a_recorded_file": (  # ruling Q2: the catalog already records it
-        "def my_tool(obs_db_path):\n"
-        f"    with open(os.path.join(obs_db_path, {_EVT}.fits')), 'r+b') as f:\n"
-        "        f.seek(0, 2)\n"
-        "        f.write(b'XFLT0001')\n"
-        "    return {'stdout': 'tagged'}\n",
-        _FIXTURE,
-    ),
     "opt_in_figure_and_table_under_the_output": (
         "def my_tool(out_dir):\n"
         "    png = os.path.join(str(out_dir), 'f.png')\n"
@@ -176,27 +113,6 @@ CLEAN = {
         f"    return {{'stdout': 'pd=0.0412', 'figures': [{_FIG}], 'table': p,\n"
         "            'products': [{'path': p, 'caption': 'PD per band'}]}\n",
         "    res = my_tool(tmp_path)\n",
-    ),
-    "opt_out_det2_files_beside_a_recorded_det1": (  # the catalog lists det1; det2/det3 follow its name
-        _REDUCE.replace("    neutral.advance(", "    open(os.path.join(obs_db_path, rel.replace('_det1_', '_det2_')), 'wb').write(b'P2')\n"
-                        "    neutral.advance("),
-        _FIXTURE,
-    ),
-    "opt_out_temp_file_gone_after_the_call": (  # an astropy-style temp-then-rename leaves nothing new
-        "def my_tool(obs_db_path):\n"
-        f"    target = os.path.join(obs_db_path, {_EVT}.fits'))\n"
-        "    tmp = os.path.join(os.path.dirname(target), 'tmpX1')\n"
-        "    open(tmp, 'wb').write(open(target, 'rb').read() + b'XFLT0001')\n"
-        "    os.rename(tmp, target)\n"
-        "    return {'stdout': 'tagged'}\n",
-        _FIXTURE,
-    ),
-    "opt_in_output_named_after_a_mission": (
-        "def my_tool(out_dir):\n"
-        "    p = os.path.join(str(out_dir), 'r.csv')\n"
-        "    open(p, 'w').write('band,pd\\n2-8,0.0412\\n')\n"
-        "    return {'stdout': 'pd=0.0412', 'products': [{'path': p, 'caption': 'PD per band'}]}\n",
-        "    (tmp_path / 'nustar').mkdir()\n    res = my_tool(tmp_path / 'nustar')\n",
     ),
     "failed_call_is_not_judged": (
         "def my_tool(out_dir):\n    return {'stdout': 'no data', 'exit_code': 1, 'pd': 0.5}\n",
@@ -273,93 +189,6 @@ BREACHES = {
         "    open(p, 'w').write('band,pd\\n2-8,0.0412\\n')\n"
         "    return {'stdout': 'pd=0.0412', 'table': p}\n",
         "    res = my_tool(tmp_path)\n",
-        "layer_b.returns.placed",
-    ),
-    "obsdb_write_with_no_catalog_record": (
-        "def my_tool(obs_db_path):\n"
-        f"    open(os.path.join(obs_db_path, {_EVT}_rej_src_pcube.fits')), 'wb').write(b'PCUBE')\n"
-        "    return {'stdout': 'reduced'}\n",
-        _FIXTURE,
-        "layer_b.returns.obsdb",
-    ),
-    "obsdb_catalog_left_unhealthy": (  # records its PCUBE, leaves the PHA it also wrote uncatalogued
-        _REDUCE.replace("    return {", f"    open(os.path.join(obs_db_path, {_EVT}_rej_src_pha1.fits')), 'wb').write(b'PHA')\n"
-                        "    return {"),
-        _FIXTURE,
-        "layer_b.returns.obsdb",
-    ),
-    "obsdb_write_with_no_record_on_a_synthetic_obsid": (  # the clean synthetic case above is judged
-        "def my_tool(obs_db_path):\n"
-        "    open(os.path.join(obs_db_path, 'synth261104-ab12cd', 'notes.txt'), 'w').write('cache')\n"
-        "    return {'stdout': 'done'}\n",
-        _FIXTURE.replace("01002901", "synth261104-ab12cd"),
-        "layer_b.returns.obsdb",
-    ),
-    "obsdb_write_by_a_subprocess": (  # a name no layout knows: only the before/after walk sees it
-        "def my_tool(obs_db_path):\n"
-        "    import subprocess\n"
-        "    target = os.path.join(obs_db_path, '01002901', 'notes.txt')\n"
-        "    subprocess.run(['sh', '-c', f'printf PCUBE > {target}'], check=True)\n"
-        "    return {'stdout': 'reduced'}\n",
-        _FIXTURE,
-        "layer_b.returns.obsdb",
-    ),
-    "obsdb_write_by_a_rename_into_it": (
-        "def my_tool(obs_db_path):\n"
-        "    import tempfile\n"
-        "    fd, tmp = tempfile.mkstemp()\n"
-        "    os.write(fd, b'PCUBE'); os.close(fd)\n"
-        f"    os.replace(tmp, os.path.join(obs_db_path, {_EVT}_rej_src_pcube.fits')))\n"
-        "    return {'stdout': 'reduced'}\n",
-        _FIXTURE,
-        "layer_b.returns.obsdb",
-    ),
-    "obsdb_unrecorded_file_no_layout_names": (  # healthcheck cannot see it; the record rule does
-        "def my_tool(obs_db_path):\n"
-        "    open(os.path.join(obs_db_path, '01002901', 'notes.txt'), 'w').write('cache')\n"
-        "    return {'stdout': 'done'}\n",
-        _FIXTURE,
-        "layer_b.returns.obsdb",
-    ),
-    "obsdb_catalog_written_by_hand": (
-        "def my_tool(obs_db_path):\n"
-        "    import json\n"
-        f"    rel = {_EVT}_rej_src_pcube.fits')\n"
-        "    open(os.path.join(obs_db_path, rel), 'wb').write(b'PCUBE')\n"
-        "    path = os.path.join(obs_db_path, 'catalog.json')\n"
-        "    cat = json.load(open(path))\n"
-        "    entry = cat['entries']['01002901']\n"
-        "    entry['products'].append({'kind': 'pcube', 'path': rel, 'produced_by': 'demo'})\n"
-        "    entry['max_level'], entry['levels_present'] = 3, [1, 2, 3]\n"
-        "    json.dump(cat, open(path, 'w'))\n"
-        "    return {'stdout': 'reduced'}\n",
-        _FIXTURE,
-        "layer_b.returns.obsdb",
-    ),
-    "obsdb_write_then_raise": (
-        "def my_tool(obs_db_path):\n"
-        "    open(os.path.join(obs_db_path, '01002901', 'notes.txt'), 'w').write('cache')\n"
-        "    raise ValueError('no data')\n",
-        _fixture("import pytest\n    with pytest.raises(ValueError):\n        my_tool(str(root))\n    res = 1"),
-        "layer_b.returns.obsdb",
-    ),
-    "obsdb_write_with_no_record_for_a_mission_no_scanner_knows": (  # found by its catalog all the same
-        "def my_tool(obs_db_path):\n"
-        "    open(os.path.join(obs_db_path, '01002901', 'notes.txt'), 'w').write('cache')\n"
-        "    return {'stdout': 'done'}\n",
-        _fixture(name="xmm"),
-        "layer_b.returns.obsdb",
-    ),
-    "obsdb_item_declared_as_a_product": (
-        _REDUCE.replace("    return {'stdout': 'reduced to level 3'}",
-                        "    return {'stdout': 'reduced', 'products': [{'path': os.path.join(obs_db_path, rel), "
-                        "'caption': 'PCUBE'}]}").replace("def my_tool(obs_db_path):", "def my_tool(obs_db_path, out_dir):"),
-        _fixture("(tmp_path / 'out').mkdir()\n    res = my_tool(str(root), tmp_path / 'out')"),
-        "layer_b.returns.placed",
-    ),
-    "output_folder_holding_the_obsdb": (
-        _REDUCE.replace("def my_tool(obs_db_path):", "def my_tool(obs_db_path, out_dir):"),
-        _fixture("res = my_tool(str(root), tmp_path)"),
         "layer_b.returns.placed",
     ),
     "product_through_a_link": (
@@ -460,9 +289,9 @@ BREACHES = {
         "layer_b.returns.unclassified",
     ),
     "a_write_through_a_staged_link": (  # a staged input changed in place is a write to its target
-        "def my_tool(out_dir, obs_db_path):\n"
+        "def my_tool(out_dir, data_path):\n"
         "    link = os.path.join(str(out_dir), 'evt.fits')\n"
-        "    os.symlink(os.path.join(str(obs_db_path), 'evt.fits'), link)\n"
+        "    os.symlink(os.path.join(str(data_path), 'evt.fits'), link)\n"
         "    open(link, 'ab').write(b'TAG')\n"
         "    return {'stdout': 'done: pd=0.0412', 'pd': 0.0412}\n",
         "    (tmp_path / 'data').mkdir()\n    (tmp_path / 'data' / 'evt.fits').write_bytes(b'EVT')\n"
@@ -552,7 +381,6 @@ def _repo(tmp_path, tool: str, test: str, *, extra_files: dict[str, str] | None 
     (pkg / "__init__.py").write_text("")
     (pkg / "lib" / "__init__.py").write_text("")
     (pkg / "skills" / "__init__.py").write_text("TOOL_MANIFEST = {}\n")
-    shutil.copytree(_obsdb_catalog(), repo / "obsdb_catalog", ignore=shutil.ignore_patterns("tests", "__pycache__"))
     for rel, body in (base_files or {}).items():  # the toolkit as it was: committed before the change
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         (repo / rel).write_text(body)
@@ -674,12 +502,6 @@ def test_recorder_is_assembled_from_runtime_source():
     compile(src, "recorder", "exec")
 
 
-def test_every_check_has_a_seeded_breach():
-    names = {c for _t, _s, c in BREACHES.values()}
-    assert names == {f"layer_b.returns.{k}" for k in ("transmit", "figure", "receipted", "table", "number",
-                                                       "placed", "obsdb", "unclassified")}
-
-
 def test_run_ones_pytest_scratch_is_gone_before_run_two(tmp_path, monkeypatch):
     """Human ruling 2026-10-06: a toolkit suite left 65 GB of pytest scratch in 10 min and two
     determinism runs filled the disk; run 1's scratch is removed before run 2. Under the real jail
@@ -728,14 +550,6 @@ def test_a_scratch_file_spends_none_of_the_copy_budget(tmp_path, analysis_env, m
     assert any(c.name == "layer_b.returns.table" for c in _failed(report)), [c.detail for c in _failed(report)]
 
 
-def test_an_obsdb_item_declared_as_a_product_is_named_as_one(tmp_path, analysis_env):
-    """The opt-out class is told apart from the opt-in one in what the coder reads."""
-    tool, test, _check = BREACHES["obsdb_item_declared_as_a_product"]
-    report = _gate(_repo(tmp_path, tool, test))
-    assert any("an obs-db item" in c.detail for c in _failed(report) if c.name == "layer_b.returns.placed"), \
-        [c.detail for c in _failed(report)]
-
-
 def test_a_product_that_is_also_a_figure_is_named_as_the_runtime_names_it(tmp_path, analysis_env):
     tool, test, _check = BREACHES["product_that_is_also_a_figure"]
     report = _gate(_repo(tmp_path, tool, test))
@@ -744,8 +558,8 @@ def test_a_product_that_is_also_a_figure_is_named_as_the_runtime_names_it(tmp_pa
 
 
 def test_a_tool_with_no_output_argument_is_told_to_take_one(tmp_path, analysis_env):
-    tool = ("def my_tool(obs_db_path):\n"
-            "    p = os.path.join(str(obs_db_path), 'r.csv')\n"
+    tool = ("def my_tool(data_path):\n"
+            "    p = os.path.join(str(data_path), 'r.csv')\n"
             "    open(p, 'w').write('band,pd\\n2-8,0.0412\\n')\n"
             "    return {'stdout': 'pd=0.0412', 'products': [{'path': p, 'caption': 'PD per band'}]}\n")
     manifest = _MANIFEST.replace(
@@ -790,16 +604,10 @@ def test_the_recorder_runs_in_a_bare_standard_library_interpreter(tmp_path):
 
 
 def test_one_file_is_reported_once(tmp_path, analysis_env):
-    """Review of E1h: an undeclared file the call also returns is named once (`.placed`), and an
-    obs-db inside an output folder is judged as the obs-db, never as undeclared outputs."""
-    (tmp_path / "a").mkdir()
-    (tmp_path / "b").mkdir()
+    """Review of E1h: an undeclared file the call also returns is named once (`.placed`)."""
     tool, test, _check = BREACHES["undeclared_returned_product"]
-    details = [c.detail for c in _failed(_gate(_repo(tmp_path / "a", tool, test)))]
+    details = [c.detail for c in _failed(_gate(_repo(tmp_path, tool, test)))]
     assert sum("r.csv" in d for d in details) == 1, details
-    tool, test, _check = BREACHES["output_folder_holding_the_obsdb"]
-    details = [c.detail for c in _failed(_gate(_repo(tmp_path / "b", tool, test)))]
-    assert not any("declares it nowhere" in d for d in details), details
 
 
 def test_a_file_at_a_path_argument_is_told_to_become_an_output(tmp_path, analysis_env):
@@ -807,25 +615,6 @@ def test_a_file_at_a_path_argument_is_told_to_become_an_output(tmp_path, analysi
     report = _gate(_repo(tmp_path, tool, test))
     assert any("Declare that argument as an output" in c.detail for c in _failed(report)), \
         [c.detail for c in _failed(report)]
-
-
-def test_the_acquire_engines_mission_names_are_read_without_importing_it(tmp_path):
-    """Review of H1: `heasarc_utils.lib.heasarc.MISSIONS`'s keys join the obs-db names, read from its
-    source as data, so the module (whose package edits sys.path) never runs in the test process."""
-    pkg = tmp_path / "heasarc_utils"
-    (pkg / "lib").mkdir(parents=True)
-    (pkg / "__init__.py").write_text("raise SystemExit('imported')\n")
-    (pkg / "lib" / "heasarc.py").write_text("MISSIONS: dict = {'xrism': object(), 'ixpe': object()}\n")
-    script = tmp_path / "drive.py"
-    script.write_text(
-        "import os, sys\nsys.path.insert(0, sys.argv[2])\n"
-        "os.environ.update(AR_RETURNS_OUT=sys.argv[2], AR_RETURNS_TOOLS='{}', AR_RETURNS_COPY_CAP='0')\n"
-        "exec(open(sys.argv[1]).read())\nprint(sorted(_profile_missions()), 'heasarc_utils' in sys.modules)\n")
-    (tmp_path / "rec.py").write_text(returns.recorder_source())
-    done = subprocess.run([sys.executable, "-I", "-S", str(script), str(tmp_path / "rec.py"), str(tmp_path)],
-                          capture_output=True, text=True)
-    assert done.returncode == 0, done.stderr
-    assert done.stdout.split() == ["['ixpe',", "'xrism']", "False"], done.stdout
 
 
 # -- regression: the toolkit's earlier fast tests (user rule 2026-11-04) ---------------------------

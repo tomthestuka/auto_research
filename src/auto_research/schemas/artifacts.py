@@ -33,25 +33,69 @@ LETTER_KIND: dict[str, str] = {letter: kind for kind, letter in KIND_LETTER.item
 HANDLE_PATTERN = r"[A-Za-z][A-Za-z0-9_\-]*:[frdpwhc][1-9][0-9]*"
 Handle = Annotated[str, Field(pattern=rf"^{HANDLE_PATTERN}$")]
 
-#: A receipt carrying either flag cannot ground a number in a claim. Both propagate to descendants.
-ReceiptFlag = Literal["failed", "synthetic"]
+#: A receipt carrying any flag cannot ground a number in a claim. Every flag propagates to descendants.
+#: ``failed``: the producing call failed. ``synthetic``: it read an object in a bucket its store
+#: declares synthetic (``store.config``, ``synthetic_buckets``). ``undeclared_write``: it wrote in a
+#: store its tool's manifest does not name in ``writes``, wrote what the store's version listing does
+#: not show, or removed a version. ``unverified``: the runtime could not establish what it read or
+#: wrote in a store (a listing, the access log or a hash failed, or the bytes disagree with the
+#: store's own checksum or with the receipt that wrote them).
+ReceiptFlag = Literal["failed", "synthetic", "undeclared_write", "unverified"]
+
+
+class StoreObject(MessageModel):
+    """One object version in a store, as the runtime recorded it from the store's own records
+    (``store.records``): the bytes hashed by the runtime, never taken from a tool."""
+
+    store: NonEmptyStr = Field(description="The store's name (`stores:` in orchestration.yaml).")
+    bucket: NonEmptyStr
+    key: NonEmptyStr
+    version_id: NonEmptyStr
+    size: int = Field(ge=0, description="Bytes, from the store's listing or HEAD.")
+    sha256: Sha256 | None = Field(
+        default=None,
+        description="Computed by the runtime over the version's bytes (GET by version id). None for a "
+        "delete marker, or for bytes the runtime could not read (the receipt is then `unverified`).",
+    )
+    delete_marker: bool = False
+    overwrote: NonEmptyStr | None = Field(
+        default=None,
+        description="For a write: the version that was the key's latest before the call, which this "
+        "write superseded (an overwrite). None for a write creating the key or following a delete marker.",
+    )
+    declared: bool = Field(
+        default=True,
+        description="For a write: it lies in a store the tool's manifest names in `writes`. False is "
+        "an undeclared write (the receipt is flagged `undeclared_write`).",
+    )
 
 
 class InputFile(MessageModel):
-    """One file (or directory) a tool call read, hashed before the call ran."""
+    """One input a tool call read: a file or folder (hashed before the call ran), or an object version
+    in a store (from the store's access log, hashed by the runtime)."""
 
-    path: Path
+    path: Path | None = Field(default=None, description="The file or folder read; None for a store object.")
+    object: StoreObject | None = Field(default=None, description="The store object version read.")
     sha256: Sha256
-    basis: Literal["content", "listing", "obsdb"] = Field(
+    basis: Literal["content", "listing", "object"] = Field(
         default="content",
         description="'content' hashes the bytes; 'listing' hashes a directory's (name, size, mtime) listing; "
-        "'obsdb' is an observation the tool located itself from its ObsID: `path` is "
-        "the ObsID's folder under its mission folder (flat or HEASARC's tree), hashed over its "
-        "catalog entry plus its folder's listing.",
+        "'object' is a store object version the call read pinned (`object`), hashed by the runtime.",
     )
     receipt: Handle | None = Field(
-        default=None, description="The in-run receipt whose bytes these are, when one exists."
+        default=None, description="The in-run receipt whose bytes these are (or that wrote this object "
+        "version), when one exists."
     )
+
+    @model_validator(mode="after")
+    def _one_place(self) -> "InputFile":
+        if (self.path is None) == (self.object is None):
+            raise ValueError("an input names exactly one of path or object")
+        if (self.basis == "object") != (self.object is not None):
+            raise ValueError("basis 'object' goes with an object, and only with one")
+        if self.object is not None and self.object.sha256 != self.sha256:
+            raise ValueError("an object input's sha256 is its object's")
+        return self
 
 
 class Receipt(MessageModel):
@@ -83,6 +127,12 @@ class Receipt(MessageModel):
     )
     args_sha256: Sha256 | None = None
     inputs: list[InputFile] = Field(default_factory=list)
+    writes: list[StoreObject] = Field(
+        default_factory=list,
+        description="What the producing call wrote in a store: each new version or delete marker under "
+        "the unit's writable prefixes, from the store's version listing before and after the call "
+        "(`store.records`). Named on the call's result receipt.",
+    )
     parents: list[Handle] = Field(default_factory=list)
     flags: list[ReceiptFlag] = Field(default_factory=list)
     arg_numbers: list[str] = Field(

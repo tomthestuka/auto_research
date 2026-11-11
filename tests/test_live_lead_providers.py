@@ -191,14 +191,29 @@ def test_live_vendor_fills_the_nested_author_chain_brief(provider_name, model, p
 # ── cell 2: the whole cycle, per vendor — the assertion of the rewritten lead ─
 
 
-def _seeded_reports():
-    """Worker reports as the lead really receives them: one carrying a `tool_request`, both with
-    figures cited, and a disagreement worth judging.
+def _seeded_reports(run_id: str):
+    """Worker reports as the lead really receives them: one carrying a `tool_request`, every number
+    its own citation of a worker's receipt, and a disagreement worth judging. The receipts' producer
+    (`xspec_utils.pcube_broadband`) is a stand-in: no such toolkit tool exists; the cell measures the
+    lead holding its seat, not the measurement.
 
     This is the "faked history" the lead actually gets — its conversation opens with these, so a
     vendor that mishandles a large nested payload fails here rather than in production.
     """
+    from auto_research.provenance import ReceiptStore
+    from auto_research.sandbox.workspace import run_dir
     from auto_research.schemas import AnalystReport, AnalystToolRequest
+    from auto_research.toolkit_contract import toolkit
+    from tests.live_store import STAND_IN_RECORD
+
+    # Each worker's measurement, minted in the run's one receipt store (the store `wire_lead` gives
+    # the lead) as a toolkit result, so every number the reports state is its own citation.
+    store = ReceiptStore.for_run(run_dir(run_id))
+    producer = f"{toolkit().name}.xspec_utils.pcube_broadband"
+    w0 = store.mint(source="analyst_worker_0", kind="result", produced_by=producer,
+                    data="broadband (2-8 keV) PD = 4.0 +/- 0.2 %; PA = -20.4 +/- 1.7 deg")
+    w1 = store.mint(source="analyst_worker_1", kind="result", produced_by=producer,
+                    data="broadband (2-8 keV) PD = 3.4 +/- 0.2 %; PA = -21.0 +/- 1.8 deg")
 
     request = AnalystToolRequest(
         science_context=(
@@ -206,28 +221,33 @@ def _seeded_reports():
             "time; the reduction exists in xspec_utils/lib/red_ixpe.py but is not exposed."
         ),
         expected_behavior=(
-            "ixpe_pcube_bands(ixpe_path, obsids, bands) -> per-band PD/PA with 1-sigma errors."
+            "ixpe_pcube_bands(ixpe, bands) -> per-band PD/PA with 1-sigma errors, where ixpe is "
+            "the list of the observations' raw-product records as the data catalog lists them."
         ),
         proposed_tool_name="ixpe_pcube_bands",
-        validation_data=[{"mission": "IXPE", "obsid": "01002901"}],
+        # The coding sessions are stubbed (`stub_chain_driver`): the record never reaches a store.
+        validation_data=[STAND_IN_RECORD],
     )
     return [
         AnalystReport(
-            summary="PD = 4.0 +/- 0.2 % over 2-8 keV; I could not do the per-band split.",
-            findings=["broadband PD ~ 4%", "per-band split blocked by a missing tool"],
+            summary=f'Broadband {{{{{w0.handle} "PD = 4.0 +/- 0.2 %"}}}}; I could not do the per-band split.',
+            findings=[f'broadband {{{{{w0.handle} "PD = 4.0 +/- 0.2 %"}}}}',
+                      "per-band split blocked by a missing tool"],
             status="failed",
             tool_request=request,
         ),
         AnalystReport(
-            summary="I get PD = 3.4 +/- 0.2 % on the same data, which disagrees with my peer.",
-            findings=["broadband PD ~ 3.4%", "unreconciled >2-sigma disagreement"],
+            summary=f'On the same data I get {{{{{w1.handle} "PD = 3.4 +/- 0.2 %"}}}}, which disagrees with '
+                    "my peer.",
+            findings=[f'broadband {{{{{w1.handle} "PD = 3.4 +/- 0.2 %"}}}}',
+                      "the two broadband values disagree beyond their errors"],
             status="succeeded",
         ),
     ]
 
 
 def _pinned_toolkit(folder):
-    """A private toolkit checkout at `science_bench`'s pinned base, the way a trial gets one.
+    """A private toolkit checkout at the store base, the way a trial gets one.
 
     **This is the fix for a cell that measured nothing.** The first run pointed the lead at the
     LIVE toolkit and asked it to author `ixpe_pcube_bands` — which already exists there. All five
@@ -235,31 +255,40 @@ def _pinned_toolkit(folder):
     or wait for a new tool. The capability reported missing already exists and is exposed."* A
     strong result, and not the one this cell is for.
 
-    `BASE_REF` is the commit before this question's own tool chain existed, so the capability is
-    genuinely absent and authoring is the honest answer. Same helper `science_bench` uses, so the
-    checkout is shaped like a trial's rather than like something invented here.
+    The base is the store base the coding-pipeline cells share (`tests/live_store.STORE_BASE_REF`,
+    the toolkit commit carrying the data store, so the lead reads record arguments as the brief
+    names them). The capability is absent there as a tool: checked 2026-11-11 on the working tree
+    that commit is made from (no manifest tool for per-band PCUBEs; `red_ixpe.pcube` is library
+    code, unexposed, as the request says); recheck when the commit is pinned. Same helper
+    `science_bench` uses, so the checkout is shaped like a trial's rather than like something
+    invented here.
     """
     from benchmarks.science_bench.environment import clone_toolkit
-    from benchmarks.science_bench.trial import BASE_REF
     from auto_research.env import toolkit_root as configured_toolkit_root
+    from tests.live_store import store_base_ref
 
+    base_ref = store_base_ref()
     dest = folder / "toolkit"
-    clone_toolkit(dest, configured_toolkit_root(), BASE_REF, "ai")
+    clone_toolkit(dest, configured_toolkit_root(), base_ref, "ai")
     return dest
 
 
-def _lead_on(provider_name: str, model: str, parameters: dict, folder, toolkit_root):
-    """The production lead, seated on one vendor through the configuration pointer's own shape."""
+async def _lead_on(provider_name: str, model: str, parameters: dict, run_id: str, toolkit_root, keys,
+                   monitor, control):
+    """The production lead, seated on one vendor through the configuration pointer's own shape and
+    wired as `run_research` wires it (`wire_lead`: identity, folder, receipts, read-only tools with
+    its catalog login issued into the run's ``keys``, web source and retrieval)."""
     from auto_research.agents.prompts import load_prompt
     from auto_research.agents.roles import AnalystLeadAgent
-    from auto_research.graph.runtime import readonly_tools_for
+    from auto_research.graph.runtime import wire_lead
+    from auto_research.sandbox.workspace import create_run_workspace
 
     lead = AnalystLeadAgent(
         model=_handle(provider_name, model, parameters), prompt=load_prompt("analyst_lead")
     )
-    lead.agent_key = "analyst_lead"
-    lead.report_dir = folder
-    lead.tools = readonly_tools_for("analyst_lead", roots=[folder, toolkit_root])
+    create_run_workspace(run_id, ["analyst_lead"])
+    await wire_lead(lead, run_id=run_id, toolkit_root=toolkit_root, keys=keys, run_monitor=monitor,
+                    run_control=control)
     return lead
 
 
@@ -284,8 +313,9 @@ def test_live_vendor_holds_the_lead_seat_through_a_full_cycle(
     from auto_research.schemas import AnalysisTask
     from tests.chain_stub import stub_chain_driver
 
+    from tests.live_store import run_stores
+
     toolkit_root = _pinned_toolkit(tmp_path)
-    lead = _lead_on(provider_name, model, parameters, tmp_path, toolkit_root)
     driven = stub_chain_driver(monkeypatch)
     declared: list[frozenset] = []
 
@@ -302,26 +332,36 @@ def test_live_vendor_holds_the_lead_seat_through_a_full_cycle(
             declared.append(frozenset(t["name"] for t in (kwargs.get("tools") or [])))
             return await self._handle.call(messages, **kwargs)
 
-    lead.model = _Recorder(lead.model)
+    async def cycle():
+        # The run's stores (the real store, made by migration item S11) and run_research's lead wiring.
+        from auto_research.monitor import RunMonitor
 
-    outcome = asyncio.run(
-        lead.run_cycle(
-            AnalysisTask(
-                question="Settle the per-band IXPE polarization question for Cyg X-1.",
-                instructions="Two workers disagree and one reports a missing capability.",
-            ),
-            _seeded_reports(),
-            sources=["analyst_worker_0", "analyst_worker_1"],
-            # ZERO debate rounds on purpose: with rounds available, rework is always cheaper than
-            # authoring and every vendor took it, so the chain path was never entered. With none,
-            # the lead must brief a chain or conclude — which is the branch this cell exists for.
-            rounds_left=0,
-            author_budget=2,
-            toolkit_root=toolkit_root,
-            worktree_base=toolkit_root,
-            direct_branch="ai",
-        )
-    )
+        from auto_research.run_control import RunControl
+
+        name = f"{provider_name}-{model}".replace("/", "-").replace(":", "-")
+        ledger = RunMonitor(jsonl_path=dev_log_path("lead-providers", f"cycle_{name}_monitor", ".jsonl"))
+        run_id, control = ledger.run_id, RunControl()  # a run of its own: nothing carried over
+        async with run_stores(run_id, ledger, control) as keys:
+            lead = await _lead_on(provider_name, model, parameters, run_id, toolkit_root, keys, ledger, control)
+            lead.model = _Recorder(lead.model)
+            return await lead.run_cycle(
+                AnalysisTask(
+                    question="Settle the per-band IXPE polarization question for Cyg X-1.",
+                    instructions="Two workers disagree and one reports a missing capability.",
+                ),
+                _seeded_reports(run_id),
+                sources=["analyst_worker_0", "analyst_worker_1"],
+                # ZERO debate rounds on purpose: with rounds available, rework is always cheaper than
+                # authoring and every vendor took it, so the chain path was never entered. With none,
+                # the lead must brief a chain or conclude — which is the branch this cell exists for.
+                rounds_left=0,
+                author_budget=2,
+                toolkit_root=toolkit_root,
+                worktree_base=toolkit_root,
+                direct_branch="ai",
+            )
+
+    outcome = asyncio.run(cycle())
 
     report = outcome.report
     record = {

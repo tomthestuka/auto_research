@@ -103,7 +103,7 @@ def test_the_written_directory_validates_and_only_models_differs(tmp_path):
         tmp_path / "cfg", parse_seats("reviewer=dashscope:qwen3.8-max")
     )
 
-    for name in ("orchestration.yaml", "observations.yaml", "code_gate.yaml"):
+    for name in ("orchestration.yaml", "code_gate.yaml"):
         origin = repo_config_dir() / name
         if origin.is_file():
             assert (directory / name).read_bytes() == origin.read_bytes(), (

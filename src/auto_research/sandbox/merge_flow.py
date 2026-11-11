@@ -246,16 +246,16 @@ def _build_structure_context(workdir: Path) -> str:
     """Assemble the local-structure context the author is seeded with.
 
     Runtime-safe sources only (CLAUDE.md §4): the layout of the toolkit contract's
-    ``template_package`` + its top-level source, plus the configured mission observation paths. Never reads any
-    ``DOCS.md``/``CLAUDE.md``.
+    ``template_package`` + its top-level source, the data sets the CI pipeline provides and the
+    environments. Never reads any ``DOCS.md``/``CLAUDE.md``.
 
     ``workdir`` is the author's actual working directory (its cwd) — the ``research_toolkit``
     checkout it edits (``toolkit_root`` itself in direct-branch mode, the worktree otherwise).
     Its absolute path is stated up front and every template path is printed **absolute**, so
-    the author never has to guess the toolkit root or hunt for the validation data: it used to
-    receive relative paths with no root stated and burned turns probing wrong roots
-    (``/root/…`` → EACCES → ``find /``). The mission observation paths are the absolute
-    locations of the validation ObsIDs the tool's tests run against.
+    the author never has to guess the toolkit root: it used to receive relative paths with no
+    root stated and burned turns probing wrong roots (``/root/…`` → EACCES → ``find /``). A tool
+    reaches stored data through ``record`` arguments, never a store's location, so no store path
+    is listed.
     """
     from auto_research.toolkit_contract import toolkit
 
@@ -280,16 +280,6 @@ def _build_structure_context(workdir: Path) -> str:
             if src.is_file():
                 parts.append(f"# {src}\n```python\n{src.read_text(encoding='utf-8')}\n```")
 
-    obs = _observation_paths()
-    if obs:
-        lines = "\n".join(f"- {mission}: {path}" for mission, path in obs.items())
-        parts.append(
-            "# Mission observation paths — the observation databases the analysts read, under these "
-            "absolute directories. A test reaches real data through a data set the CI pipeline "
-            "provides (listed below, when the host provides any); a synthetic input is a marked "
-            "`synth<YYMMDD>-<hex>` ObsID your tests build in their fixture obs-db:\n"
-            + lines
-        )
     data_sets = _data_set_context()
     if data_sets:
         parts.append(data_sets)
@@ -348,16 +338,6 @@ def _environment_context(workdir: Path) -> str:
     if externals:
         lines.append(f"- declared externals: {', '.join(externals)}")
     return "# Software environments (see your system prompt's environment section):\n" + "\n".join(lines)
-
-
-def _observation_paths() -> dict[str, str]:
-    try:
-        from auto_research.observations import load_observations_config
-
-        cfg = load_observations_config()
-    except Exception:
-        return {}
-    return {name: str(m.obs_db_path) for name, m in cfg.missions.items()}
 
 
 # ----------------------------------------------------------------------------
@@ -1454,7 +1434,10 @@ def _author_env(
     except Exception:  # noqa: BLE001 — inherit rather than fail the whole options build
         if active_bin is None:
             return None
-        env = {k: v for k, v in os.environ.items() if not k.upper().startswith(_HOST_TOOLING_PREFIXES)}
+        from auto_research.store.config import without_admin_secrets
+
+        env = {k: v for k, v in without_admin_secrets(os.environ).items()
+               if not k.upper().startswith(_HOST_TOOLING_PREFIXES)}
         env["PATH"] = f"{active_bin}:" + env.get("PATH", "")
         return env
     # Host-tooling variables ride in from the terminal that launched the run and are none of the
@@ -1632,6 +1615,7 @@ class AuthoringSession:
         self.debate_cap = debate_cap  # bounds respond_to_review (lead↔co-lead) turns
         self.debates_used = 0
         self.colead_refunds = 0  # passing co-lead failures refunded so far (C3c, at most 3)
+        self.infra_refunds = 0  # passing CI-pipeline infrastructure failures refunded so far (S7 ruling B)
         self.last_gate: GateReport | None = None
         #: The changeset the co-lead's latest review saw (its files' identities); a commit must
         #: hold exactly it.

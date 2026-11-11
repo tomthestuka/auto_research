@@ -10,7 +10,7 @@ the §2/§4 trust boundary, enforced rather than assumed.
 
 The allow-list is the **complete** set of absolute roots in ``config/orchestration.yaml:
 agent_fs_allow`` (portability: one list to edit per machine — it must include ``toolkit_root``
-and ``runtime_dir`` so agents can read their own workspace, plus the obs-db root, the analyst
+and ``runtime_dir`` so agents can read their own workspace, plus the analyst
 conda env, HEASoft ``HEADAS``/``CALDB``, the folders of declared private variables, and ``/tmp``). An **empty/unset**
 list disables the guard (allow-all) so environments that have not opted in keep working — a
 populated list opts into the guard.

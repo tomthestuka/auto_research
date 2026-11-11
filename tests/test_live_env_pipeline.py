@@ -10,7 +10,9 @@ backend resumes from its checkpoint), against a throwaway workspace this test cr
   ``AR_B5_BRANCH``, default ``ai``) checked out on the authoring branch;
 - a copy of this repository's ``config/`` with only the paths changed (toolkit, runtime dir,
   run workspaces) and the human's sherpana folder granted read-only;
-- its own runtime dir, so environments, locks and ledgers land there, never in the real one.
+- its own runtime dir, so environments, locks and ledgers land there, never in the real one;
+- the configured ``stores:`` block unchanged: the runs start and use the real store
+  (``/xray02/fzhou_db``, made by migration item S11).
 
 Nothing in the run path is replaced. Logs: ``logs/dev/b5_live_<stamp>/``.
 """
@@ -55,7 +57,7 @@ def _workspace(stamp: str) -> tuple[Path, Path]:
     subprocess.run(["git", "clone", "-q", "--branch", branch, source, str(toolkit)], check=True)
     if branch != "ai":
         subprocess.run(["git", "-C", str(toolkit), "checkout", "-q", "-b", "ai"], check=True)
-    for name in ("orchestration", "models", "observations", "code_gate"):
+    for name in ("orchestration", "models", "code_gate", "model_capabilities"):
         shutil.copy(REPO / "config" / f"{name}.yaml", config / f"{name}.yaml")
     text = (config / "orchestration.yaml").read_text()
     real = {k: re.search(rf"^{k}:\s*(\S+)", text, re.M).group(1) for k in ("runtime_dir",)}
@@ -108,6 +110,9 @@ def test_live_a_missing_runtime_becomes_a_pipeline_environment_and_is_reused(mon
     monkeypatch.setenv("AUTO_RESEARCH_CONFIG_DIR", str(config))
     monkeypatch.setenv("CONDA_EXE", os.environ.get("CONDA_EXE") or shutil.which("conda")
                        or "/opt/anaconda/anaconda3/bin/conda")
+    from tests.live_store import require_store
+
+    require_store()  # the workspace's configuration: a store that is not ready skips with its refusal
 
     run1 = _run("b5-run1", logs)
     built = [e["data"] for e in run1 if e.get("event") == "env.build" and (e.get("data") or {}).get("ok")]

@@ -66,12 +66,16 @@ def test_input_hash_links_parent_and_flags_propagate(store, tmp_path):
     assert [r.handle for r in store.ancestors(child.handle)] == [parent.handle]
 
 
-def test_synthetic_marked_input_flags_the_result(store, tmp_path):
-    synth = tmp_path / "IXPE" / "synth260924-abc123" / "evt.fits"
-    synth.parent.mkdir(parents=True)
-    synth.write_bytes(b"x")
-    r = _result(store, "PD = 1.0", inputs=[store.hash_input(synth)])
-    assert r.flags == ["synthetic"]
+def test_a_flag_the_caller_found_marks_the_receipt_and_its_descendants(store, tmp_path):
+    """Synthetic data is a store bucket the config declares synthetic (``store.records``), never a
+    folder name: a file named like the retired ``synth…`` marker flags nothing."""
+    named = tmp_path / "synth260924-abc123" / "evt.fits"
+    named.parent.mkdir(parents=True)
+    named.write_bytes(b"x")
+    assert _result(store, "PD = 1.0", inputs=[store.hash_input(named)]).flags == []
+    marked = _result(store, "PD = 1.0", flags=["synthetic"])
+    assert marked.flags == ["synthetic"]
+    assert _result(store, "child", parents=[marked.handle]).flags == ["synthetic"]
 
 
 def test_directory_inputs_hash_by_listing(store, tmp_path):

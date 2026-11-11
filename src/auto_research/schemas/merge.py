@@ -90,6 +90,10 @@ class GateReport(MessageModel):
     base: str = ""
     """The ``HEAD`` commit the judged files sit on (and Layer B's export was written from); the
     commit must land on exactly this parent."""
+    infrastructure: Literal["", "passing", "recurring"] = ""
+    """A failure whose cause lies outside the change (its ``infrastructure.*`` checks name it): the CI
+    pipeline's throwaway store did not start (``passing``, worth another run), or the real store did
+    not answer (``recurring``, until a human acts). Empty when the change itself was judged."""
     """Every file the gate judged, by path: its sha256, or ``deleted``. ``approve_edit`` commits
     exactly these and refuses when any changed after the gate ([G3]: a test writing into the
     worktree, or a file swapped in before the commit, would otherwise land unjudged)."""

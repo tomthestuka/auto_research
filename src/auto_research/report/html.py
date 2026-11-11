@@ -177,15 +177,16 @@ def _ref_html(handle: str, produced: Mapping[str, int]) -> str:
 def _input_html(item: InputFile, produced: Mapping[str, int]) -> str:
     """An input by name; its path and hash one click further (a reader wants what, not which bytes)."""
     if item.receipt and item.receipt in produced:
-        return (f'<span class="node">{escape(Path(item.path).name)} '
+        name = Path(item.path).name if item.object is None else item.object.key.rsplit("/", 1)[-1]
+        return (f'<span class="node">{escape(name)} '
                 f'<span class="muted">[{escape(item.receipt)}, step {produced[item.receipt]}]</span></span>')
-    if item.basis == "obsdb":
-        from auto_research.observations import obsid_mission
-
-        mission, obsid = obsid_mission(Path(item.path)), Path(item.path).name
-        return (f'<details class="node"><summary>observation {escape(mission)} {escape(obsid)}</summary>'
-                f'<div>catalog entry + folder listing of <code>{escape(str(item.path))}</code><br>'
-                f'sha256 <code>{escape(item.sha256)}</code></div></details>')
+    if item.object is not None:
+        obj = item.object
+        return (f'<details class="node"><summary>{escape(obj.key.rsplit("/", 1)[-1])}</summary>'
+                f'<div>store {escape(obj.store)} object <code>{escape(obj.bucket)}/{escape(obj.key)}</code>, '
+                f'version <code>{escape(obj.version_id)}</code>, {obj.size} bytes<br>'
+                f'sha256 <code>{escape(item.sha256)}</code>'
+                + (f'<br>made by {escape(item.receipt)}' if item.receipt else "") + "</div></details>")
     what = "folder listing" if item.basis == "listing" else "file"
     return (f'<details class="node"><summary>{escape(Path(item.path).name)}</summary>'
             f'<div>{what} <code>{escape(str(item.path))}</code><br>sha256 <code>{escape(item.sha256)}</code>'
@@ -344,9 +345,11 @@ def reproduce_code(
     root = str(receipt.toolkit_root) if receipt.toolkit_root else "<toolkit root>"
     fn = str(call.context.get("fn") or receipt.produced_by.rsplit(".", 1)[-1])
     module = str(call.context.get("module") or "")
-    importable = fn.isidentifier() and all(part.isidentifier() for part in module.split(".")) and bool(module)
-    # A toolkit producer is ``<toolkit name>.<package>.<tool>``: the package is its second segment.
-    package = module.split(".", 1)[0] if importable else receipt.produced_by.split(".")[1]
+    if not (fn.isidentifier() and module and all(part.isidentifier() for part in module.split("."))):
+        # Every toolkit call runs in a unit's REPL, which records its module and function.
+        handle = re.sub(r"[\r\n]+", " ", str(receipt.handle))
+        return f"# {handle}: the ledger names no module and function for this call, so it has no reproduce code", args_json
+    package = module.split(".", 1)[0]
     record = _env_record(receipt.env)
 
     def one_line(text: object) -> str:
@@ -391,16 +394,7 @@ def reproduce_code(
         ]
     else:
         lines.append(f"sys.path.insert(0, {root!r})")
-    if importable:
-        lines.append(f"from {module} import {fn}")
-    else:
-        # A call the runtime made in-process records no module: the package's manifest names it.
-        lines += [
-            "import importlib",
-            f"_spec = importlib.import_module({package!r}).TOOL_MANIFEST[{receipt.produced_by!r}]",
-            "tool = getattr(importlib.import_module(_spec['module']), _spec['fn'])",
-        ]
-        fn = "tool"
+    lines.append(f"from {module} import {fn}")
     if stored:
         lines += [
             '# {"$ref": "<handle>#<pointer>"} arguments are earlier results\' values: _ref reads each',

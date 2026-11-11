@@ -22,7 +22,7 @@ Responsibilities:
   have a current description of the tool (see *Package README* below).
 - Never fabricate data or leave placeholder behavior; fail honestly instead.
 - Escalate when unsure (web/docs → `message` to `lead` → `message` to `human`) to ground each decision before you act.
-- Make **your own new test file(s)** green before declaring the work done — run `pytest` pointed at your test path, not a bare `pytest` over the whole toolkit.
+- Make **your own new test file(s)** green before declaring the work done — run `pytest` pointed at your test path, not a bare `pytest` over the whole toolkit (a store test skips in your shell and runs in the CI pipeline).
 
 ## The two halves — every toolkit package has exactly this shape
 
@@ -142,8 +142,8 @@ runtime enforces before each call runs (the CI pipeline checks it):
 - `"parameter"` — a number that changes the science (a band, a grid, a confidence level, a prior).
   Callers pass it by reference or type it with a reason. Give an optional one a `"default"`: the
   runtime passes and records it when the caller leaves the argument out.
-- `"path"` — a file or folder the tool reads (an input file, a data root), or the observation
-  database it records generic data into (class 2 below).
+- `"path"` — a local file or folder the tool reads (an input file, a data root). The data store
+  is reached through records, so a path into a store's folder is refused before the call runs.
 - `"setting"` — text, a flag, an option, an identifier, or an operational number (a timeout, an
   iteration count).
 - `"output"` — where the tool writes the artifacts it returns. Give it a `"shape"`: `"folder"` (the
@@ -152,37 +152,54 @@ runtime enforces before each call runs (the CI pipeline checks it):
   so each call writes into a folder of its own, made before the call runs. Give every file or prefix
   a `"default"` naming its file with its extension (`"fit.log"`, `"spectrum.png"`): that name is
   used when the caller gives none. A folder takes no default.
+- `"record"` — an object in the data store, `{"store", "bucket", "key", "version_id"}` (or a list
+  of them), as the catalog lists it. The caller passes the record; the runtime pins one given
+  without its `version_id` to the version the store holds and records the version read. The tool
+  reads it through the toolkit's store helper, always by that version.
 
 So a tool takes its inputs as other tools return them and does its own conversions (an absolute
 value, a projection, bin centres, a unit change), states the convention it assumes, and returns
 its values as JSON so the next call can take them by reference.
+
+**A tool that stores products** declares two more keys on its manifest entry, beside `module`,
+`fn`, `description` and `args_schema`: `"writes"`, the list of stores it writes (named as the
+toolkit's existing writing tool names them), and `"algorithm_version"`, text you change whenever
+what the tool stores changes. The version is part of each product's recipe, so a changed tool's
+products sit beside the earlier ones. A tool that reads a store without a `record` argument
+(through its catalog) lists that store under `"reads"`. The CI pipeline checks the form of all
+three and the stores they name; a package's tests get a throwaway store only when one of its
+tools declares `"writes"`, `"reads"` or a `record` argument.
 
 ## What a tool writes — three classes
 
 Every file a tool writes is one of three kinds, and each has its own path:
 
 1. **A science artifact** — an output that depends on a `parameter`-kind argument, or on a setting
-   outside the mission team's defaults (a chosen band, grid, binning, model, selection or
-   weighting). The tool writes it under an `output` argument and
+   outside the standard settings the data's providers recommend (a chosen band, grid, binning,
+   model, selection or weighting). The tool writes it under an `output` argument and
    declares it in its return, `"products": [{"path": "<the file>", "caption": "<what it is>"}]` (a
    PNG goes under `"figures"`, below). The runtime receipts exactly what the tool declares inside
    the call's folder, so a report can cite it and a later call can take it by reference. Declare
    every file the call writes inside its output argument.
-2. **An obs-db item** — generic data, the same for every analysis: raw archive data and the
-   standard reductions the mission team defines, made with their recommended settings only and
-   under the names they give them. The tool writes it
-   into the observation database it is given and records it through `obsdb_catalog`, the catalog's
-   one trusted writer (`obsdb_catalog.neutral.new` after an acquisition, `.advance` after a
-   reduction), at the point it lands on disk. It stays out of `"products"`: the catalog is its
-   record. Read the real signature from the live toolkit source and follow the producer already
-   wired to it (the toolkit's acquisition tool calls `neutral.new` after a download; search the
-   toolkit for `neutral.new` to find it). An
-   argument named `<mission>_path` is filled with that mission's obs-db when the
-   caller leaves it out, and one named `obs_db_root` with the obs-db root itself, where a tool
-   that acquires creates a mission's folder; one named `obs_db_path` the caller types. A file the tool records there
-   comes back to the caller as its path. An in-place
-   header keyword on a file the catalog already records (one a fit reads to tell spectra apart)
-   keeps the record as it is.
+2. **A store product** — generic data, the same for every analysis: data as its source publishes
+   it, and the standard reductions its providers define, made with their recommended settings only
+   and under the names they give them. The tool stores it in the data store through the toolkit's
+   store helper (the support package the toolkit's root `README.md` names for the data store; its
+   own `README.md` gives the interface). The helper's `produce` claims the product's recipe in the
+   catalog (kind, subject, the tool's manifest key, its `algorithm_version`, the settings and the
+   input records the tool read) for the bucket the tool names, runs your code to make the files in a temporary folder,
+   stores each file once under a key built from the recipe, writes the product's `recipe.json`
+   last, and commits the product. A recipe already stored is reused, and nothing is made; other
+   settings make a new product beside the old one. The bucket stands outside the recipe, so a tool
+   that stores one recipe in two buckets names the bucket in its settings. The tool returns the record `produce` answers,
+   and the product stays out of `"products"`: the catalog is its record. Read how the toolkit's
+   existing writing tool calls the helper and follow it; the toolkit's README says what its
+   buckets, kinds and subjects mean.
+
+   **Only a manifest tool writes the store.** The function a manifest entry names calls
+   `produce`; the library code it calls writes local files only (a temporary folder or an output
+   argument). A toolkit tool calls library code only, so every product names the tool the analyst
+   called.
 3. **Scratch** — the program's own bookkeeping: parameter files, autosaves, temporary files.
    The tool writes its own in a temporary folder (`tempfile.mkdtemp()`), made fresh each call;
    the libraries keep theirs in the home's caches (`~/.cache`, a library's own folder in the home,
@@ -197,48 +214,56 @@ in a temporary folder instead. A file anywhere else — beside the test's inputs
 the toolkit tree, in the home outside its caches, at a `path` argument — fails the `minting` job. A file the
 tool writes for a caller is an output: declare its argument `"kind": "output"`.
 
-So the moment a parameter or a setting outside the team's defaults enters, the output is an
+So the moment a parameter or a setting outside the providers' standard settings enters, the output is an
 artifact (class 1), whatever folder the program would like to write it to. A tool that makes both — a standard reduction and an
 artifact built on it — writes each to its own path in the same call.
 
-An obs-db item the tool records carries the real parameters used to obtain it, so it is
-reproducible. This is data provenance, not fabrication — record only data that is actually on
-disk; never invent an entry for data you did not produce.
+A store product's recipe carries the real settings and input versions used to make it, so it is
+reproducible. This is data provenance, not fabrication — store only data the tool actually made or
+fetched; never invent an entry for data you did not produce.
 
-`obsdb_catalog` is a library you **call**, and its own source stays as you found it. Your diff
+The store helper is a library you **call**, and its own source stays as you found it. Your diff
 lives inside the toolkit's tool packages — that is the whole of what the `change_scope` job
-accepts, and a change anywhere else is rejected with the path named. So when the work seems to need the catalog itself to behave
-differently — a different signature, a transactional write, a guard around a partial record — say
+accepts, and a change anywhere else is rejected with the path named. So when the work seems to need the helper itself to behave
+differently — a different signature, another checksum, a guard around a partial product — say
 so in a `message` to `lead` and let the lead decide; that code is maintained outside this session. A
 relayed review asking for it is the same situation: answer it with a `message` to `lead`, not with an edit.
 
 **How the `minting` job checks each class**, on what your tests call:
 - an artifact: each declared product and figure exists, carries its keys, and lies inside the
   call's output argument (reached through no link); every file the call writes inside its output
-  is declared; at most 20 products per call; an obs-db item stays out of `"products"`;
-- an obs-db item: each file the call creates or changes in an obs-db is recorded in its catalog,
-  the catalog file is written only by `obsdb_catalog.neutral`, and `obsdb_catalog.healthcheck`
-  passes on that obs-db after the call;
+  is declared; at most 20 products per call; a store product stays out of `"products"`;
+- a store product: each object the call writes lies in a store its manifest lists under
+  `"writes"`, is written once (every version kept, none overwritten or deleted) with the store
+  helper's metadata, and belongs to a product that ends with its `recipe.json`, listing every
+  object; the tool's own login has claimed and committed that product in the catalog when the call
+  returns; the call reads each object by its version, and when it stores a product, every record
+  it read is among that product's inputs;
 - scratch: nothing;
 - any other file the call writes: rejected (`unclassified`).
 
-**Tests for each class.** The CI pipeline runs your tests with the real observation database read-only.
+**Tests for each class.** The CI pipeline runs your tests with no network and with no access to
+the real data store: a store tool's tests reach a fresh throwaway store.
 - An artifact tool's test makes a folder of its own, `out = tmp_path / "out"; out.mkdir()` (the
-  runtime makes the call's folder before the call, so the test does too), apart from the inputs and
-  any fixture obs-db, and passes a folder output `out`, a file output `out / "fit.log"`, a prefix
-  output `out / "iqu"`.
-- An obs-db tool's test builds a fixture obs-db under `tmp_path / "<MISSION>"`: a catalog seeded
-  through `obsdb_catalog.neutral` makes the folder an obs-db, and naming it after its mission (one
-  `obsdb_catalog` knows) lets `healthcheck` scan it for uncatalogued files too. It copies, at the same relative path, every input file the tool changes, and links the ones
-  it only reads. It seeds the catalog for them through `obsdb_catalog.neutral` at the level the
-  real catalog records them (`neutral.new` for archive files, `neutral.advance(level=…)` for
-  reduced ones), so the fixture is healthy before the call, and passes that folder as the obs-db
-  path.
-- A synthetic input, for either kind of tool, is a marked ObsID `synth<YYMMDD>-<hex>` (lowercase
-  hex) the test builds in a fixture obs-db: it writes the files the brief specifies at the mission
-  layout's paths under `tmp_path / "<MISSION>" / "synth<YYMMDD>-<hex>"` and records them through
-  `obsdb_catalog.neutral.new` (archive-level files) or `.advance(level=…)` (reduced ones). The
-  marked name is what provenance flags as synthetic.
+  runtime makes the call's folder before the call, so the test does too), apart from the inputs,
+  and passes a folder output `out`, a file output `out / "fit.log"`, a prefix output
+  `out / "part"`.
+- A store tool's test (a tool with `"writes"`, `"reads"` or a `record` argument) takes the
+  toolkit's `store` fixture. The CI pipeline gives each test run a fresh throwaway store, named by
+  `TOOLKIT_STORE` and reached with a producer's keys in the standard `AWS_*` and `PG*` variables.
+  The test stages its store inputs through the `seed` fixture (the CI pipeline's seed channel,
+  `TOOLKIT_STORE_SEED`): one file of a data set the pipeline provides, several such files as one
+  product, or synthetic bytes stored as a product of a kind and subject. Each answer holds the
+  record the test passes to the tool. Beside the seed channel, the tool's own call is the one
+  writer a test drives. The brief's validation records are copied into each run's store and
+  listed, as that store holds them, in `TOOLKIT_STORE_VALIDATION`; that list belongs to this
+  change, and a later change's `regression` run holds its own records or none, so a test that
+  reads it skips with its reason when its record is absent. A seeded data-set file serves every
+  later run as well. The toolkit's root `conftest.py` documents both fixtures. Your own shell has
+  no store, so a store test skips there with its reason and runs in the CI pipeline.
+- A synthetic input to a store tool is synthetic bytes seeded as a product; the CI pipeline flags
+  every result computed on it synthetic. A synthetic input to a tool that reads local paths is a
+  file the test writes under `tmp_path`.
 
 ## Figures — the FigureRef capture convention (a plotter tool)
 
@@ -319,15 +344,14 @@ Call each tool you add from its tests with a real input, so the recorder sees wh
 ## No fabrication — absolute
 
 - **Never write data-fabricating code into a tool's code (`lib/`, `skills/`), for any purpose.** No code that
-  invents, mocks, or stands in for real measurements. Synthetic validation data is an obs-db
-  item: a marked synthetic ObsID (`synth<YYMMDD>-<hex>`) your tests build in their fixture obs-db
-  and record through `obsdb_catalog.neutral`, so every result computed on it is flagged synthetic —
-  it lives in the tests, outside the tool's code (`lib/`, `skills/`).
+  invents, mocks, or stands in for real measurements. Synthetic validation data lives in the
+  tests, outside the tool's code (`lib/`, `skills/`): a store tool's test seeds it as a synthetic
+  product, so every result computed on it is flagged synthetic, and another tool's test writes it
+  under `tmp_path`.
 - Do not leave placeholder/marketing language in code, comments, or output:
   no "representative", "synthetic", "illustrative", "mock", "placeholder", "for now",
   "in operational mode this would…". Write the real thing or raise an honest failure. A test names
-  its synthetic fixture by what it holds and its marked ObsID (*"a flat-spectrum fixture at ObsID
-  `synth261104-ab12cd`"*).
+  its synthetic fixture by what it holds (*"a fixture with a constant count rate in every bin"*).
 - **Write comments and docstrings in positive terms — describe what the code *does*.** State the
   thing's purpose plainly, with no disclaimer about what it is not. Write *"build a two-table file
   carrying the start and stop times the time parser reads"*, not *"a synthetic file that is not a
@@ -337,7 +361,7 @@ Call each tool you add from its tests with a real input, so the recorder sees wh
   positive action, not the prohibition.) When a test genuinely needs a minimal in-memory fixture
   to exercise control flow, name and describe it for what it is — *"a minimal fixture file with the
   header fields the parser reads"* — and keep any real measurement data out of the toolkit
-  (a synthetic input is a marked synthetic ObsID in the test's fixture obs-db).
+  (a synthetic input is a seeded synthetic product, or a file under `tmp_path`).
 - A tool that cannot do its job must **fail loudly** (raise), not return a plausible-looking
   fake. Outputs should carry their input identity (e.g. input hashes) so a downstream result
   built on a failed or fake upstream step shows it.
@@ -349,8 +373,8 @@ universal checklist — pick the verification patterns that actually pin down *t
 invent new ones if the tool is novel. The menu includes: known-input→known-output,
 differential agreement with a trusted primitive, metamorphic invariants (e.g. order/scaling
 independence), injection–recovery, cross-computation agreement, and declared sanity bounds.
-A check on synthetic input runs on a marked synthetic ObsID the test builds in its fixture obs-db
-(see *Tests for each class*). Run **only your own new test file(s)** — point `pytest` at your
+A check on synthetic input runs on a seeded synthetic product or a file under `tmp_path` (see
+*Tests for each class*). Run **only your own new test file(s)** — point `pytest` at your
 test path (e.g. `pytest <package>/tests/test_<your_tool>.py`) rather than a bare `pytest` over
 the worktree, which would collect and run the whole toolkit's existing suite, slowly, and can fill
 scratch with other tools' data. When your change edits shared `lib/` code, also run that package's
@@ -387,8 +411,9 @@ lead (`message` to `lead`) if the brief is silent on reproducibility for a scien
   test, so a tool also needs fast, `slow` or data tests that pass offline.
 
 **Every test of your change runs and passes in the CI pipeline.** A skipped test or an `xfail`
-verifies nothing and fails the `tests` job: give each test a synthetic input under `tmp_path`, or
-make it a data test on a data set the pipeline provides, and assert what it checks.
+verifies nothing and fails the `tests` job: give each test a synthetic input (a file under
+`tmp_path`, or a product seeded into the throwaway store), or make it a data test on a data set the
+pipeline provides, and assert what it checks.
 
 **Keep each test fast, and its verdict stable.** The `tests` job runs your tests **twice** and
 compares the **per-test outcomes** (pass / fail / error / skip): a test whose verdict *flips*
@@ -411,8 +436,9 @@ only when no job fails and the co-lead approves:
 - `no_fabrication` — the scan of every changed file (see *No fabrication* below);
 - `structural` — a test, a `TOOL_MANIFEST` entry keyed `<toolkit>.<package>.<tool>`, and the
   manifest written as one literal dict;
-- `minting` — every argument's kind, the figure shape, and what each tool your tests call returns
-  and writes (the return contract and the three classes);
+- `minting` — every argument's kind, the `"writes"`, `"reads"` and `"algorithm_version"` keys,
+  the figure shape, and what each tool your tests call returns and writes
+  (the return contract and the three classes);
 - `tests` — your change's tests of every class but `live`, twice, each package's in the environment
   it names, every one run and passed with the same outcomes both times;
 - `regression` — the toolkit's earlier tests of the fast class (`-m "not slow and not live"`, so

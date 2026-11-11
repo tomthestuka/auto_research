@@ -226,9 +226,12 @@ def test_the_lead_seat_sustains_a_real_cycle_and_files_a_form(tmp_path, monkeypa
     from auto_research.agents.react import AUTHOR_CHAIN_TOOL, TURN_END_TOOL
     from auto_research.agents.roles import AnalystLeadAgent
     from auto_research.env import toolkit_root as configured_toolkit_root
-    from auto_research.graph.runtime import readonly_roots_for, readonly_tools_for
+    from auto_research.graph.runtime import wire_lead
     from auto_research.models import load_registry
-    from auto_research.schemas import AnalysisTask, AnalystReport, MergeFlowResult
+    from auto_research.sandbox.workspace import create_run_workspace
+    from auto_research.schemas import AnalysisTask, AnalystReport
+    from auto_research.run_control import RunControl
+    from tests.live_store import run_stores
 
     fixture = Path(__file__).parent / "fixtures" / "lead_cycle_reports.json"
     if not fixture.is_file():
@@ -248,37 +251,42 @@ def test_the_lead_seat_sustains_a_real_cycle_and_files_a_form(tmp_path, monkeypa
         assert handle.config.model == lead_seat.model
         recording = _Recording(handle)
         # The role, its prompt and its tool loop all come from production. `AnalystLeadAgent()`
-        # loads `prompts/analyst_lead.md` itself, and `readonly_tools_for` is the same call
-        # `run_research` makes — a hand-built provider here differed from it by five arguments.
+        # loads `prompts/analyst_lead.md` itself, and `wire_lead` is the call `run_research` makes
+        # (identity, folder, receipts, read-only tools with the catalog login, web source and
+        # retrieval) — a hand-built provider here once differed from it by five arguments.
         lead = AnalystLeadAgent(model=recording)
-        lead.agent_key = "analyst_lead"
-        lead.report_dir = tmp_path
         toolkit_root = configured_toolkit_root()
-        lead.tools = readonly_tools_for(
-            "analyst_lead",
-            roots=[tmp_path, *readonly_roots_for("seat-probe", toolkit_root)[1:]],
-            retrieval=None,
-            web_source=None,
-        )
         lead._figure_catalog["analyst_worker_0"] = list(figures)
-        outcome = asyncio.run(
-            lead.run_cycle(
-                AnalysisTask(
-                    question=(
-                        "Reproduce the standard IXPE polarimetry result for Cyg X-1 from the "
-                        "local observations, per-DU and combined."
+
+        async def cycle():
+            # The run's stores (the real store, made by migration item S11) and run_research's lead
+            # wiring.
+            from auto_research.monitor import RunMonitor
+
+            ledger = RunMonitor(jsonl_path=dev_log_path("seat-probe", "lead_stores", ".jsonl"))
+            run_id, control = ledger.run_id, RunControl()  # a run of its own: nothing carried over
+            create_run_workspace(run_id, ["analyst_lead"])
+            async with run_stores(run_id, ledger, control) as keys:
+                await wire_lead(lead, run_id=run_id, toolkit_root=toolkit_root, keys=keys,
+                                run_monitor=ledger, run_control=control)
+                return await lead.run_cycle(
+                    AnalysisTask(
+                        question=(
+                            "Reproduce the standard IXPE polarimetry result for Cyg X-1 from the "
+                            "observations in the data store, per-DU and combined."
+                        ),
+                        instructions="The workers have reported. Settle the toolkit question, then judge.",
                     ),
-                    instructions="The workers have reported. Settle the toolkit question, then judge.",
-                ),
-                reports,
-                sources=["analyst_worker_0", "analyst_worker_1"],
-                rounds_left=2,
-                author_budget=3,
-                toolkit_root=toolkit_root,
-                worktree_base=toolkit_root,
-                direct_branch="ai",
-            )
-        )
+                    reports,
+                    sources=["analyst_worker_0", "analyst_worker_1"],
+                    rounds_left=2,
+                    author_budget=3,
+                    toolkit_root=toolkit_root,
+                    worktree_base=toolkit_root,
+                    direct_branch="ai",
+                )
+
+        outcome = asyncio.run(cycle())
 
     _record(
         "lead_cycle",
@@ -332,6 +340,7 @@ def test_the_worker_seat_drives_a_tool_loop_and_sees_a_figure(tmp_path):
     from auto_research.sandbox.registry import ToolkitRegistry
     from auto_research.sandbox.workspace import create_run_workspace
     from auto_research.schemas import AnalysisTask, AnalystReport
+    from tests.live_store import run_stores, worker_keys
 
     _, _, pair = _demo_seats()
     worker_seat = next(m for m in pair.members if m.provider == "dashscope")
@@ -360,23 +369,16 @@ def test_the_worker_seat_drives_a_tool_loop_and_sees_a_figure(tmp_path):
         # shell (`bash_exec`) production gives it. `sandbox_settings` defaults to the configured
         # ones in both seams, so the REPL and the shell are the ones production builds.
         mcp_client = worker_mcp_client([worker], run_id=run_id, toolkit_root=toolkit_root)
-        sandboxes = attach_worker_runtime(
-            [worker], run_id=run_id, registry=registry, toolkit_root=toolkit_root,
-            mcp_client=mcp_client,
-        )
-        assert worker.sandbox is not None and worker.registry is not None, (
-            "the production wiring did not attach a sandbox and a registry"
-        )
         task = AnalysisTask(
             question=(
-                "Before any reduction, inventory what is available: list the IXPE observation "
-                "directories the data catalogue knows about, and state which tool you would call "
-                "to produce a 2-8 keV polarization cube and what arguments it takes. Then look at "
-                "the attached figure from a previous run and say what it plots."
+                "Before any reduction, inventory what is available: list the IXPE observations "
+                "the data store holds, and state which tool you would call to produce a 2-8 keV "
+                "polarization cube and what arguments it takes. Then look at the attached figure "
+                "from a previous run and say what it plots."
             ),
             instructions=(
-                "Use your read-only tools to answer from what is on disk. Report honestly if a "
-                "capability is missing."
+                "Use your tools to answer from what the store and the toolkit hold. Report honestly "
+                "if a capability is missing."
             ),
         )
         # A peer's figures reach a worker on that peer's *report*, which is the production
@@ -388,17 +390,30 @@ def test_the_worker_seat_drives_a_tool_loop_and_sees_a_figure(tmp_path):
             status="succeeded",
         )
         async def main():
-            # Started outside the turn's try: a shell that fails to start fails the cell.
-            await mcp_client.start()
-            registry.load_mcp(mcp_client)
-            try:
-                return await worker.analyze(task, peer_reports=[peer])
-            finally:
-                for close in (*(sandbox.shutdown for sandbox in sandboxes), mcp_client.shutdown):
-                    try:  # leaf to root
-                        await close()
-                    except Exception:  # noqa: BLE001 — teardown never fails a measured cell
-                        pass
+            # The run's stores and the worker's own keys, as run_research takes them (the real
+            # store, made by migration item S11); revoked after the sandbox closes.
+            from auto_research.monitor import RunMonitor
+
+            ledger = RunMonitor(jsonl_path=dev_log_path("seat-probe", "worker_stores", ".jsonl"))
+            async with run_stores(run_id, ledger) as keys:
+                sandboxes = attach_worker_runtime(
+                    [worker], run_id=run_id, registry=registry, toolkit_root=toolkit_root,
+                    mcp_client=mcp_client, **await worker_keys(keys, ["analyst_worker_0"], ledger),
+                )
+                assert worker.sandbox is not None and worker.registry is not None, (
+                    "the production wiring did not attach a sandbox and a registry"
+                )
+                try:
+                    # Started outside the turn's try: a shell that fails to start fails the cell.
+                    await mcp_client.start()
+                    registry.load_mcp(mcp_client)
+                    return await worker.analyze(task, peer_reports=[peer])
+                finally:
+                    for close in (*(sandbox.shutdown for sandbox in sandboxes), mcp_client.shutdown):
+                        try:  # leaf to root
+                            await close()
+                        except Exception:  # noqa: BLE001 — teardown never fails a measured cell
+                            pass
 
         report = asyncio.run(main())
 

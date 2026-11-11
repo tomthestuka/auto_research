@@ -42,11 +42,9 @@ def run(tmp_path, monkeypatch):
     from auto_research.sandbox import fs_guard
 
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
-    mission = tmp_path / "ixpe"  # laid out as HEASARC's archive (H2)
-    (mission / "data/obs/01/01002901").mkdir(parents=True)
-    (mission / "data/obs/01/01002901" / "evt2.fits").write_bytes(b"events")
-    (mission / "catalog.json").write_text(json.dumps({"entries": {"01002901": {"max_level": 2}}}))
-    monkeypatch.setattr(react, "_observation_path_args", lambda: {"ixpe_path": str(mission)})
+    calibration = tmp_path / "inputs" / "calibration.txt"  # a file the first call reads by path
+    calibration.parent.mkdir()
+    calibration.write_text("gain 1\n")
     root = tmp_path / "toolkit"
     root.mkdir()
     git = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t"]
@@ -58,7 +56,7 @@ def run(tmp_path, monkeypatch):
     work = tmp_path / "w0"
     work.mkdir()
     def tool(module, fn, args):
-        if "obsid" in args:  # the loader: writes its declared product into its own folder
+        if "subject" in args:  # the loader: writes its declared product into its own folder
             Path(args["out_path"]).write_text("E,counts\n2,10\n")
             return {"exit_code": 0, "stdout": f"wrote {args['out_path']}",
                     "products": [{"path": args["out_path"], "caption": "spectrum"}]}
@@ -67,7 +65,7 @@ def run(tmp_path, monkeypatch):
     store = ReceiptStore(tmp_path / "receipts")
     ledger = tmp_path / "monitor.jsonl"
     registry = _FakeRegistry(known={LOAD, FIT}, mcp=set(),
-                             schema={"properties": {"obsid": {"kind": "setting"}, "ixpe_path": {"kind": "path"},
+                             schema={"properties": {"subject": {"kind": "setting"}, "calibration": {"kind": "path"},
                                                     "out_path": {"kind": "output", "shape": "file"},
                                                     "csv_path": {"kind": "path"},
                                                     "model": {"kind": "setting"}}})
@@ -76,7 +74,8 @@ def run(tmp_path, monkeypatch):
     tools = SandboxToolProvider(registry, sandbox, cwd=work, receipts=store,
                                 receipt_source="analyst_worker_0")
     worker = AnalystWorkerAgent(model=_Model([
-        ToolCall(id="c1", name=LOAD, arguments={"obsid": "01002901", "out_path": "spectrum.csv"}),
+        ToolCall(id="c1", name=LOAD, arguments={"subject": "s1", "calibration": str(calibration),
+                                                "out_path": "spectrum.csv"}),
         ToolCall(id="c2", name=FIT, arguments={"csv_path": {"$ref": "analyst_worker_0:d1"}, "model": "<b>tbabs</b>"}),
     ]), prompt="p", monitor=RunMonitor(chatter=10, jsonl_path=ledger))
     worker.agent_key = "analyst_worker_0"
@@ -152,7 +151,7 @@ def test_every_number_opens_the_chain_that_produced_it(tmp_path, run):
     # Two steps, oldest first: the load (its obs-db input, its file output), then the fit reading it.
     head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
     assert chain.index(f"1. {root.resolve()}/tk.load") < chain.index(f"2. {root.resolve()}/tk.fit")
-    assert "observation ixpe 01002901" in chain and "[analyst_worker_0:d1, step 1]" in chain
+    assert "calibration.txt" in chain and "[analyst_worker_0:d1, step 1]" in chain
     assert f"toolkit commit <code>{head.strip()}</code>" in chain
     assert "← the number is here" in chain
 
@@ -197,7 +196,7 @@ def test_copy_reproduce_code_carries_the_exact_arguments(tmp_path, run):
     fit_receipt = store.get("analyst_worker_0:r2")
     product = store.get("analyst_worker_0:d1")
     # The file the loader declared passes by reference; `_ref` reads it back as its path, checked.
-    assert args["csv_path"] == {"$ref": "analyst_worker_0:d1"} and args["ixpe_path"] == str(tmp_path / "ixpe")
+    assert args["csv_path"] == {"$ref": "analyst_worker_0:d1"} and "calibration" not in args
     assert f"'analyst_worker_0:d1': ({str(product.path)!r}, {product.sha256!r}, 'file')" in fit
     assert args["model"] == "<b>tbabs</b>" and fit_receipt.args_sha256  # rebuilt, and proven by the hash
     received = run_received(run)[-1]  # exactly what the tool process received
@@ -398,25 +397,20 @@ def test_reproduce_code_runs_the_toolkit_at_the_results_commit_when_the_checkout
     assert scope["_root"] != str(root.resolve()) and not (Path(scope["_root"]) / "added_later.py").exists()
 
 
-def test_reproduce_code_imports_an_in_process_call_through_its_package_manifest(tmp_path, monkeypatch):
+def test_a_call_whose_ledger_names_no_module_gets_no_reproduce_code(tmp_path):
+    """Every toolkit call runs in a unit's REPL, which records its module and function; a call
+    without them (a hand-edited ledger) is said to have no reproduce code, never guessed."""
     from auto_research.provenance.calls import LedgerCall
     from auto_research.report.html import reproduce_code
 
-    pkg = tmp_path / "zeta_utils"
-    pkg.mkdir()
-    (pkg / "__init__.py").write_text(
-        "TOOL_MANIFEST = {'research_toolkit.zeta_utils.listing': {'module': 'zeta_utils.impl', 'fn': 'listing'}}\n")
-    (pkg / "impl.py").write_text("def listing(obs_db_path):\n    return 'listed ' + obs_db_path\n")
     store = ReceiptStore(tmp_path / "receipts")
-    receipt = store.mint(source="analyst_lead", kind="result", produced_by="research_toolkit.zeta_utils.listing",
+    receipt = store.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.zeta_utils.listing",
                          data="listed /x", toolkit_root=str(tmp_path))
-    call = LedgerCall(actor="analyst_lead", tool="data_catalog", tool_call_id="t", call_id="c",
-                      model_args={}, context={}, ran_args={"obs_db_path": "/x"}, args_sha256="0")
-    code, _ = reproduce_code(receipt, call, store)
-    scope: dict = {}
-    monkeypatch.syspath_prepend(str(tmp_path))
-    exec(code, scope)  # noqa: S102 — our own generated lines
-    assert scope["out"] == "listed /x"
+    call = LedgerCall(actor="analyst_worker_0", tool="listing", tool_call_id="t", call_id="c",
+                      model_args={}, context={}, ran_args={"folder": "/x"}, args_sha256="0")
+    code, args = reproduce_code(receipt, call, store)
+    assert code == f"# {receipt.handle}: the ledger names no module and function for this call, so it has no reproduce code"
+    assert json.loads(args) == {"folder": "/x"}
 
 
 def test_reproduce_blocks_run_their_own_commit_in_one_interpreter_and_ignore_uncommitted_edits(

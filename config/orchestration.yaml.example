@@ -62,7 +62,6 @@ gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run
 # empty/unset ⇒ guard off. Governance basenames (CLAUDE.md/DOCS.md/AGENTS.md) are denied even inside an allowed root.
 agent_fs_allow:
   - /path/to/research_toolkit     # the toolkit root
-  - /path/to/obs_db_root          # obs_db_root (observations.yaml)
   - /path/to/conda/envs/analyze   # a human_envs prefix
   - /tmp
 
@@ -72,6 +71,27 @@ agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-on
   - /path/to/heasoft/x86_64-...      # HEADAS
   - /path/to/CALDB                   # CALDB
 test_data: {}                 # {name: folder} the toolkit's data("<name>") tests read; bound read-only into the gate's test run only
+
+# ── Data stores (step 0b): objects over S3 + a Postgres catalog; config/DOCS.md `stores` ──
+stores:
+  - name: db                               # the store's name (receipts and unit definitions name it); `db` is the default
+    kind: local                            # local: the runtime starts versitygw (+ its IAM) and Postgres; remote: endpoint + catalog_dsn
+    root: /path/to/db                      # the objects folder served as S3 (each top folder is a bucket); no jail mounts it
+    state_dir: /path/to/db.d               # the store's state: postgres/, versions/, iam/, logs/ (its file system must take user xattrs)
+    socket_dir: /path/to/db.run            # short folder on local disk outside /tmp (sockets <= 107 bytes) for the IAM and Postgres sockets; no jail mounts it
+    ports: {s3: 18070, iam: 18076, catalog: 18432}   # 127.0.0.1 ports: S3 gateway, IAM API, Postgres
+    buckets: [ixpe, nicer, nustar]         # each must exist with versioning Enabled
+    synthetic_buckets: []                  # buckets (listed above too) holding synthetic data: a result that read an object there is marked synthetic
+    catalog: {database: db, admin_user: ar_admin}    # the catalog database and the superuser initdb creates
+    roles: {producer: [analyst_worker_*]}   # unit name patterns holding the producer role (writes); every other unit reads, the lead included (until unit definitions name it, Phase 3 step 3)
+    admin_env: {s3_access_key: AR_DB_S3_KEY_ID, s3_secret_key: AR_DB_S3_KEY_SECRET, catalog_password: AR_DB_S3_CATALOG_SECRET}  # .env variable NAMES holding the admin secrets
+#  - name: db                              # a remote store instead:
+#    kind: remote
+#    endpoint: https://s3.us-east-1.amazonaws.com
+#    region: us-east-1
+#    buckets: [ixpe]
+#    catalog_dsn: "host=db.example.org port=5432 dbname=db user=ar_admin"   # password from admin_env.catalog_password
+#    admin_env: {s3_access_key: AR_DB_S3_KEY_ID, s3_secret_key: AR_DB_S3_KEY_SECRET, catalog_password: AR_DB_S3_CATALOG_SECRET}
 
 # ── Tool discovery ──
 disabled_tools: []   # tool names to hide from the catalogue regardless of what the toolkit exposes

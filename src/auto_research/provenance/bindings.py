@@ -692,7 +692,7 @@ def _copies(
         token = m.group()
         number = _as_float(token)
         if number is None or _significant_digits(token) < min_digits or not re.search(r"[.eE]", token):
-            continue  # an integer (a count, an ObsID, a channel) is a parameter, as in a tool call
+            continue  # an integer (a count, an identifier, a channel) is a parameter, as in a tool call
         refs = [f"{{{{{h}#{leaves[number]}}}}}" for h in handles
                 if number in (leaves := resolved.leaves(h))]
         # A value the call was given (chosen, or passed by reference), echoed by the tool: its
@@ -925,7 +925,7 @@ def check_report_fields(
             everything.extend(b.handle for b in parse_bindings(text, own_source=own_source))
     # A task's input grounds only the text that cites it (human ruling 2026-09-24), never the rest of
     # the report: citing [input:h1] in one field must not let another field repeat the request's
-    # numbers unmarked. Found live by the reviewer session (an ObsID in a title).
+    # numbers unmarked. Found live by the reviewer session (an identifier in a title).
     everything = [
         h for h in dict.fromkeys([*everything, *scope]) if not h.startswith(f"{INPUT_SOURCE}:")
     ]

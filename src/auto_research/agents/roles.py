@@ -2073,7 +2073,7 @@ class ReviewerAgent(AgentRole):
 def _request_receipt(store: Any, request: ResearchRequest) -> str:
     """The research request as an input receipt (``input:hN``), one per distinct text.
 
-    The request's own numbers — an ObsID, an energy band the human named — reach every role's
+    The request's own numbers — an identifier, a band the human named — reach every role's
     task, and a role that repeats one quotes it from this receipt, ``{{input:hN "…"}}``.
     """
     text = request.question + (f"\n\n{request.context}" if request.context else "")
@@ -2452,6 +2452,9 @@ class AnalystWorkerAgent(AgentRole):
             report_workspace=workspace,
             receipts=self.receipts,
             receipt_source=self.agent_key if self.receipts is not None else None,
+            # The worker's view of the store's records (S5), set with its keys (S4,
+            # graph.runtime.attach_worker_runtime); None: it holds no store keys.
+            store_records=getattr(self, "store_records", None),
         )
         history, history_base = await self._history_seed()
         peer_figures, not_attached = self._task_figures(peer_figures, continued=bool(history))
@@ -2689,7 +2692,7 @@ def _cycle_instruction(cycle: LeadCycle, reports: Sequence[Any], rounds_left: in
     """
     lines = [
         "This is your turn on the analysts' work. Investigate as long as you need (read_file, "
-        "list_dir, web_search, data_catalog), then write YOUR REPORT with write_report and "
+        "list_dir, web_search and your other read tools), then write YOUR REPORT with write_report and "
         "edit_report — your report is your decision — and end the turn with turn_end. "
         "The harness checks the report before accepting and tells you exactly what is missing, "
         "so a rejection is a fix, not a failure.",

@@ -29,6 +29,7 @@ from tests.test_sandbox import _FakeRegistry, _FakeSandbox
 TOOL = "research_toolkit.tk.call"
 MAKE = "research_toolkit.tk.make"
 WRITE = "research_toolkit.tk.write"
+READ = "research_toolkit.tk.read"
 ME, PEER = "analyst_worker_0", "analyst_worker_1"
 RUNS = None
 
@@ -65,7 +66,6 @@ def _pinned(monkeypatch, tmp_path):
     from auto_research.sandbox import fs_guard
 
     monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
-    monkeypatch.setattr(react, "_observation_path_args", lambda: {"path": str(tmp_path / "IXPE")})
 
 
 def _tool(tmp_path):
@@ -86,13 +86,36 @@ def _tool(tmp_path):
     return run
 
 
+#: A reader of stored objects: a record argument (step 0b) beside a setting.
+READ_SCHEMA = {"properties": {"obs": {"kind": "record"}, "s": {"kind": "setting"}}, "required": ["obs"]}
+#: The store's current versions, as the store seam names them (``provenance.inputs.CurrentVersion``).
+CURRENT = {("db", "ixpe", "01/evt.fits"): "v2", ("db", "ixpe", "02/evt.fits"): "v5"}
+
+
+#: Every (store, bucket, key) the fake store was asked to pin.
+ASKED: list[tuple[str, str]] = []
+
+
+def _current(store, bucket, key):
+    from auto_research.provenance.inputs import NoSuchRecord
+
+    ASKED.append((store, bucket, key))
+    if key == "fault":
+        raise RuntimeError("the store's catalog is down")
+    if key == "seam bug":
+        raise KeyError("a lookup inside the seam")  # a seam bug, never read as an absent object
+    if (store, bucket, key) not in CURRENT:
+        raise NoSuchRecord(key)
+    return CURRENT[(store, bucket, key)]
+
+
 #: The reducer: the shared arguments plus the folder it writes into.
 MAKE_SCHEMA = {**SCHEMA, "properties": {**SCHEMA["properties"], "outdir": {"kind": "output", "shape": "folder"}}}
 
 
 class _Registry(_FakeRegistry):
     def spec(self, k):
-        schema = {WRITE: OUT_SCHEMA, MAKE: MAKE_SCHEMA}.get(k, SCHEMA)
+        schema = {WRITE: OUT_SCHEMA, MAKE: MAKE_SCHEMA, READ: READ_SCHEMA}.get(k, SCHEMA)
         return {"module": "tk", "fn": k.rsplit(".", 1)[1], "args_schema": schema}
 
 
@@ -104,9 +127,9 @@ def run(tmp_path):
     tool = _tool(tmp_path)  # one counter: each worker's file has its own name
 
     def provider(source):
-        registry = _Registry(known={TOOL, MAKE, WRITE}, mcp=set())
+        registry = _Registry(known={TOOL, MAKE, WRITE, READ}, mcp=set())
         return SandboxToolProvider(registry, _FakeSandbox(tool_fn=tool), cwd=tmp_path / source,
-                                   receipts=store, receipt_source=source)
+                                   receipts=store, receipt_source=source, record_versions=_current)
 
     mine = provider(ME)
     asyncio.run(provider(PEER).execute(MAKE, OK))  # analyst_worker_1:r1, :d1
@@ -360,9 +383,9 @@ def test_what_the_tool_receives_and_what_the_call_records(run, tmp_path):
     handle = store.receipts(source=ME, kind="result")[-1].handle
     assert call_arguments(store, handle) == {"d": ref(f"{ME}:r1#/bins/0"), "p": chosen([2.0, 8.0], "the band"),
                                              "q": 0.99, "path": ref(f"{ME}:d1"), "s": "soft"}
-    # The mission folder is filled when the model leaves a path out.
+    # A path the model leaves out stays out: the runtime fills no store location (step 0b).
     received, _ = _check(run, {**OK}, RUNS)
-    assert received["path"] == str(tmp_path / "IXPE")
+    assert "path" not in received
 
 
 def test_ledger_cases_cover_every_origin_class_of_the_studies():
@@ -371,3 +394,93 @@ def test_ledger_cases_cover_every_origin_class_of_the_studies():
     for origin in ("retyped", "$ref", "brief", "chosen", "label", "ObsID", "directory", "shell",
                    "by hand", "CSV", "default", "peer", "request", "file read"):
         assert origin in labels, origin
+
+
+#: (id, arguments, expected): a ``record`` argument (step 0b) against what a model may write. A
+#: ``RUNS`` case names the value the tool receives, every record pinned to a version.
+RECORDS = [
+    ("record: pinned to the current version", {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits"}},
+     {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits", "version_id": "v2"}}),
+    ("record: an earlier version named", {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits", "version_id": "v1"}},
+     {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits", "version_id": "v1"}}),
+    ("record: a list, each pinned where it names no version",
+     {"obs": [{"store": "db", "bucket": "ixpe", "key": "01/evt.fits", "version_id": "v1"}, {"store": "db", "bucket": "ixpe", "key": "02/evt.fits"}]},
+     {"obs": [{"store": "db", "bucket": "ixpe", "key": "01/evt.fits", "version_id": "v1"},
+              {"store": "db", "bucket": "ixpe", "key": "02/evt.fits", "version_id": "v5"}]}),
+    ("record: a key the store does not hold", {"obs": {"store": "db", "bucket": "ixpe", "key": "09/evt.fits"}},
+     "store 'db' holds no object at key '09/evt.fits' in bucket 'ixpe'"),
+    ("record: a store that fails", {"obs": {"store": "db", "bucket": "ixpe", "key": "fault"}}, "state the store fault in your report"),
+    ("record: a fault inside the store seam", {"obs": {"store": "db", "bucket": "ixpe", "key": "seam bug"}},
+     "could not name the current version of 'seam bug' in bucket 'ixpe' (KeyError)"),
+    ("record: a key written as a reference", {"obs": {"store": "db", "bucket": "ixpe", "key": json.dumps(ref(f"{ME}:r1#/file"))}},
+     "argument obs is a record in a store"),
+    ("record: a version written as a reference", {"obs": {"store": "db", "bucket": "ixpe", "key": "k", "version_id": json.dumps(ref(f"{ME}:r1#/n_bins"))}},
+     "argument obs is a record in a store"),
+    ("record: no key", {"obs": {"store": "db"}}, "argument obs is a record in a store"),
+    ("record: a blank store", {"obs": {"store": " ", "bucket": "ixpe", "key": "01/evt.fits"}}, "argument obs is a record in a store"),
+    ("record: no bucket", {"obs": {"store": "db", "key": "01/evt.fits"}}, "argument obs is a record in a store"),
+    ("record: the old name version", {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits", "version": "v1"}},
+     "argument obs is a record in a store"),
+    ("record: an extra key", {"obs": {"store": "db", "bucket": "ixpe", "key": "k", "path": "/x"}}, "argument obs is a record in a store"),
+    ("record: a version that is not text", {"obs": {"store": "db", "bucket": "ixpe", "key": "k", "version_id": 2}},
+     "argument obs is a record in a store"),
+    ("record: a path to the object", {"obs": "/data/db/ixpe/01/evt.fits"}, "argument obs is a record in a store"),
+    ("record: a reference", {"obs": ref(f"{ME}:r1#/file")}, "argument obs is a record in a store"),
+    ("record: a value with a reason", {"obs": chosen({"store": "db", "bucket": "ixpe", "key": "k"})}, "argument obs is a record in a store"),
+    ("record: an empty list", {"obs": []}, "argument obs is a record in a store"),
+    ("record: a list holding a path", {"obs": [{"store": "db", "bucket": "ixpe", "key": "k", "version_id": "v"}, "/x"]},
+     "argument obs is a record in a store"),
+]
+
+
+@pytest.mark.parametrize("args, expect", [c[1:] for c in RECORDS], ids=[c[0] for c in RECORDS])
+def test_every_record_shape(run, args, expect):
+    from auto_research.provenance.refs import call_arguments
+
+    received, store = _check(run, args, None if isinstance(expect, dict) else expect, tool=READ)
+    if not isinstance(expect, dict):
+        return
+    assert received == expect
+    # The call's record names the version it read, behind the call's handle.
+    handle = store.receipts(source=ME, kind="result")[-1].handle
+    assert call_arguments(store, handle) == expect
+
+
+def test_a_refused_call_asks_the_store_nothing(run):
+    """A call the validator refuses is never pinned: the store is asked only for calls that run."""
+    ASKED.clear()
+    _check(run, {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits"}, "norm": 1}, "argument norm is not one", tool=READ)
+    assert ASKED == []
+    _check(run, {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits"}}, RUNS, tool=READ)
+    assert ASKED == [("db", "ixpe", "01/evt.fits")]
+
+
+def test_a_store_that_does_not_answer_is_the_calls_error(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(react, "_READ_TIMEOUT_S", 0.2)
+    release = threading.Event()
+    registry = _Registry(known={READ}, mcp=set())
+    sandbox = _FakeSandbox()
+    tools = SandboxToolProvider(registry, sandbox, cwd=tmp_path / ME,
+                                receipts=ReceiptStore(tmp_path / "receipts"), receipt_source=ME,
+                                record_versions=lambda store, bucket, key: release.wait(5) and "v1")
+    out = asyncio.run(tools.execute(READ, {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits"}}))
+    release.set()
+    assert out.is_error and "did not name the records' current versions within 0.2 s" in out.text
+    assert not sandbox.tool_calls
+
+
+def test_a_record_without_its_version_is_never_run_where_no_store_is_reached(tmp_path):
+    """A provider the store seam gave no ``record_versions`` cannot pin: the call is refused with
+    what to write, and nothing runs."""
+    registry = _Registry(known={READ}, mcp=set())
+    sandbox = _FakeSandbox()
+    tools = SandboxToolProvider(registry, sandbox, cwd=tmp_path / ME,
+                                receipts=ReceiptStore(tmp_path / "receipts"), receipt_source=ME)
+    out = asyncio.run(tools.execute(READ, {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits"}}))
+    assert out.is_error and "reaches no store to pin it: give the record's version_id" in out.text
+    assert not sandbox.tool_calls
+    out = asyncio.run(tools.execute(READ, {"obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits", "version_id": "v1"}}))
+    assert not out.is_error and sandbox.tool_calls[-1][2] == {
+        "obs": {"store": "db", "bucket": "ixpe", "key": "01/evt.fits", "version_id": "v1"}}

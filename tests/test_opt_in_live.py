@@ -102,7 +102,7 @@ _MIXED = {
                        "test_live_a_recorded_state_replays_and_matches_its_conda_part"],
 }
 #: Live modules not named ``test_live_*``.
-_LIVE_ELSEWHERE = ["test_full_suite", "test_sandbox_isolation", "test_smoke"]
+_LIVE_ELSEWHERE: list[str] = []
 _LIVE_MODULES = sorted({p.stem for p in (REPO / "tests").glob("test_live_*.py")} | set(_LIVE_ELSEWHERE) | set(_MIXED))
 
 

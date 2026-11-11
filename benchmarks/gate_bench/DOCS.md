@@ -612,3 +612,4 @@ Compacted 2026-09-01, 2026-09-24 and 2026-10-19 (every entry); detail in git his
   left out), so an edit of the shared builder changes the corpus base only together with the pin. The base
   holds no root `conftest.py` (only the full fixture toolkit does).
 - 2026-11-09 — Phase 3 step 0a W4: the real Layer-B runs use the toolkit's default environment (the `analyze_env`/`analyze_ini_sh` keys retired); the `analysis_env` test fixture stands this interpreter in as `env.analysis_environment`.
+- 2026-11-10 — PARKED (human ruling, Phase 3 step 0b): the benchmark's tests are not collected (`benchmarks/conftest.py` `collect_ignore_glob`) until its briefs move from the retired observation fields and `config/observations.yaml` to store records, at the next rerun (a new baseline, not comparable with the published numbers).

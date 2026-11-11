@@ -3,8 +3,8 @@
 ``install.sh`` bootstraps conda + the ``auto_research`` env, then runs this module
 (``python -m auto_research.setup``) to configure the machine-local files: it collects
 paths, the analysis env, and (increments 3/4) domain dependencies + the toolkit, then
-writes the gitignored ``config/orchestration.yaml`` + ``config/observations.yaml`` from
-their tracked ``*.example`` templates and runs the launch preflight as a smoke test.
+writes the gitignored ``config/orchestration.yaml`` from its tracked ``*.example`` template
+and runs the launch preflight as a smoke test.
 
 Two modes, one code path:
 - **Interactive** (a TTY): prompts via ``questionary`` (arrow-menus / path entry), seeded
@@ -35,8 +35,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "config"
 ORCH_LIVE = CONFIG_DIR / "orchestration.yaml"
 ORCH_TEMPLATE = CONFIG_DIR / "orchestration.yaml.example"
-OBS_LIVE = CONFIG_DIR / "observations.yaml"
-OBS_TEMPLATE = CONFIG_DIR / "observations.yaml.example"
 SANDBOX_DIR = REPO_ROOT / "src" / "auto_research" / "sandbox"
 ANALYST_ENV_LIVE = SANDBOX_DIR / "analyst_env.sh"
 REPL_INIT_LIVE = SANDBOX_DIR / "repl_init.py"
@@ -69,7 +67,6 @@ def derive_fs_allow(values: dict, extra_paths: list[str] | None = None) -> list[
     """
     candidates = [
         values.get("toolkit_root"),
-        values.get("obs_db_root"),
         values.get("analyze_env"),
         values.get("runtime_dir"),
         *(extra_paths or []),
@@ -135,18 +132,6 @@ def render_orchestration(template_text: str, values: dict, fs_allow: list[str]) 
             continue
         out.append(line)
         i += 1
-    return "\n".join(out) + "\n"
-
-
-def render_observations(template_text: str, obs_db_root: str) -> str:
-    """Render the live observations.yaml from the template, substituting ``obs_db_root``."""
-    lines = template_text.splitlines()
-    out = []
-    for line in lines:
-        if re.match(r"^obs_db_root:\s", line):
-            out.append(f"obs_db_root: {_format_scalar(obs_db_root)}")
-        else:
-            out.append(line)
     return "\n".join(out) + "\n"
 
 
@@ -284,10 +269,6 @@ def seed_defaults() -> dict:
         val = live.get(key, template.get(key))
         if not _is_placeholder(val) or key == "analyze_probe":
             defaults[key] = val
-    obs_live = _load_yaml(OBS_LIVE)
-    obs_val = obs_live.get("obs_db_root")
-    if not _is_placeholder(obs_val):
-        defaults["obs_db_root"] = obs_val
     return defaults
 
 
@@ -411,8 +392,7 @@ def page_paths(ans: Answers, defaults: dict) -> dict:
     """Page 5 — the machine paths outside both repos."""
     runtime_dir = ans.path("runtime_dir", "Runtime data dir (SQLite/figures/logs/reports):", defaults.get("runtime_dir"))
     papers_dir = ans.path("papers_dir", "Downloaded-papers dir:", defaults.get("papers_dir") or f"{runtime_dir}/papers")
-    obs_db_root = ans.path("obs_db_root", "Observation/data root (one subdir per mission/dataset):", defaults.get("obs_db_root"))
-    return {"runtime_dir": runtime_dir, "papers_dir": papers_dir, "obs_db_root": obs_db_root}
+    return {"runtime_dir": runtime_dir, "papers_dir": papers_dir}
 
 
 def seed_extra_fs_paths() -> list[str]:
@@ -421,7 +401,7 @@ def seed_extra_fs_paths() -> list[str]:
     live = _load_yaml(ORCH_LIVE)
     prior = live.get("agent_fs_allow") or []
     core = {
-        live.get("toolkit_root"), live.get("obs_db_root"),
+        live.get("toolkit_root"),
         live.get("analyze_env"), live.get("runtime_dir"), "/tmp",
     }
     return [p for p in prior if p not in core]
@@ -659,18 +639,16 @@ def page_toolkit(ans: Answers, defaults: dict, runtime_dir: str) -> str:
     return dest
 
 
-def write_configs(values: dict, extra_fs_paths: list[str] | None = None) -> tuple[Path, Path]:
-    """Page 6 — render + write the live orchestration.yaml and observations.yaml.
+def write_configs(values: dict, extra_fs_paths: list[str] | None = None) -> Path:
+    """Page 6 — render + write the live orchestration.yaml.
 
-    Renders from the tracked ``*.example`` templates (so new keys/comments are picked up) and
-    derives ``agent_fs_allow`` from the answered paths. Returns the two written paths.
+    Renders from the tracked ``*.example`` template (so new keys/comments are picked up) and
+    derives ``agent_fs_allow`` from the answered paths. Returns the written path.
     """
     fs_allow = derive_fs_allow(values, extra_fs_paths)
     orch_out = render_orchestration(ORCH_TEMPLATE.read_text(encoding="utf-8"), values, fs_allow)
     ORCH_LIVE.write_text(orch_out, encoding="utf-8")
-    obs_out = render_observations(OBS_TEMPLATE.read_text(encoding="utf-8"), values["obs_db_root"])
-    OBS_LIVE.write_text(obs_out, encoding="utf-8")
-    return ORCH_LIVE, OBS_LIVE
+    return ORCH_LIVE
 
 
 def page_preflight() -> bool:
@@ -757,9 +735,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         extra_fs = seed_extra_fs_paths()
 
-    orch_path, obs_path = write_configs(values, extra_fs_paths=extra_fs)
+    orch_path = write_configs(values, extra_fs_paths=extra_fs)
     print(f"  wrote {orch_path}")
-    print(f"  wrote {obs_path}")
 
     if not args.skip_preflight:
         page_preflight()

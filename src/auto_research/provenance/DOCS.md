@@ -41,9 +41,18 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   manifest: `data` (a tool's output: references into what the caller's own tools returned, never
   a call's arguments), `parameter` (a reference to the caller's own result, or a typed
   `{"value": …, "reason": "…"}`, or left out for the declared `default`), `path` (typed, or a
-  reference to a file the caller's own tool wrote), `setting` (typed) and `output` (where the tool
-  writes: the runtime fills it, below). `check_arguments` judges
-  the arguments as the model wrote them, before the runtime fills mission folders and defaults
+  reference to a file the caller's own tool wrote), `setting` (typed), `output` (where the tool
+  writes: the runtime fills it, below) and `record` (an object in a named store,
+  `{"store", "bucket", "key"[, "version_id"]}` or a non-empty list of them; step 0b: the runtime
+  pins a record without a `version_id` to the store's current one before the call, `record_pins`, and the call's
+  arguments keep the pinned version). A manifest entry may also declare `reads` (the stores the tool
+  reads without a `record` argument, through the catalog; validated like `writes`; it makes the
+  package a store package for the CI pipeline, S7) and `writes` (the stores the
+  tool creates products in) and `algorithm_version` (text, required with `writes`, part of a
+  product's identity), checked by `spec_problems`. A tool names records, never a store's location:
+  the retired kind `store` and an argument named `obs_db_root` are refused with `record` as the
+  replacement. `check_arguments` judges
+  the arguments as the model wrote them, before the runtime pins records and fills defaults
   (`calls.resolve_call_args`); an argument the manifest does not declare is refused, and so is a
   reason on any kind but a parameter. `tool_values` then gives the tool plain values. The call's
   arguments, which `args_sha256` hashes, keep each reason and reference, so a chosen value and why
@@ -83,9 +92,21 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   scope it is skipped silently. This closes line-number grounding (`read_file`'s `cat -n`) and the
   existence-over-everything-read coincidence class, and makes the shell typed-number rule
   unnecessary (deleted).
-- **Flags propagate.** `failed` (the producing call failed) and `synthetic` (an input under a
-  marked `synth<YYMMDD>-<sha>` directory, §9.5) pass to every descendant. A flagged receipt can be
+- **Flags propagate.** `failed` (the producing call failed), `synthetic` (it read an object in a
+  bucket its store declares synthetic, `stores:` `synthetic_buckets`), `undeclared_write` (it wrote
+  in a store its manifest does not name in `writes`, wrote what the store's listing does not show,
+  or removed a version) and `unverified` (the runtime could not establish what it read or wrote in a
+  store) pass to every descendant (`mint(flags=)` plus every parent's). A flagged receipt can be
   cited to describe what happened; it cannot ground a number.
+- **Store reads and writes come from the store's own records** (step 0b S5, `store.records`). The
+  worker's provider brackets each sandbox call: the store's version listing under the unit's
+  writable area before and after, and the access log's lines by the unit's keys during it. Each
+  object version the call read pinned joins its `inputs` (`InputFile(basis="object", object=…)`),
+  linked to the in-run call that wrote that version when the bytes match (`ReceiptStore.object_writer`,
+  else `unverified` with a note); what it wrote is `Receipt.writes` on the result receipt. Every hash
+  is the runtime's (GET by version id). The obs-db rules (ObsID folders, `catalog.json`, the
+  `synth…` folder regex) are retired (not backwards compatible: a receipt with basis `obsdb` no
+  longer loads).
 - **Output arguments are the runtime's** (user rulings 2026-11-04, plan item B1). An `output`
   argument names where a tool writes its opt-in science artifacts, and its manifest entry names
   its `shape`: a `folder` (`outdir`), a `file` (`save_path`, `log_path`, `outfile`) or a `prefix`
@@ -118,8 +139,8 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   `[provenance]` note the model reads (outside the folder, absent, through a link, malformed, past
   the cap, or a tool with no output argument and so no folder). Nothing else a call writes is
   minted: the earlier rule (`data_products`: a named-argument path the call changed, or an
-  absolute path printed in its output) is gone, so a parameter file, a cache or an obs-db write is
-  scratch or opt-out, never a receipt. A declared product passes to a later call as
+  absolute path printed in its output) is gone, so a parameter file or a cache is scratch, never a
+  receipt, and a store write is named on the result receipt's `writes` from the store's own records. A declared product passes to a later call as
   `{"$ref": "<handle>"}` (`refs.resolve_one`, unchanged).
 - **Every number is its own citation** (user ruling 2026-11-03, one citing syntax, replacing the
   2026-09-24 *scoped grounding* under which a `[src:r12]` let any number its receipts held stand
@@ -165,7 +186,8 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   is added here.
 - `calls.resolve_call_args(arguments, context) -> dict` — the arguments a worker's call runs with
   (the model's, completed by the runtime's context; `output_args` + `products_dir` place every
-  output argument in the call's own folder); `calls.args_digest(args)` — the
+  output argument in the call's own folder; `records` replaces each record argument with its pinned
+  value); `calls.args_digest(args)` — the
   `Receipt.args_sha256` hash; `calls.ledger_calls(path) -> list[LedgerCall]` — every call in a
   ledger that minted receipts, with its rebuilt `ran_args` (what the receipts hash) and `sent_args`
   (what the tool received: without the runtime-only `env` / `shell_env`); a call answered without
@@ -175,10 +197,11 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   subset of receipts in any order. `calls.FIGURE_PATH_ARGS`.
 - `ScopedLookup(store, *, own_source, admitted=())` — what one agent may cite: its own receipts
   (live) plus admitted handles and their ancestors; `.admit(handles)`, `.handles()`.
-- `capture.inputs_before(store, args, *, cwd, skip_keys, observation_paths=None) -> CallInputs` and
+- `capture.inputs_before(store, args, *, cwd, skip_keys) -> CallInputs` (the files and folders the
+  arguments name) and
   `capture.receipt_call(store, *, source, produced_by, args, text, failed, state, figures, cwd,
-  toolkit_root, kind, fields, parents=(), returned=None, call_id=None, products=(), products_dir=None)
-  -> CallReceipts` — one tool call to receipts (`products` minted as above, inside `products_dir`); `call_id` is the id the caller allocated before the call ran (it names the
+  toolkit_root, kind, fields, parents=(), returned=None, call_id=None, products=(), products_dir=None,
+  reads=(), writes=(), flags=()) -> CallReceipts` (`reads`/`writes`/`flags`: a `store.records.CallIO`'s) — one tool call to receipts (`products` minted as above, inside `products_dir`); `call_id` is the id the caller allocated before the call ran (it names the
   call's products folder), a fresh one otherwise; `parents`
   (the call's `$ref` receipts) go on every receipt it mints; `.header()` is the line the model sees
   (`[receipt h] ← parents`). `capture.toolkit_commit(root)` reads HEAD (read-only).
@@ -192,8 +215,8 @@ report prose ──► check_bindings / check_report_fields ──► problems (
 - `inputs.check_arguments(tool, arguments, schema, *, runtime=frozenset()) -> str | None` — the
   refusal for arguments, as written, that break their kinds (`runtime`: names the runtime consumes,
   `env`); `inputs.tool_values(args, schema, store, usable) -> ToolValues(sent, parents)` — the
-  completed arguments as the tool receives them. Both call paths use them: the worker's
-  `SandboxToolProvider.execute` and the lead's in-process `execute_data_catalog`.
+  completed arguments as the tool receives them, used by the worker's `SandboxToolProvider.execute`
+  (the one call path of a toolkit tool).
   `ledger_calls(...).sent_args` keep the references; `report.html.reproduce_code` resolves them
   from the store for a rerun.
 - Invariant: every problem string names what is wrong and what to do, because it is returned to
@@ -210,28 +233,14 @@ report renderer.
 ## Dictionary-level reference
 
 - `ReceiptStore.mint(*, source, kind, produced_by, data=None, path=None, call_id=None,
-  toolkit_commit=None, args=None, inputs=(), parents=(), failed=False, **fields)` — exactly one of
+  toolkit_commit=None, args=None, inputs=(), parents=(), failed=False, flags=(), **fields)` (`flags`:
+  the caller's own marks; `writes=` passes through `fields`) — exactly one of
   `data` (stored as a blob) / `path` (hashed in place). `fields` carries the kind-specific receipt
   fields (`caption`, `mime_type`, `title`, `ids`, `source_sha256`, `parser`, `commit_sha`).
 - `ReceiptStore.hash_input(path) -> InputFile` — cached per (path, size, mtime); links `receipt`
   when the bytes match an in-run receipt.
-- `ReceiptStore.hash_obsdb_entry(mission_dir, obsid, *, entries=None) -> InputFile | None` — an
-  observation a tool located from its ObsID (user ruling 2026-10-16: what it is and a hash, never
-  a copy), at the folder `observations.obsid_folder` finds (the catalog entry's record, then the
-  mission's HEASARC tree rule, mirroring the toolkit's `obsdb_catalog._domain.TREES`; an ObsID the
-  rule finds twice records nothing; `mission=` names the mission as configured, so a symlinked
-  mission folder keeps its tree rule; `index=` walks the tree once per call; a name with no digit
-  that the catalog does not list is looked up nowhere): basis
-  `obsdb`, sha256 over the catalog entry (`catalog.json`) plus the folder listing; read fresh each
-  call; an uncatalogued ObsID-like folder is its `listing`; `None` otherwise. `capture.inputs_before(observation_paths=)`
-  records one per string any argument holds (through lists and dicts, e.g. `load_data`'s
-  `epoch={"IXPE": [...]}`) that a mission folder's catalog lists; a string naming a subfolder the
-  catalog does not list, and that holds a digit, is that folder's `listing` (fresh each call; a
-  mission folder never is); with no observation named in a folder the caller named itself
-  (`named_folders`), that folder's `catalog.json` is the input (`data_catalog`); a folder the runtime
-  filled in records nothing. Integer ObsIDs count. A `synth<YYMMDD>-<sha>` or hand-authored `synth_<name>`
-  folder flags the result synthetic.
-  Relative folders resolve against the call's `cwd`.
+- `ReceiptStore.object_writer(store, bucket, key, version_id) -> Receipt | None` — the result receipt
+  whose call wrote that object version (`Receipt.writes`, delete markers excepted), indexed on replay.
 - `ReceiptStore.text(handle) -> str | None` — the text a quote is checked against (result, web,
   paper, human; a data file when it decodes as UTF-8).
 - `ReceiptStore.verify(handle) -> str | None` — re-hash; a problem sentence or `None`.
@@ -239,7 +248,7 @@ report renderer.
 - `normalise(text, kind) -> str`; `bounded_find(hay, needle) -> bool`.
 - `parse_bindings(prose, *, own_source) -> list[Binding]` — `self:` resolves to `own_source`.
 - `Binding(start, end, handle, quote)`; `BindingResult(problems, bindings)`, `.cited`.
-- `is_synthetic_path(path)`, `sha256_file(path)`.
+- `sha256_file(path)`.
 - `capture.parse_products(raw) -> (list[DeclaredProduct], notes)` — the one reading of a returned
   `products` list (exactly `PRODUCT_KEYS`, each non-empty text), used by `receipt_call`'s caller
   and the gate; `capture.DeclaredProduct(path, caption)`; `capture.PRODUCT_KEYS = ("path",
@@ -263,7 +272,22 @@ report renderer.
   miss names the keys or the index bound that exist.
 - `refs.handles_named(text) -> list[str]` — every handle-shaped string a text names, bracketed or
   bare, once each (a message's handles).
-- `inputs.ARG_KINDS = ("data", "parameter", "path", "setting", "output")`;
+- `inputs.ARG_KINDS = ("data", "parameter", "path", "setting", "output", "record")`;
+  `inputs.RECORD_KEYS = ("store", "bucket", "key", "version_id")`; `inputs.record_value(value) -> dict | None`
+  (one record: `store`, `bucket` and `key` required, `version_id` optional, each non-blank text and
+  no reference, no other key); `inputs.declared_records(schema) -> list[str]`;
+  `inputs.CurrentVersion = Callable[[str, str, str], str]` (`(store, bucket, key) -> version_id`,
+  raising `inputs.NoSuchRecord` for an absent object, any other exception a store fault: the
+  interface the store seam supplies, passed as `SandboxToolProvider(record_versions=)`);
+  `inputs.record_pins(arguments, schema, current) -> {argument: pinned value}` (each record argument
+  holding a record without a `version_id`, the same record or list with every `version_id` set; raises `RecordPinError` — a
+  `LookupError`, its message the model's — when `current` is `None`, finds no object or fails);
+  `inputs.WRITES_KEY = "writes"`, `inputs.ALGORITHM_VERSION_KEY = "algorithm_version"`;
+  `inputs.spec_problems(tool, spec) -> list[str]` (the whole manifest entry: `manifest_problems` of
+  its `args_schema`, a `writes` that is not a non-empty list of distinct store names, an
+  `algorithm_version` that is not text or is absent beside `writes`; used by the registry and the
+  gate's `structural.argument_kinds`);
+  `inputs.RETIRED_KINDS = ("store",)` (refused by `manifest_problems`, naming `record`);
   `inputs.OUTPUT_SHAPE_KEY = "shape"`, `inputs.OUTPUT_SHAPES = ("folder", "file", "prefix")`;
   `inputs.declared_outputs(schema) -> {argument: shape}` (what `_call_context` records as
   `output_args`); `inputs.declared_output_names(schema) -> {argument: file name}` (a file or
@@ -271,8 +295,8 @@ report renderer.
   str` (the file name an output keeps, `""` for none); `inputs.declared_kinds(schema)`,
   `inputs.declared_defaults(schema)` (parameters with a `default`, which `_call_context` records as
   `defaults`); `inputs.manifest_problems(tool, schema) -> list[str]` (no kind, an unknown kind, an
-  optional parameter without a default, an output without a known shape: refused at launch, at the
-  gate and at the call).
+  optional parameter without a default, an output without a known shape, a store's location: refused
+  at launch, at the gate and at the call).
 - `refs.VALUE_KEY, refs.REASON_KEY = "value", "reason"`; `refs.typed_parameter(value) -> (value,
   reason) | None` (exactly those two keys, a non-empty reason, no reference inside; a JSON string
   of one is read as the REPL would).
@@ -468,3 +492,22 @@ Compacted 2026-10-07 (the 2026-10-06/07 entries) and 2026-10-19 (every entry); d
 - 2026-11-04 — H2 review: `inputs_before` passes each mission folder's configured name and a lazy tree index (`functools.cache` of `observations.obsid_index`) to `hash_obsdb_entry`, which returns before any lookup for an uncatalogued name with no digit.
 - 2026-11-09 — Phase 3 step 0a W2: `TOOLKIT_PRODUCER_PREFIX` removed; `is_evidence` and the commit stamp in `capture.receipt_call` ask `toolkit_contract.is_toolkit_producer` (a producer starting with the declared toolkit name and a dot; the registry serves only `<name>.<package>.<tool>` keys). New `store.HARNESS_PRODUCERS`, the names the contract refuses (B2; invariant tests in `tests/test_toolkit_contract.py`).
 - 2026-11-09 — Phase 3 step 0a W10 (ruling D25): `capture._allow_listed` always excludes the host `/tmp` (every process has a private one in its jail); an allow-list naming only the host `/tmp` admits nothing.
+- 2026-11-10 — Phase 3 step 0b S3: the argument kind `record` (`ARG_KINDS`), a reference into a named store `{"store", "key"[, "version"]}` or a list of them; `check_arguments` refuses any other shape (a path, a reference, a reason, an extra key) with what to write. `record_pins` + `CurrentVersion` (the store seam's `(store, key) -> version id`, S5 fills it) pin a record written without its version before the call; `calls.resolve_call_args` applies the pins from the context key `records` (replacing `observation_paths`, removed with the runtime's observation-path fill), so a call's arguments and receipt hash name the version read. Manifest entries gain `writes` and `algorithm_version` (`spec_problems`, `WRITES_KEY`, `ALGORITHM_VERSION_KEY`). A store's location is refused: the retired kind `store` and the argument `obs_db_root` (`RETIRED_KINDS`, `RETIRED_STORE_ARGS`), each naming `record`. Not backwards compatible (human ruling): no shim for the removed fill. Tests: `tests/test_input_cases.py` (`RECORDS`), `tests/test_input_validator.py` (launch refusals for a store location and an unversioned writer; a record reader and versioned writer load; the gate's `structural.argument_kinds`), `tests/test_call_args_ledger.py`.
+- 2026-11-10 — S3 stateless review fixes: `inputs.NoSuchRecord(LookupError)` is what a `CurrentVersion` raises for an absent object; any other exception (a seam bug included) is a store fault whose message asks the model to state it in its report. `record_value` refuses a field holding a reference (its text would be pinned while the tool received the resolved value). `manifest_problems` refuses a `default` on a `record` argument (the runtime pins only records a call names). Tests: `tests/test_input_cases.py` (seam fault, references in fields, a refused call asks the store nothing, a silent store), `tests/test_input_validator.py`.
+- 2026-11-10 — S3 follow-up (coordinator ruling: one record shape for the catalog S2 and the toolkit helper S8): a record names its bucket and uses the S3 name for the version — `{"store", "bucket", "key"[, "version_id"]}` (`RECORD_KEYS`); `CurrentVersion` is `(store, bucket, key) -> version_id`; a record written with `version` or without `bucket` is refused with the shape to write. Refusal and pin messages name the bucket. Tests: `tests/test_input_cases.py` (RECORDS: no bucket, the old name `version`), `tests/test_call_args_ledger.py`, `tests/test_input_validator.py`.
+- 2026-11-10 — Phase 3 step 0b S5: **receipts from the store's own records.** `capture.inputs_before`
+  hashes only the files and folders the arguments name (`observation_paths`, `named_folders`,
+  `_named_strings` and the `catalog.json` input removed); `receipt_call(reads=, writes=, flags=)`
+  takes what `store.records.StoreRecords.bracket` recorded: object reads join the inputs, linked to
+  the in-run writer when the bytes match (`_linked_reads`), writes go on the result receipt.
+  `ReceiptStore.mint(flags=)`, `ReceiptStore.object_writer`; `hash_obsdb_entry`, `_catalog_entries`,
+  `is_synthetic_path` and the `synth…` regex removed (synthetic = a bucket the store declares
+  synthetic). Tests: `tests/test_store_records.py` (a real throwaway store), `tests/test_toolkit_receipts.py`
+  (the toolkit root/commit tests kept from the retired `tests/test_obsdb_inputs.py`),
+  `tests/test_provenance.py`, `tests/test_refs.py`.
+- 2026-11-10 — S4 follow-up: `capture.receipt_call(commit=)` — the commit the process that ran the call imported (a REPL's `call_commit`); omitted, HEAD now as before. `SandboxToolProvider` passes it for every toolkit call that ran in a REPL.
+- 2026-11-10 — Phase 3 step 0b S9: `NOT_EVIDENCE_NAMES['catalog_query']` ("a catalog listing"), the lead's catalog query, a harness read; the lead's in-process toolkit call (`execute_data_catalog`) is gone, so no toolkit receipt is minted outside a worker's sandbox.
+- 2026-11-10 — Step 0b S5 follow-up 3: `receipt_call(carried=)` (flags the call's reads carry from the products they descend from: on every receipt it mints) beside `flags=` (its own); `CallReceipts.own_flags` (its own plus `failed` and a writer-mismatch `unverified`), what the runtime stamps on the call's products.
+- 2026-11-10 — S7 final follow-up (main ruling 2): manifest `reads: [<store>]` (`inputs.READS_KEY`), validated by `spec_problems` like `writes`.
+- 2026-11-11 — S12 (docs): the products paragraph names a store write as the result receipt's `writes` (from the store's records); it still called an obs-db write opt-out.
+- 2026-11-11 — (main) `RETIRED_STORE_ARGS` (`obs_db_root`) removed: a domain name in `src/` (domain-neutral ruling); a store location is still refused by the retired kind `store`, and a `path` argument resolving inside a store's folders is refused at call time (`store.records.store_location_problem`). Stale comments in `calls.py` reworded.
