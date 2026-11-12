@@ -27,9 +27,9 @@ from typing import Any
 
 import pytest
 
-#: The toolkit commit the coding-pipeline cells clone: the first one carrying the data store
-#: (Phase 3 step 0b, item S8). None until the human commits the toolkit's store work.
-STORE_BASE_REF: str | None = None
+#: The toolkit commit the coding-pipeline cells clone: one carrying the data store
+#: (Phase 3 step 0b, item S8): toolkit main and ai-xspec at S13 (2026-11-12).
+STORE_BASE_REF: str | None = "04b294db9ef4e88ec0e62076cfae0499daef37e5"
 
 
 def store_base_ref() -> str:

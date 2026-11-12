@@ -26,9 +26,8 @@ truth for how this project is built — current status, the phase spec, and the 
 order live there, not here. **Phase 3 (active):** generalizing the agent unit inside this
 repository (per-unit toolkit and sandbox, subagent grants). Its first step (done 2026-11-10)
 decoupled the orchestration from `research_toolkit`: every coupling is removed or written into one
-toolkit contract, so any toolkit that meets it pairs with the orchestration. Its second, the data store (S3 bytes plus a
-Postgres catalog, reached only through toolkit tools), is built; the migration of the live store and its live cells
-remain. Its software-environment stream is
+toolkit contract, so any toolkit that meets it pairs with the orchestration. Its second (done 2026-11-12), the data store (S3 bytes plus a
+Postgres catalog, reached only through toolkit tools), is built, the live store migrated and its live cells passed. Its software-environment stream is
 built and live-verified: the coding pipeline defines and builds environments, and each toolkit call
 runs in its package's own. The Phase 2 spec is archived in `CLAUDE_p2.md`.
 

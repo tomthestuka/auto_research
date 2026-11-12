@@ -29,6 +29,7 @@ D1 records how a worker treats a peer's unbacked claim; it is judged by reading,
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import uuid
@@ -60,6 +61,7 @@ SPECTRA = "pha"  # the store's kind for an IXPE observation's Stokes spectra (to
 NUSTAR_SPECTRA: str | None = None
 LOAD, FIT = "xspec_utils.load_data", "xspec_utils.fit_tbfeo_hss"
 REFINE, PLOT, IQU = "xspec_utils.run_fit", "xspec_utils.plot_fit", "xspec_utils.plot_iqu"
+CATALOG = "catalog_utils.data_catalog"  # where a worker finds a product's record
 DERIVED = (FIT, PLOT)  # the chain's steps whose science input is the load's result (kind data)
 LINT = "This call was not run. Each value needs to arrive"  # the input validator turning a call back
 SEATS = [0, 1]  # the configured analyst_worker members (claude-sonnet-5, gpt-5.6-terra)
@@ -232,6 +234,38 @@ def _reaches(store, handle: str, targets: set[str]) -> bool:
     return handle in targets or any(a.handle in targets for a in store.ancestors(handle))
 
 
+def _listed_records(text: str) -> list[dict]:
+    """The records a ``data_catalog`` listing names, one JSON object per line (``… record {…}``)."""
+    records = []
+    for line in text.splitlines():
+        if "{" in line:
+            with contextlib.suppress(ValueError):
+                found = json.loads(line[line.index("{"):])
+                if isinstance(found, dict):
+                    records.append(found)
+    return records
+
+
+def _lists_a_load_read(store, handle: str, loads: set[str], source: str) -> bool:
+    """Whether ``handle`` is ``source``'s own unflagged ``data_catalog`` listing, made before a load,
+    naming as one record the object (bucket, key and version) that load read. A record argument is
+    typed, never passed by reference (step 0b): the load is bound to the store's own read records, so
+    the listing a worker found the record in is none of its parents; cited, it is on the chain when it
+    lists exactly what a later load read."""
+    receipt = store.get(handle)
+    if (receipt is None or handle.split(":", 1)[0] != source or receipt.produced_by != _producer(CATALOG)
+            or receipt.flags):
+        return False
+    listed = {(r.get("bucket"), r.get("key"), r.get("version_id")) for r in _listed_records(store.text(handle) or "")}
+    for load in map(store.get, loads):
+        if load.created_at < receipt.created_at:
+            continue
+        if any(i.basis == "object" and i.object is not None and i.object.version_id
+               and (i.object.bucket, i.object.key, i.object.version_id) in listed for i in load.inputs):
+            return True
+    return False
+
+
 def _chain_problems(store, ledger: Path, source: str) -> list[str]:
     """What breaks the chain load → fit / plot for ``source``; empty when it holds."""
     from auto_research.provenance.calls import calls_by_receipt, ledger_calls
@@ -316,7 +350,9 @@ def test_b1_a_chained_analysis_passes_every_result_on_by_reference(member):
         cited = sorted({h for f in report.findings for h in re.findall(CITED, f)})
         if not cited:
             problems.append("no reported finding cites a worker receipt")
-        problems += [f"{h} (cited) does not reach the load" for h in cited if not _reaches(store, h, loads)]
+        problems += [f"{h} (cited) does not reach the load" for h in cited
+                     if not _reaches(store, h, loads)
+                     and not _lists_a_load_read(store, h, loads, "analyst_worker_0")]
         if cited and set(cited) <= loads:
             problems.append("the findings cite only the load, no result derived from it")
         payload.update(
