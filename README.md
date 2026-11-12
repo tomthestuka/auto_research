@@ -121,7 +121,7 @@ Everything the installer does, by hand:
    commits authored tools onto), ensure a git `user.name`/`user.email`, and fill the `toolkits:`
    block (the toolkit contract: its `name`, `root`, `package_glob`, `template_package`,
    `authoring_branch`, `default_env`, `test_classes`; `config/DOCS.md`).
-6. **Data store** (step 0b, built; the live store is not yet migrated) — fill the `stores:` block (`config/DOCS.md`): a `local`
+6. **Data store** (step 0b, built; the live store migrated 2026-11-11) — fill the `stores:` block (`config/DOCS.md`): a `local`
    store names its objects folder (`root`), its state folder (`state_dir`, on a file system that takes
    `user.` xattrs), a short `socket_dir` no jail mounts, and three free 127.0.0.1 ports; put the admin
    secrets in `.env` under the variable names its `admin_env` gives. A run starts versitygw and

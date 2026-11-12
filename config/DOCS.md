@@ -259,8 +259,8 @@ uninstalled configuration rather than silently falling back here.
   - `roles` (optional; `{producer: [patterns]}`, default `[analyst_worker_*]`): units whose name matches a pattern hold the store's producer role (write any key of its buckets, create-only by the toolkit helper), every other unit the reader role (pinned reads); each unit is its own S3 user and Postgres login for the run (`store.keys`). Until unit definitions name the role (Phase 3 step 3).
   - `remote`: `endpoint` (http(s) URL), `region` (default `us-east-1`), `catalog_dsn` (libpq conninfo
     naming host, dbname and user, no password).
-  Live: `db`, local, root `/xray02/fzhou_db`, state `/xray02/fzhou_db.d` (both made at migration, S11;
-  until then `store_config` and `store_servers` fail the live launch), sockets `/scratch/fzhou_db.run`,
+  Live: `db`, local, root `/xray02/fzhou_db`, state `/xray02/fzhou_db.d` (both made at migration, S11,
+  2026-11-11), sockets `/scratch/fzhou_db.run`,
   ports 18070/18076/18432, buckets `ixpe`, `nicer`, `nustar` (default D-names, to confirm).
 - `orchestration.yaml.test_data` — `{name: folder}`: the host's data sets the toolkit's
   `data("<name>")` tests read (the toolkit names a need, the host satisfies it by name). The gate binds
@@ -425,3 +425,4 @@ Compacted 2026-09-01, 2026-09-24, 2026-10-07 and 2026-10-19 (every entry); detai
 - 2026-11-10 — S9 follow-up (main ruling 5): `stores[].roles.producer` is `[analyst_worker_*]` in both files and the default; the lead holds the reader role (it only queries the catalog). The `stores:` block must declare the default store `db` (`store_config`, ruling 6).
 - 2026-11-10 — S7 follow-up: `code_gate.yaml` `allowlist_obsid_tokens` removed (the gate scans every added line since step 0b; synthetic data lives in a store's `synthetic_buckets`).
 - 2026-11-11 — (main) store `db` admin secret names renamed to the human's choice: `AR_DB_S3_KEY_ID`, `AR_DB_S3_KEY_SECRET`, `AR_DB_S3_CATALOG_SECRET` (`stores[].admin_env`; also `.env.example`, README).
+- 2026-11-11 — `stores:` live entry: the store `db` exists (migration S11 done).
