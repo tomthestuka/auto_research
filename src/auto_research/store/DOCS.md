@@ -3,7 +3,7 @@
 ## Purpose
 The data a run reads and writes beyond its own workspace: observation archives and the products tools
 make from them. A store is **bytes behind the S3 contract plus a Postgres catalog** (Phase 3 step 0b;
-plan `tmp_phase3/0b/PLAN_0b_formal.md`, rulings `tmp_phase3/0b/PLAN.md` §2a). This package declares the
+rulings in CLAUDE.md §9.10 row 0b). This package declares the
 stores (`config`), starts and stops a local store's servers (`launch`), and checks every store at launch
 (`health`). The catalog's schema and calls are `catalog` (item S2); the reconciler is `reconcile` (item S6);
 the CI pipeline's throwaway store is `ci` (item S7). The human's ingest of files on disk is `ingest` (item S11).
@@ -692,7 +692,7 @@ The human's two ways to fill a store from data already on disk (human rulings 20
 enters a fresh store through the gateway, non-destructively; archive downloads become products exactly as
 the toolkit's own tool makes them; the human's derived files become products of the human's recipe).
 Domain-neutral: the astronomy (which files, which tool) lives in the human's mapping file and job script,
-outside `src/` (S11's are in `tmp_phase3/0b/migration/`).
+outside `src/` (S11's scratch copies were erased 2026-11-18).
 ```
 start [--create-buckets]   launch.start (local, idempotent) · each declared bucket created, versioning Enabled
                            · health.ready_problems ("ready" or what the preflight would say)
@@ -1095,3 +1095,4 @@ produce --unit U --env E [--readonly DIR ...] [--timeout S] -- COMMAND ...
 - 2026-11-11 — S7 follow-up (main's rulings 1, 3): preflight notice `store_ci_leftovers` (`leftover_folders`, `check_ci_leftovers`; the sweep removes exactly what `leftover_folders` lists); the store test fixtures (`make_store`, the reconciler's `env`, `serving_real_store`) remove their socket folders also when a store is refused or never started.
 - 2026-11-11 — S13a follow-up 3 (main's ruling 1): `health.config_defects()` splits `store_config`'s refusals a host cannot fix by providing the store from an absent store's (`_placement_problems`, `_default_problems` shared with `check_store_config`, whose behaviour is unchanged).
 - 2026-11-11 — S11 real run done: 21 raw observations migrated by `produce`, 01002901 and 01250101 kept as the human's raw products (01250101's first single 3.3 GB PUT was refused by the gateway under load with `XAmzContentSHA256Mismatch`; rerun on a quiet store, generation 2), 5 spectra ingested. Final reconcile: 23 raw + 5 pha verified, 21 current, every object hashed, 10 orphans flagged in 01250101's abandoned generation 1; `fzhou_obsdb` unchanged (1238 entries, size/mtime/ctime/mode compared). No code change.
+- 2026-11-18 — Purpose and the S11 entry no longer point into the erased Phase 3 scratch folder.

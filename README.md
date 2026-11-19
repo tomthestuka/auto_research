@@ -29,7 +29,7 @@ decoupled the orchestration from `research_toolkit`: every coupling is removed o
 toolkit contract, so any toolkit that meets it pairs with the orchestration. Its second (done 2026-11-12), the data store (S3 bytes plus a
 Postgres catalog, reached only through toolkit tools), is built, the live store migrated and its live cells passed. Its software-environment stream is
 built and live-verified: the coding pipeline defines and builds environments, and each toolkit call
-runs in its package's own. The Phase 2 spec is archived in `CLAUDE_p2.md`.
+runs in its package's own. A localhost browser agent map (configure, launch, watch and steer a run; Phase 3 step 6b) is planned. The Phase 2 spec is archived in `CLAUDE_p2.md`.
 
 ---
 
@@ -67,7 +67,8 @@ Verify the deterministic tests pass (no API keys, no XSPEC needed):
 
 ```bash
 conda activate auto_research
-pytest -q          # ~477 deterministic tests; no API keys needed
+pytest -q tests   # ~3400 deterministic tests; no API keys needed
+pytest -q tests/invariants   # the Phase 3 parity oracle (CLAUDE.md §9.3 frozen per role, ~10 min)
 ```
 
 The suite is **portable**: tests that need a fully-provisioned machine (a real analysis

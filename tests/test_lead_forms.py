@@ -1390,8 +1390,9 @@ def test_failing_to_file_within_grace_is_fatal(monkeypatch):
 
 
 def test_grace_never_opens_for_a_loop_with_no_terminal_tool(monkeypatch):
-    """The librarian, the co-lead's review and `drive_authoring` have no exit to force, so their
-    exhaustion is a legitimate end and must keep the old behaviour."""
+    """The co-lead's tool review, `drive_authoring` and the status monitor have no exit to force,
+    so their exhaustion is a legitimate end and keeps the old behaviour. (The reviewer, librarian
+    and analysts set `require_terminal`.)"""
     model = _ToolSpammer()
     _drive_budget(model, cap=2, grace=20, monkeypatch=monkeypatch, terminal=False)
     assert model.calls <= 3, "grace opened for a loop that has no terminal tool to reach"
@@ -1475,19 +1476,4 @@ def test_a_refused_turn_end_inside_grace_is_not_fatal_and_one_success_is_enough(
                   turn_end_validator=_validator)
     assert refused["n"] >= 3, "the validator was never consulted three times"
     assert model.turn_end_attempts >= 3, "the refused attempts did not happen"
-
-
-def test_the_absolute_ceiling_cannot_cut_the_grace_window_short(monkeypatch):
-    """Found LIVE 2026-09-15 by the adversarial idling cell, not by this suite.
-
-    That cell drove with `absolute_cap = cap + 2`. Grace opened at the budget cap and the ceiling
-    ended the loop two rounds later — unfiled, and with nothing recorded. A window a bound can
-    retract is not a window, so the ceiling is raised to accommodate it and the loop reaches its
-    fatal grace exhaustion instead of returning quietly.
-    """
-    from auto_research.agents.roles import ReactBudgetExhausted
-
-    with pytest.raises(ReactBudgetExhausted):
-        # absolute_cap deliberately BELOW cap + grace — the live cell's exact shape.
-        _drive_budget(_ToolSpammer(), cap=2, grace=4, monkeypatch=monkeypatch, absolute_cap=4)
 

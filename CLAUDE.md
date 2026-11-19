@@ -210,11 +210,13 @@ only read ([§9.3](#93-invariants-the-unit-enforces-and-no-definition-turns-off)
   table, architecture diagram, model defaults, getting-started, environment, or
   contributor rules. A change is not complete until the README reflects it. Prefer a
   precise edit over a sweeping rewrite.
-- **Never leak governance files into runtime.** `CLAUDE.md` and any `DOCS.md` must never
+- **Never leak governance files into runtime.** This repository's `CLAUDE.md` and any `DOCS.md` must never
   be loaded into a runtime LLM's context — not as a system prompt, tool input, retrieved
   document, or otherwise. Runtime prompts come *only* from `prompts/` (see
   [§4](#4-claudemd-and-docsmd-are-build-time-only)). This includes the Phase-2 tool
-  author: its conventions live in `prompts/coder.md`, never in a `DOCS.md`.
+  author: its conventions live in `prompts/coder.md`, never in a `DOCS.md`. A toolkit's own
+  `CLAUDE.md`/`AGENTS.md` is that toolkit's contract and readable by every unit that works on or uses
+  it (ruling 2026-11-18).
 - **Never hardcode model identifiers.** All model strings live in config
   ([§6](#6-config-driven-model-registry)).
 - **Never commit secrets.** API keys live in `.env` (gitignored); ship a `.env.example`.
@@ -251,7 +253,9 @@ only read ([§9.3](#93-invariants-the-unit-enforces-and-no-definition-turns-off)
   callers that want different values.
 - **Behaviour parity is the acceptance test.** Every step lands with the deterministic suite
   green and the invariant tests ([§9.10](#910-build-order-phase-3) step 0) unchanged, plus one live
-  cell for each role whose wiring moved.
+  cell for each role whose wiring moved. The oracle is `pytest tests/invariants`: a step rewrites only
+  `tests/invariants/drivers.py` (and `test_drivers.py`); a strict xfail naming that step must pass,
+  and the step removes its marker.
 - **The execution layer is shared with the environments work.** Software environments
   (handoff [F18], closed 2026-10-07; its rulings are recorded in
   [§9.6](#96-execution-sandbox-and-environments-per-unit)) are a separate work stream that
@@ -705,6 +709,10 @@ refusal and never remove a built-in one.
    through the pipeline's worktree, none into the human's conda environments or package cache.
 8. **Contained failure.** A tool or provider exception becomes an `is_error` result or that unit's
    honest failure, never a dead run (handoff F6/F15/E2). `ReactBudgetExhausted` is never caught.
+   A fault of the harness itself (our runtime code — the receipt store, the loop, a provider class)
+   ends that unit's turn as its recorded failure, never an `is_error` result the model reads, and its
+   parent is sent a message saying so (ruling 2026-11-18: "a harness failure kills the agent, with a
+   message to its parent agent").
 9. **Inputs are validated** (user rulings 2026-11-03): the **input validator** is a standard
    component of the unit, the `turn_end` validator's twin — one binds what goes in, the other what
    leaves. Two jobs:
@@ -713,7 +721,10 @@ refusal and never remove a built-in one.
      unit's own result, or `{"value", "reason"}`; omitted, the manifest's default, passed and
      recorded), `path`, `setting`. A brief is never a source: it is informal, like a message, and
      a value it states is typed with its reason. An undeclared argument and a
-     manifest without kinds are refused. A `$ref` resolves only what the unit itself produced, so
+     manifest without kinds are refused; every tool a unit declares, harness tools included, refuses
+     an argument its schema does not declare before the call runs; a call to a tool name the unit
+     does not declare is rejected with the text "no such tool found", runs nothing and mints no
+     receipt (rulings 2026-11-18). A `$ref` resolves only what the unit itself produced, so
      no tool echo can turn another unit's value into this unit's evidence. A typed parameter's
      reason stays in the call's hashed arguments, so the value and why it was chosen sit behind
      one handle (`#/$args/<name>`). (The copy refusal, `RetypeCheck`, is removed: ruling
@@ -742,8 +753,8 @@ refusal and never remove a built-in one.
 | caps | per-role config keys | per unit |
 | input validator | `SandboxToolProvider` (tool inputs) and the provider media guard (model inputs) | one component of every unit, its rules per unit where two roles need different ones |
 
-Where definitions live — Python next to `graph/runtime.py` with values read from
-`orchestration.yaml`, or a per-unit block in the YAML — is open ([§9.11](#911-open-questions)).
+Definitions live one per file, `config/units/<name>.yaml` (ruled 2026-11-18,
+[§9.11](#911-open-questions) q1).
 
 ### 9.5 Toolkits per unit
 
@@ -877,8 +888,17 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
 ### 9.7 Subagents per unit — on/off, two kinds
 
 - **On/off by grant.** A unit with no grant declares no spawn tool. Declarations never shrink
-  mid-conversation (P2 §9.3). Depth defaults to 1: a child spawns only if its own definition grants
-  it.
+  mid-conversation (P2 §9.3). A child spawns only if its own definition grants it. **No
+  general-purpose child** (ruling 2026-11-18): a grant names definitions, a spawn instantiates one of
+  them with that definition's scope, and a spawn naming anything else is refused. Run-wide caps in
+  `orchestration.yaml` (ruling 2026-11-18): `max_agents: 20` counts every unit instance the run
+  creates, the starting units and finished ones included; `max_depth: 5` counts generations from the
+  starting units (depth 0). A definition's grant may set lower caps, never higher; a spawn past
+  either is refused.
+- **Instance identity** (ruling 2026-11-18). Every ledger event names its unit instance, its
+  definition, its parent instance and the call that spawned it; an instance id is derived from its
+  parent and that call id, so it is the same on resume. `unit.spawn` / `unit.end` events open and
+  close an instance. The agent map's run view (step 6b) is built from these events alone.
 - **Kind A — a child unit.** The child's filed report arrives in the parent's inbox with its
   receipt closure, which enters the parent's citable scope (today's peer-report rule).
   `wait_for_reply` lets time pass, and `message` resumes a finished child on its kept conversation
@@ -941,20 +961,42 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
 | # | Status | What is being built | Checkpoint (what works after) |
 |---|---|---|---|
 | 0a | Done (2026-11-10) | **Toolkit decoupling — first** (user ruling 2026-11-04; plan rulings 2026-11-09). Every coupling between `auto_research` and `research_toolkit` is removed or read through **one toolkit contract** (name, packages, template package, test classes, authoring branch). The gate becomes the **CI pipeline**: named jobs, required ones held by the orchestration (minting checks included, so every handle resolves), test classes declared by the toolkit (fast, `slow`, `live`, `data("<name>")`, a data test skipped in CI fails the commit). The analysis environment moves into the toolkit as a derived `envs/` definition; `PFILES` is declared on its external. No new coupling lands meanwhile. | A minimal fixture toolkit loads, passes the CI pipeline and runs a tool whose result is minted as evidence; every seat's existing live test passes on the default config, built from module entry points; toolkit package names in `src/` only in the store code 0b replaces and the lead's catalog read (step 3). |
-| 0b | Done (2026-11-12) | **The data store over the S3 contract** (rulings 2026-11-09/10/11, plan `tmp_phase3/0b/`; built 2026-11-10 as S0–S10, `store/DOCS.md`; the live store migrated 2026-11-11, S11; live cells passed 2026-11-12, S13). A store is S3 bytes plus a Postgres catalog: a local folder served by versitygw (with its IAM) and a Postgres the runtime starts, or a remote S3 with its catalog; the orchestration and the toolkit use only the S3 contract subset, and everything server-specific sits in two runtime adapters (key issuance: versitygw IAM users, AWS STS not built; read records: the gateway's access log, none remote). **A toolkit tool is the interface**: each agent is its own S3 user and Postgres login for the run, holding runtime-issued keys, and its role is its policy, enforced by the store and the catalog: `reader`, `producer`, the runtime's own `reconciler`, and the human's `ar_human` login in `owner`; all store I/O goes through tools. Reads are pinned to a version; writes are create-once under recipe-named keys `<bucket>/<kind>/<subject>/<short hash>/` closed by a `recipe.json` (bucket, kind and subject are opaque strings the toolkit chooses: no mission, ObsID or "raw" in `src/`); receipts carry (store, bucket, key, version_id) plus our SHA-256, minted from the store's records, never from the tool. `catalog.json` gives way to the Postgres catalog (products by recipe hash, claims, flags, "current" per (bucket, kind, subject), credentials, events); the reconciler verifies products and moves "current" automatically at each launch. The CI pipeline runs a throwaway store per test run on loopback, reached from its offline jail, seeded from declared data sets and the brief's validation records. | The obs-db is reached only through S3; a seat without the producer role cannot write it (refused by the store); the fixture toolkit's store passes the same checks; no obs-db layout or ObsID rule left in `src/`; the jails mount no store folder; the live store is migrated and healthy in preflight (S11, not yet run); every seat's live cell passes on it (S13). |
-| 0 | Todo | **Invariant freeze** — §9.3 collected as one deterministic test module over today's code, from the existing per-role tests. | Green on the current tree; it is the parity oracle for every later step. |
+| 0b | Done (2026-11-12) | **The data store over the S3 contract** (rulings 2026-11-09/10/11; built 2026-11-10 as S0–S10, `store/DOCS.md`; the live store migrated 2026-11-11, S11; live cells passed 2026-11-12, S13). A store is S3 bytes plus a Postgres catalog: a local folder served by versitygw (with its IAM) and a Postgres the runtime starts, or a remote S3 with its catalog; the orchestration and the toolkit use only the S3 contract subset, and everything server-specific sits in two runtime adapters (key issuance: versitygw IAM users, AWS STS not built; read records: the gateway's access log, none remote). **A toolkit tool is the interface**: each agent is its own S3 user and Postgres login for the run, holding runtime-issued keys, and its role is its policy, enforced by the store and the catalog: `reader`, `producer`, the runtime's own `reconciler`, and the human's `ar_human` login in `owner`; all store I/O goes through tools. Reads are pinned to a version; writes are create-once under recipe-named keys `<bucket>/<kind>/<subject>/<short hash>/` closed by a `recipe.json` (bucket, kind and subject are opaque strings the toolkit chooses: no mission, ObsID or "raw" in `src/`); receipts carry (store, bucket, key, version_id) plus our SHA-256, minted from the store's records, never from the tool. `catalog.json` gives way to the Postgres catalog (products by recipe hash, claims, flags, "current" per (bucket, kind, subject), credentials, events); the reconciler verifies products and moves "current" automatically at each launch. The CI pipeline runs a throwaway store per test run on loopback, reached from its offline jail, seeded from declared data sets and the brief's validation records. | The obs-db is reached only through S3; a seat without the producer role cannot write it (refused by the store); the fixture toolkit's store passes the same checks; no obs-db layout or ObsID rule left in `src/`; the jails mount no store folder; the live store is migrated and healthy in preflight (S11, not yet run); every seat's live cell passes on it (S13). |
+| 0 | Done (2026-11-18) | **Invariant freeze** — §9.3 collected as one deterministic test package, `tests/invariants/` (ruling 2026-11-18), over today's code: one driver per role through the production factories, clause × role tests, a clause not yet built marked `xfail(strict=True)` naming the step that builds it. | Green on the current tree; it is the parity oracle for every later step. |
 | 1 | Todo | **One unit** — `_react` + channel + report tools + `turn_end` + the input validator (§9.3.9) as one unit; the four roles become definitions with validators; exceptions contained at the unit boundary (§9.3.8). | Each role's tests pass through the unit; one live cell per role; every unit's tool and model inputs pass the one input validator. |
 | 2 | Todo | **Toolkits per unit** + the generalised evidence predicate. | Two units with different toolkits in one run; a tool of an unregistered toolkit grounds nothing. |
-| 3 | Todo | **Role formalization — access per unit** (ruling 2026-11-09: its own step). Each unit's definition declares its reach — filesystem, network, environments, store roles (0b) — enforced by the jail or the store; sandbox and execution per unit; one launcher (absorbs `jail.analysis_policy`, landed with F20). Closes the residues of unrigorous access control: [F21] [F33] [H13] [I26] [I6 E4] (handoff). | Every seat's reach is declared in its definition and enforced outside the model; jail on/off per unit; every process a unit starts goes through the launcher; a unit with no backend has no shell; the coder runs the CI pipeline's own command in the package's environment. |
+| 3 | Todo | **Role formalization — access per unit** (ruling 2026-11-09: its own step). One bwrap jail per unit holds all of its file access, the in-process file tools (`read_file`, `list_dir`, input hashing) included, and **`PathGuard` retires** (ruling 2026-11-18). Each unit's definition declares its reach — filesystem, network, environments, store roles (0b) — enforced by the jail or the store; sandbox and execution per unit; one launcher (absorbs `jail.analysis_policy`, landed with F20). Closes the residues of unrigorous access control: [F21] [F33] [H13] [I26] [I6 E4] (handoff). | Every seat's reach is declared in its definition and enforced outside the model; jail on/off per unit; every process a unit starts goes through the launcher; a unit with no backend has no shell; the coder runs the CI pipeline's own command in the package's environment. |
 | 4 | Done (2026-10-07, on today's backend, ahead of 1–3) | **Environments** — the F18 work stream's build list, plugged into the execution backend and the coding pipeline. | Receipts carry environment fingerprints; a toolkit call runs in its package's tested environment; human environments untouched. |
 | 5 | Todo | **Subagents, kind A** — grants, monotone reach, depth and count caps. | A parent spawns a child and cites its receipts; a child asking for more reach is refused. |
 | 6 | Todo | **Coding pipeline as kind B** — `author_chain` → a grant any unit may hold. | A non-lead unit authors a tool into its toolkit's branch; a `commit` receipt; registry reload. |
+| 6b | Todo | **Agent map UI** (user ruling 2026-11-18). A localhost browser UI, outside the runtime: top-level `ui/` with a FastAPI server (`ui/server/`) and a React + TypeScript frontend built with Vite (`ui/web/`; Node from conda-forge, npm pinned by lockfile, installed with scripts off; the built files are committed and served, so running needs no Node). The UI **listens** to the run's ledger (`monitor.jsonl`, streamed as SSE by sequence) and **talks** to the run only through a `ui` human channel inside the run (a Unix socket in the ledger folder: answers to the human's queries, `/steer`, `/status`, `/stop` through `dispatch_command`); the runtime never imports the UI, and the UI server imports only `auto_research.schemas` and the channel's client. Design view: unit definitions (§9.11 q1) and the topology file as a map (solid routes, dashed spawn grants), edited through forms generated from the definitions' JSON Schema, written into a working config folder (`AUTO_RESEARCH_CONFIG_DIR`), never the repo's `config/`, validated by the definition models in `auto_research.schemas` and by the runtime's own config check run as a subprocess; node positions in a separate layout file. Launch: the question, context and constraints start a detached run with `--human ui`. Run view: the instance tree from the ledger (§9.7 instance identity), node status, messages, cost, a per-unit transcript, the report. Localhost only: 127.0.0.1, a per-launch token exchanged for a cookie, a Host allow-list, strict Origin on writes, a CSP. | A run is configured, launched, watched, steered, answered and stopped from the browser; closing the browser or restarting the UI leaves the run untouched; spawned units appear under their parents; one deterministic test per security refusal; a test fails on a UI↔runtime import outside the allowed set and on a built bundle older than its source. |
 | 7 | Todo | **Live parity run** — one PI question end to end on the generalized unit. | Accepted, with a ledger of the same shape as Phase 2's. |
+
+**Notes carried to later steps** (delete a note when its step closes):
+- Step 1: flip the strict xfails naming step 1 in `tests/invariants/` (harness fault → recorded failure plus a
+  message to the parent; undeclared argument refused on every tool; undeclared tool → "no such tool found", no
+  receipt; every unit's unfiled end recorded) and remove their markers. Expose per-seat wiring and the graph's node
+  arguments as production functions that `run_research` and `tests/invariants/drivers.py` both call (the drivers
+  copy them today). Keep the ledger instance identity (§9.7) so step 6b's run view needs nothing else.
+- Step 2: receipts do not record the toolkit name, so a report rendered later under another name loses the toolkit
+  marking; a stored receipt's evidence status follows the process-bound contract, so renaming the toolkit between a
+  run and its resume flips it — record the contract name in the ledger and refuse a mismatched resume. Freeze "a
+  toolkit result grounds only where its toolkit is registered" with a second fixture toolkit registered for no unit;
+  the reviewer keeps citing handed analysis results.
+- Step 3: `_CATALOG_UTILS_KIND` hard-codes `research_toolkit.catalog_utils.data_catalog` (`agents/react.py`), going
+  with the lead's catalog read. Coders and units inherit the runtime's whole environment, so every `.env` key is
+  readable inside a networked jail: credentials per seat belong to access per unit. The worker's jail exposes a
+  toolkit's `CLAUDE.md`/`AGENTS.md`, which is intended (ruling 2026-11-18).
+- Installer: `render_orchestration` cannot write `toolkits[0].root` and `discover_toolkit` reads `toolkit_root`;
+  frozen until Phase 3 ends.
 
 ### 9.11 Open questions
 
-1. **Where definitions live:** Python next to `graph/runtime.py` with values from
-   `orchestration.yaml`, or a per-unit YAML block.
+1. ~~**Where definitions live**~~ — ruled 2026-11-18 (after a source survey of Codex, Claude Code, Google ADK, CrewAI, LangGraph/deepagents and DeepSeek's super-agent prototype):
+   one data-only YAML file per definition, `config/units/<name>.yaml` (model role, prompt file,
+   report type, validators, toolkits, reach, caps, spawn grants — each by name), validated by one
+   Pydantic model whose JSON Schema the agent map's forms use; prompts stay in `prompts/` (§4); a
+   topology file names the starting units and their routes.
 2. **Routing:** keep the LangGraph graph and `DebateToConverge`, or express routing and debate as
    kind-A spawns.
 3. ~~**Jail default when `bwrap` is missing**~~ — ruled 2026-11-09: jailing is on unconditionally; unjailed
@@ -1084,8 +1126,7 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   `xspec_status`, and the fit a `plot_fit`/`plot_iqu` figure shows act on XSPEC's in-memory session, not on
   a result passed by `$ref`, so a `run_fit` number has no parent receipt and a fit can act on whatever was
   loaded last. The runtime records this truthfully (no parent). Accepted: the human plans to retire XSPEC /
-  rewrite its tools on the kernel (ruling 2026-11-10); the session-guard plan is parked
-  (`tmp_phase3/0a/work/runfit_plan/PLAN.md`). `tests/test_live_ref_chain.py` B1 fails when a seat cites a
+  rewrite its tools on the kernel (ruling 2026-11-10); the session-guard plan is parked. `tests/test_live_ref_chain.py` B1 fails when a seat cites a
   `run_fit` or `xspec_status` result (S13, 2026-11-12: claude-sonnet-5 cited `xspec_status`).
 - **Paper values are attributed, not verified** (ruling 2026-09-24) — a model can still attribute a
   wrong number; the `paper_attributions` list makes it cheap to check.
@@ -1216,8 +1257,10 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   (`builtin_server.private_folders`, from the declaration `env_externals.heasoft.private: {PFILES: ";"}`,
   2026-11-09). A heasoftpy task object held at module level keeps its learned values in memory; a value
   without the declared separator, or a variable no external declares, gets no private folder.
-- **`PathGuard` denies governance basenames everywhere**, incl. research_toolkit's own contract —
-  ruling: leave it.
+- **`PathGuard` denies governance basenames everywhere, research_toolkit's own contract included**, in the
+  runtime process's in-process reads; the jailed shell reads the toolkit's `CLAUDE.md`/`AGENTS.md`. Ruling
+  2026-11-18: a toolkit's own contract is readable by every unit that uses it, and PathGuard retires at step 3
+  (frozen as a strict xfail in `tests/invariants/test_commit_and_roots.py`).
 - **WhatsApp/Twilio connector deprecated** — prefer `telegram` or `cli`.
 - **Telegram rich messages render `||text||` as a spoiler** (hidden until tapped); agent prose is not
   escaped for it.
@@ -1282,6 +1325,22 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   predates argument kinds); Google seats no role that receives toolkit tools.
 - **Vendor schema quirks beyond the probed positions:** GLM writes `"null"` into `str | None` fields
   [I14]; `$ref` under `allOf`/`oneOf`/`additionalProperties` unmeasured [I20].
+
+**Invariant freeze** (step 0, `tests/invariants/`, 2026-11-18)
+- **The report lock is not separately observable:** an edit after `turn_end` is refused first by the same-batch guard
+  or the resume guard (`roles._RESUME_CLOSED`); the lock (`react.lock_turn_reports`) is defence in depth. Only its
+  minting of a brief no link closed is frozen.
+- **Not frozen (no driver path):** the `synthetic` flag's propagation (needs a store in driver runs); the lead's
+  `catalog_query` as "a catalog listing" (the drivers drop the store tools).
+- **The drivers copy `run_research`'s wiring and the graph's node arguments** (`drivers.py`); a graph regression is
+  invisible to the oracle until step 1 exposes per-seat wiring as production functions both call.
+- **Observed while freezing:** the librarian's `search_literature` and `text_search` mint no receipt, though
+  `NOT_EVIDENCE_NAMES` lists `search_literature`; `Receipt.commit_sha` / `toolkit_commit` stay empty on a `commit`
+  receipt (its record holds the SHA); a declared product records no parent receipt (tied to its call by call id and
+  folder).
+- **A toolkit's own `CLAUDE.md`/`AGENTS.md` is refused to `read_file`** (PathGuard) though readable by ruling
+  (2026-11-18); strict xfail until step 3 retires PathGuard. This repository is mounted in no jail.
+- **Cost:** the oracle runs ~9–12 min serially (each run starts a jailed shell server; coding-pipeline cells ~13 s).
 
 **Benchmarks**
 - **Benchmarks parked** (human ruling 2026-11-10): `gate_bench`, `author_bench` and `science_bench`
@@ -1405,13 +1464,13 @@ Compacted 2026-10-19 (every entry); detail in git history.
   (Claude Opus 5); a commit finding naming no changed file is the auditor's error, never scored.
 - 2026-11-05 — §10: live tests opt in by the `live` marker and `--live` (`tests/conftest.py`); the per-file
   switches retire, except those guarding a message to a person or a destructive step.
-- 2026-11-09 — §9.10 (user rulings, plan `tmp_phase3/0a/`): 0a sharpened — one toolkit contract, the gate becomes the CI
+- 2026-11-09 — §9.10 (user rulings): 0a sharpened — one toolkit contract, the gate becomes the CI
   pipeline (required jobs held by the orchestration, minting checks among them; toolkit-declared test classes incl.
   `data("<name>")`), the analysis environment into the toolkit, `PFILES` on its external; new step 0b, the data store
   (store-defined roles held per unit, a recorder process, fingerprint/check/copy, argument kinds `store`/`record`);
   step 3 becomes role formalization (access per unit), absorbing [F21] [F33] [H13] [I26] [I6 E4]. Topology stays
   open on top of the abstraction (§9.11 q2).
-- 2026-11-09 — **Step 0a built** (plan `tmp_phase3/0a/`, rulings D1–D26): §4 the domain is the toolkit's
+- 2026-11-09 — **Step 0a built** (rulings D1–D26): §4 the domain is the toolkit's
   (prompts point to its READMEs); §8 the gate is the **CI pipeline** (required jobs incl. minting; test
   classes fast/`slow`/`live`/`data("<name>")`; every test of a change runs; live tests listed for the
   co-lead) and the jail is **on unconditionally** (no `agent_os_jail`; no toolkit code in the orchestrator
@@ -1424,7 +1483,7 @@ Compacted 2026-10-19 (every entry); detail in git history.
   `run_research` with a real librarian), worker (`test_live_ref_chain.py` rewritten on today's `xspec_utils`, test
   data mounted read-only for that test only), coder mechanism cells and the pressure cell (pin → toolkit main
   45348d8) pass. §13: XSPEC session tools carry no ancestry (accepted; XSPEC to be retired, user ruling).
-- 2026-11-10 — §9.10 row 0b rewritten for the S3 contract (user rulings 2026-11-10, plan `tmp_phase3/0b/`): local folder served as S3 by a runtime-started gateway or a remote S3; a tool is the interface; one S3 user per agent with its role as policy; pinned reads, receipts from the store's records; `catalog.json` retired; server-specific code in two adapters.
+- 2026-11-10 — §9.10 row 0b rewritten for the S3 contract (user rulings 2026-11-10): local folder served as S3 by a runtime-started gateway or a remote S3; a tool is the interface; one S3 user per agent with its role as policy; pinned reads, receipts from the store's records; `catalog.json` retired; server-specific code in two adapters.
 - 2026-11-11 — **Step 0b built (S0–S10), docs synced (S12)**; S11 (migration) and S13 (live cells) remain, the row
   stays Todo. §7: store objects named by (store, bucket, key, version_id) + the runtime's SHA-256 from the store's
   records; flags stamped on catalog products and derived through ancestry; evidence predicate names a declared
@@ -1438,10 +1497,31 @@ Compacted 2026-10-19 (every entry); detail in git history.
 - 2026-11-11 — §10: `tests/test_full_suite.py` (Phase 1 fixture) deprecated and deleted (human ruling); end-to-end behaviour is exercised by the per-role live cells and end-to-end live runs.
 - 2026-11-11 — §8, §9.10, §13: the live store is migrated (S11): `/xray02/fzhou_db/` holds 23 raw products and 5
   spectra, every object hashed, 21 "current"; `fzhou_obsdb` unchanged, kept until the human's go. S13 remains.
-- 2026-11-12 — **Step 0b Done.** S13 live seat sweep on the migrated store (~$34, record
-  `tmp_phase3/0b/records_S13_live_sweep.md`): status monitor, lead, librarian, reviewer (four cells), worker
+- 2026-11-12 — **Step 0b Done.** S13 live seat sweep on the migrated store (~$34): status monitor, lead, librarian, reviewer (four cells), worker
   pair, coder mechanism cells and the pressure cell (`store` brief, toolkit `04b294d`: shortcut caught by the
   CI pipeline, honest commit) pass; the worker B1 cell passes on GPT and fails on Claude only by the accepted
   XSPEC residual (§13, now naming `xspec_status`). The worker cell accepts a cited `data_catalog` listing that
   names the record a load read (a record argument is typed, never a reference). The refused-write and
   concurrent-recipe cells were dropped: both refusals are the store's own, pinned against the real servers.
+- 2026-11-18 — **Agent map UI and definition rulings** (user). §9.10 new step 6b:
+  a localhost UI outside the runtime (`ui/`: FastAPI + React/TypeScript built with Vite, npm accepted for the frontend only),
+  listening to the ledger and talking to the run only through a `ui` human channel. §9.11 q1 ruled: one data-only YAML per
+  unit definition, `config/units/<name>.yaml` (§9.4 updated). §9.7: spawn caps `max_agents: 20`, `max_depth: 5` (run-wide;
+  a grant may only lower them) and instance identity on every ledger event (instance, definition, parent, spawning call).
+- 2026-11-18 — §9.7: no general-purpose child (user ruling): a spawn grant names definitions and a spawn of anything else
+  is refused. §9.10 row 0: the freeze is the package `tests/invariants/`, unbuilt clauses strict-xfail (user rulings).
+- 2026-11-18 — §9.3.8, §9.3.9 (user rulings, from the step-0 freeze review): a harness fault ends the unit's turn as its
+  recorded failure, never an `is_error` result, with a message to its parent; every tool a unit declares, harness tools included, refuses an
+  undeclared argument before the call runs (built at step 1; frozen as strict xfails in `tests/invariants/`).
+- 2026-11-18 — §9.3.9 (user ruling): a call to a tool name the unit does not declare is rejected with "no such tool
+  found", runs nothing and mints no receipt (today the worker mints a `Tool not registered` receipt; built at step 1).
+- 2026-11-18 — **Step 0 Done: the invariant freeze** (rulings 2026-11-18). `tests/invariants/`: one driver
+  layer building the four seats as `run_research` does (model scripted beneath a real `ModelHandle`; real jail, gate,
+  co-lead hook, commit), clause × role tests for §9.3.1–9 and §2b, unbuilt clauses strict xfail naming steps 1, 2 and 5;
+  three stateless reviews (R1, R2, bounded R3), every can't-fail finding closed by a regression probe. §3 names the
+  oracle; §13 gains the "Invariant freeze" group. Suite: invariants 199 passed / 2 skipped / 28 xfailed; non-live
+  3602 passed / 7 skipped / 28 xfailed (45 min).
+- 2026-11-18 — Rulings (user): a toolkit's own `CLAUDE.md`/`AGENTS.md` is readable by every unit that uses it (§3,
+  §13); step 3 gives each unit one bwrap jail for all its file access and retires `PathGuard` (§9.10 row 3).
+  CLAUDE.md is self-contained: `tmp_phase3/` is erased, its live notes moved under §9.10 ("Notes carried to later
+  steps"), and references to it removed.
